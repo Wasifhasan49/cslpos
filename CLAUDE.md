@@ -8,7 +8,8 @@ CSL Technologies' first retail store (Computer Services, Shop 9 & 10, BCS Comput
 Agargaon) uses **BMS Smart Trader** by Billing Master Software Ltd, about 2,000 BDT/month.
 Most shops in the market use it too. CSL wants a simpler replacement, proven in its own
 store first (management agreed), then sold to other shops. It runs **alongside BMS** at
-first, not instead of it. Built solo by Wasif.
+first, not instead of it. Built solo by Wasif. It is a product for MANY shops, including
+chains with many branches; CSL's single-branch store is only the first customer.
 
 ### What we learned from studying BMS (68 photos + a filmed sale, Oct 2026)
 
@@ -69,6 +70,11 @@ first, not instead of it. Built solo by Wasif.
 
 ## Next steps (in rough order)
 
+The full build plan, as step-by-step prompts, is in `docs/BUILD_PROMPTS.md` (P0–P18):
+branches, setup lists, price lists, purchase orders, transfers and full accounts
+are all in scope because this is sold to many shops, including multi-branch chains.
+The list below is the original short version; BUILD_PROMPTS.md wins where they differ.
+
 1. **Supabase project + real logins** for the store's staff; set manager PINs (needs a small
    "Set my PIN" screen for managers; today it's `select set_pin('…')`).
 2. **Import from BMS**: CSV/Excel import of products (code, name, brand, category, price,
@@ -83,7 +89,7 @@ first, not instead of it. Built solo by Wasif.
 9. Product/price management screens for owners (today: SQL editor).
 10. Before charging other shops: paid Supabase + Vercel plans, backups, error monitoring (Sentry).
 
-Not planned for v1: accounts/vouchers, HR, purchase orders/requisitions, branch transfers.
+Not planned yet: HR, sales orders with advance payment, SR targets (see BUILD_PROMPTS.md).
 
 ## Checks to run before shipping
 
