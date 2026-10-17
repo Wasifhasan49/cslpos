@@ -1,36 +1,80 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# CSL Counter
 
-## Getting Started
+A fast, simple sales counter for computer shops. Built first for CSL's own store
+(Computer Services, BCS Computer City) to run alongside BMS Smart Trader, then to
+sell to other shops.
 
-First, run the development server:
+A sale takes about 4 actions: scan or search → quantity → payment → complete.
+The filmed BMS sale took about 14 clicks and 50 seconds.
+
+## What works today
+
+- **Counter screen**: one search box (works with any USB barcode scanner), category
+  filters, prices fill in from the owner's price list, stock shown on every product.
+- **Serial items** (laptops, RAM, SSDs, routers): the sale won't go through until a
+  serial number is picked. Sold serials leave stock.
+- **Discount limits**: each staff member has a limit (default 5%). Above it, a
+  manager types their PIN. Every approval is logged.
+- **Payments**: cash (with change worked out and quick cash buttons), bKash, Nagad
+  (transaction ID), card (last 4 digits).
+- **Receipt**: invoice number, serial numbers, warranty end date per item,
+  payment details. Prints on an 80 mm receipt printer or A4.
+- **Counter staff never see cost prices.** The database enforces this, not just the screen.
+- **Demo mode**: runs with sample data and no setup, so anyone can try it.
+
+## Try it (demo mode, 2 minutes)
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
+pnpm install
 pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000. No keys needed. The demo manager PIN is `1234`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Connect a real database (Supabase)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. Create a Supabase project (region: Singapore is closest to Dhaka).
+2. In the SQL editor, run `supabase/migrations/20261017000001_init.sql`, then
+   `supabase/seed.sql` (sample products, replace later with the BMS export).
+   Or with the Supabase CLI: `supabase link` then `supabase db push`.
+3. Copy `.env.example` to `.env.local` and fill in the project URL and anon key.
+4. Create logins in Supabase → Authentication → Users (email + password), then link
+   each one to the shop in the SQL editor:
 
-## Learn More
+   ```sql
+   insert into staff (shop_id, user_id, name, role, discount_limit_pct)
+   values ('00000000-0000-4000-8000-000000000001', '<auth user id>', 'Ovi', 'cashier', 5);
+   ```
 
-To learn more about Next.js, take a look at the following resources:
+   Use role `owner` or `manager` for people who can approve discounts.
+5. Set each manager's or owner's approval PIN (4–6 digits) in the SQL editor:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+   ```sql
+   update staff set pin_hash = extensions.crypt('4821', extensions.gen_salt('bf'))
+   where name = 'Owner name';
+   ```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+   (There's also a `set_pin()` function for a future "Set my PIN" screen.)
+6. `pnpm dev`, open http://localhost:3000, sign in.
 
-## Deploy on Vercel
+## Checks
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```bash
+pnpm test        # sale rules, totals, demo backend (vitest)
+pnpm typecheck
+pnpm lint
+pnpm test:db     # migration + 20 database rule checks on a local Postgres
+                 # needs psql and a running Postgres: PGHOST/PGPORT/PGUSER env vars
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## How it's built
+
+- Next.js 15 (App Router) + TypeScript + Tailwind 4 + shadcn-style components + Zustand
+- Supabase: Postgres, logins, row-level security
+- `src/lib/backend/` has one interface with two versions: `demo.ts` (in the browser)
+  and `supabase.ts`. The screens don't know which one they're talking to.
+- `src/lib/sale.ts` holds the sale rules for instant feedback on screen.
+  The database function `complete_sale()` checks the same rules again and is the
+  only way a sale gets saved. Prices always come from the database, never the browser.
+
+See `CLAUDE.md` for decisions, background and next steps.

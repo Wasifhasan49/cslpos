@@ -1,26 +1,50 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* CSL POS colours. Light only: a shop counter under bright lights. */
+@theme {
+  --color-ground: #f3f4f0;
+  --color-surface: #ffffff;
+  --color-subtle: #eef0eb;
+  --color-line: #dce0d8;
+  --color-line-strong: #b8bfb4;
+  --color-ink: #17211d;
+  --color-ink-soft: #3e4842;
+  --color-muted: #55605a;
+  --color-brand: #0b6b4f;
+  --color-brand-strong: #08573f;
+  --color-focus: #e8a33d;
+  --color-ok-bg: #e3f2ec;
+  --color-ok-ink: #0b4f3b;
+  --color-warn-bg: #fff3d6;
+  --color-warn-line: #e8c47a;
+  --color-warn-ink: #5c3a00;
+  --color-bad-bg: #fdecec;
+  --color-bad-ink: #9b1c1c;
+  --color-info-bg: #eaf0f7;
+  --color-info-ink: #1f3f66;
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+html, body {
+  background: var(--color-ground);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+.num {
+  font-variant-numeric: tabular-nums;
+}
+/* Product codes and serial numbers: monospace so similar characters are easy to tell apart. */
+.code {
+  font-family: var(--font-mono);
+  letter-spacing: 0.01em;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* Printing: only the receipt, sized for an 80 mm roll (also fine on A4). */
+@media print {
+  @page { margin: 4mm; }
+  body * { visibility: hidden; }
+  #print-receipt, #print-receipt * { visibility: visible; }
+  #print-receipt { position: absolute; left: 0; top: 0; width: 72mm; font-size: 11px; color: #000; }
 }
