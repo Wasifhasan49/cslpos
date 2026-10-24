@@ -2,7 +2,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { friendlyError } from "../sale";
 import { supabaseBrowser } from "../supabase/client";
 import type {
-  ApprovalResult, Approver, Category, PaymentMethod, Product, Receipt, SaleInput, StaffLookup,
+  ApprovalResult, Approver, BranchAdmin, Category, PaymentMethod, Product, Receipt, Role,
+  SaleInput, StaffLookup, StaffMember,
 } from "../types";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
 import type { Backend } from "./types";
@@ -54,26 +55,22 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
       return data ?? [];
     },
 
-    async listProducts(): Promise<Product[]> {
-      const [{ data: rows, error }, { data: serials, error: sErr }] = await Promise.all([
-        sb.from("products")
-          .select("id, code, barcode, name, brand, category_id, price, warranty_months, is_serial, stock")
-          .eq("active", true)
-          .order("name"),
-        sb.from("serials").select("id, serial, product_id").eq("status", "in_stock").order("serial"),
-      ]);
+    async listProducts(branchId: string): Promise<Product[]> {
+      // One call: the database joins this branch's stock and its in-stock serials, so
+      // the browser never has to be trusted with which branch it is looking at.
+      const { data, error } = await sb.rpc("branch_products", { p_branch_id: branchId });
       if (error) throw loadError("products", error);
-      if (sErr) throw loadError("serial numbers", sErr);
-      const byProduct = new Map<string, { id: string; serial: string }[]>();
-      for (const s of serials ?? []) {
-        const list = byProduct.get(s.product_id) ?? [];
-        list.push({ id: s.id, serial: s.serial });
-        byProduct.set(s.product_id, list);
-      }
-      return (rows ?? []).map((r) => ({
-        id: r.id, code: r.code, barcode: r.barcode, name: r.name, brand: r.brand, categoryId: r.category_id,
-        price: num(r.price), warrantyMonths: r.warranty_months, isSerial: r.is_serial, stock: r.stock,
-        serials: byProduct.get(r.id) ?? [],
+      type Row = {
+        id: string; code: string; barcode: string | null; name: string; brand: string | null;
+        category_id: string | null; price: number | string; warranty_months: number;
+        is_serial: boolean; reorder_level: number; stock: number | string;
+        serials: { id: string; serial: string }[];
+      };
+      return ((data as Row[] | null) ?? []).map((r) => ({
+        id: r.id, code: r.code, barcode: r.barcode, name: r.name, brand: r.brand,
+        categoryId: r.category_id, price: num(r.price), warrantyMonths: r.warranty_months,
+        isSerial: r.is_serial, reorderLevel: r.reorder_level, stock: num(r.stock),
+        serials: r.serials ?? [],
       }));
     },
 
@@ -110,6 +107,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
 
     async completeSale(input: SaleInput): Promise<Receipt> {
       const { data, error } = await sb.rpc("complete_sale", {
+        p_branch_id: input.branchId,
         p_items: input.lines.map((l) => ({ product_id: l.productId, qty: l.qty, serial_ids: l.serialIds })),
         p_payment_method: input.paymentMethod,
         p_discount_pct: input.discountPct,
@@ -127,6 +125,9 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
       return {
         id: String(r.id), invoiceNo: String(r.invoice_no), createdAt: String(r.created_at),
         staffName: String(r.staff_name), shopName: String(r.shop_name), shopAddress: (r.shop_address as string | null) ?? null,
+        branchName: String(r.branch_name ?? ""),
+        branchAddress: (r.branch_address as string | null) ?? null,
+        branchPhone: (r.branch_phone as string | null) ?? null,
         subtotal: num(r.subtotal), discountPct: num(r.discount_pct), discountAmount: num(r.discount_amount), total: num(r.total),
         paymentMethod: r.payment_method as PaymentMethod,
         cashReceived: numOrNull(r.cash_received), changeGiven: numOrNull(r.change_given),
@@ -137,6 +138,91 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
 
     async signOut() {
       await sb.auth.signOut();
+    },
+
+    // --- Settings → Branches. Every one of these is owner-only IN THE DATABASE; the
+    // menu hiding them is a convenience, not the guard. ---
+
+    async listBranches(): Promise<BranchAdmin[]> {
+      const [{ data: rows, error }, { data: locs, error: lErr }] = await Promise.all([
+        sb.from("branches").select("id, name, code, address, phone, active, next_invoice").order("name"),
+        sb.from("stock_locations").select("id, branch_id, name, is_default").eq("active", true).order("name"),
+      ]);
+      if (error) throw loadError("branches", error);
+      if (lErr) throw loadError("stock locations", lErr);
+      const byBranch = new Map<string, { id: string; name: string; isDefault: boolean }[]>();
+      for (const l of locs ?? []) {
+        const list = byBranch.get(l.branch_id) ?? [];
+        list.push({ id: l.id, name: l.name, isDefault: l.is_default });
+        byBranch.set(l.branch_id, list);
+      }
+      return (rows ?? []).map((b) => ({
+        id: b.id, name: b.name, code: b.code,
+        address: b.address, phone: b.phone, active: b.active,
+        nextInvoice: b.next_invoice,
+        locations: byBranch.get(b.id) ?? [],
+      }));
+    },
+
+    async saveBranch(input): Promise<void> {
+      const { error } = await sb.rpc("save_branch", {
+        p_branch_id: input.id ?? null,
+        p_name: input.name ?? null,
+        p_code: input.code ?? null,
+        p_address: input.address ?? null,
+        p_phone: input.phone ?? null,
+        p_active: input.active ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async saveStockLocation(input): Promise<void> {
+      const { error } = await sb.rpc("save_stock_location", {
+        p_branch_id: input.branchId,
+        p_name: input.name,
+        p_location_id: input.locationId ?? null,
+        p_is_default: input.isDefault ?? false,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async listStaff(): Promise<StaffMember[]> {
+      const [{ data: rows, error }, { data: links, error: lErr }] = await Promise.all([
+        sb.from("staff").select("id, name, role, discount_limit_pct, active").order("name"),
+        sb.from("staff_branches").select("staff_id, branch_id"),
+      ]);
+      if (error) throw loadError("the staff list", error);
+      if (lErr) throw loadError("branch assignments", lErr);
+      const byStaff = new Map<string, string[]>();
+      for (const l of links ?? []) {
+        byStaff.set(l.staff_id, [...(byStaff.get(l.staff_id) ?? []), l.branch_id]);
+      }
+      return (rows ?? []).map((r) => ({
+        id: r.id, name: r.name, role: r.role as Role,
+        discountLimitPct: num(r.discount_limit_pct), active: r.active,
+        // pin_hash is never readable, so "has a PIN" is not shown in this list; the
+        // person sees it on their own /pin screen.
+        hasPin: false,
+        branchIds: byStaff.get(r.id) ?? [],
+      }));
+    },
+
+    async setStaffBranches(staffId: string, branchIds: string[]): Promise<void> {
+      const { error } = await sb.rpc("set_staff_branches", {
+        p_staff_id: staffId,
+        p_branch_ids: branchIds,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async setStaffAccess({ staffId, role, discountLimitPct, active }): Promise<void> {
+      const { error } = await sb.rpc("set_staff_access", {
+        p_staff_id: staffId,
+        p_role: role ?? null,
+        p_discount_limit_pct: discountLimitPct ?? null,
+        p_active: active ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
     },
   };
 }

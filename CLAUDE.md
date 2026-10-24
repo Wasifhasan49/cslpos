@@ -58,7 +58,18 @@ chains with many branches; CSL's single-branch store is only the first customer.
   It used to switch on whenever the keys were absent, so a production deploy with one
   forgotten env var served an open, sign-in-free counter. A half-filled `.env.local` is
   a config error, not demo mode.
-- **Multi-shop from day one**: every table has `shop_id`; RLS limits each login to its shop.
+- **Multi-shop AND multi-branch from day one**: every table has `shop_id`; anything that
+  happens at a place (stock, serials, sales, shifts, movements) also has `branch_id`.
+  The catalogue (products, categories, customers) is shop-wide, because a product is the
+  same product everywhere. `current_branch_ids()` is the one source of truth for where a
+  login may work; owners get every branch without a `staff_branches` row, so adding a
+  branch can never lock the owner out of it. Stock lives in `branch_stock(product_id,
+  location_id, qty)` — `products.stock` is gone, because it could only describe one place.
+  Document numbers are per branch: `<shop prefix>-<branch code>-<year><6 digits>`.
+- **Navigation rules are data**, in `src/lib/nav.ts`: one list says who sees which
+  section, `canSee()` answers it, and the same function backs both the menu and the
+  server guard (`src/lib/guard.ts`) so they cannot disagree. Cashiers get at most 3 phone
+  tabs. Owner-only sections can be shared with managers by a settings flag.
 - **Rules live in the database.** Sales, stock and serials have no insert/update policies;
   they change only through `complete_sale()` and `receive_stock()` (security definer).
   `complete_sale()` reads prices from `products`, checks stock, serials, discount limit,
@@ -116,9 +127,8 @@ The list below is the original short version; BUILD_PROMPTS.md wins where they d
    `pnpm staff:add`, `pnpm check`, and the `/pin` screen all exist. Still outstanding from
    P0: the migration has never been applied to a live Supabase project, so the end-to-end
    acceptance test (sell a splitter, approve a discount) has not been run against one.
-2. **Import from BMS**: CSV/Excel import of products (code, name, brand, category, price,
-   warranty, serial flag, stock) and serials. Fix category typos while importing.
-3. **Stock in** screen (calls `receive_stock()`), with serial scanning for serial items.
+2. ~~**Branches, app shell and roles**~~ — done (P1).
+3. **Import from BMS**: CSV/Excel import of products and serials (P4).
 4. **Owner dashboard** (phone-first), see product decisions above.
 5. **Shifts + cash check**: open with opening cash, close with counted cash; flag shortfalls.
    Tables exist (`shifts`); `complete_sale()` already links sales to the open shift.

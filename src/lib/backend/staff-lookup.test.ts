@@ -9,6 +9,9 @@ const row: CurrentStaffRow = {
   discount_limit_pct: "5.00", // Postgres numerics arrive as strings
   shop_name: "Demo Shop",
   has_pin: false,
+  branches: [
+    { id: "b1", name: "Main branch", code: "MB", locations: [{ id: "e1", name: "Main store", is_default: true }] },
+  ],
 };
 
 // These three outcomes are the whole reason the "not linked to a shop" card exists.
@@ -37,7 +40,29 @@ describe("classifyStaffLookup", () => {
     expect(got.staff).toEqual({
       id: "s1", name: "Ovi", role: "cashier",
       discountLimitPct: 5, shopName: "Demo Shop", hasPin: false,
+      branches: [
+        { id: "b1", name: "Main branch", code: "MB", locations: [{ id: "e1", name: "Main store", isDefault: true }] },
+      ],
     });
+  });
+
+  it("keeps the branches this person may work in, so the switcher has something to show", () => {
+    const got = classifyStaffLookup({
+      user: {},
+      row: { ...row, branches: [
+        { id: "b1", name: "Main branch", code: "MB", locations: [{ id: "e1", name: "Main store", is_default: true }] },
+        { id: "b2", name: "Second branch", code: "SB", locations: [{ id: "e2", name: "Main store", is_default: true }] },
+      ] },
+    });
+    if (got.kind !== "ok") throw new Error("unreachable");
+    expect(got.staff.branches.map((b) => b.code)).toEqual(["MB", "SB"]);
+    expect(got.staff.branches[0].locations[0].isDefault).toBe(true);
+  });
+
+  it("survives a row with no branches rather than crashing the counter", () => {
+    const got = classifyStaffLookup({ user: {}, row: { ...row, branches: undefined as never } });
+    if (got.kind !== "ok") throw new Error("unreachable");
+    expect(got.staff.branches).toEqual([]);
   });
 
   it("carries has_pin through, so the PIN screen can say Set or Change", () => {

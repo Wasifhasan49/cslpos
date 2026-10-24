@@ -153,6 +153,9 @@ export const SALE_ERROR_CODES = [
   "PAYMENT_REF_REQUIRED", "BAD_PHONE", "PRODUCT_NOT_FOUND", "BAD_QTY",
   "BAD_DISCOUNT", "BAD_PAYMENT_METHOD", "BAD_PIN", "WEAK_PIN", "NOT_MANAGER",
   "NOT_OWNER", "NO_SELF_EDIT", "STAFF_NOT_FOUND", "LAST_OWNER", "BAD_ROLE", "BAD_LIMIT",
+  "BRANCH_REQUIRED", "BRANCH_NOT_ALLOWED", "BRANCH_NOT_FOUND", "BRANCH_NAME_REQUIRED",
+  "BAD_BRANCH_CODE", "LAST_BRANCH", "NO_STOCK_LOCATION", "LOCATION_NAME_REQUIRED",
+  "LOCATION_NOT_FOUND",
 ] as const;
 
 /** Split a Postgres error message into its code and the detail after the first colon.
@@ -202,6 +205,15 @@ export function friendlyError(raw: string): string {
     case "LAST_OWNER": return "This is the shop's last owner. Make someone else an owner first.";
     case "BAD_ROLE": return `"${detail ?? ""}" isn't a role. Use owner, manager or cashier.`;
     case "BAD_LIMIT": return "A discount limit must be between 0 and 100.";
+    case "BRANCH_REQUIRED": return "Pick which branch this is for.";
+    case "BRANCH_NOT_ALLOWED": return "You aren't set up to work in that branch. Ask the owner.";
+    case "BRANCH_NOT_FOUND": return "That branch isn't in this shop.";
+    case "BRANCH_NAME_REQUIRED": return "Give the branch a name.";
+    case "BAD_BRANCH_CODE": return "A branch code is 1 to 6 capital letters or digits, like MB.";
+    case "LAST_BRANCH": return "This is the shop's last branch. Add another one before turning this off.";
+    case "NO_STOCK_LOCATION": return `${detail ?? "That branch"} has no stock location yet. Add one in Settings → Branches.`;
+    case "LOCATION_NAME_REQUIRED": return "Give the stock location a name.";
+    case "LOCATION_NOT_FOUND": return "That stock location isn't in this branch.";
     // Keep the raw text so a code we have not seen can still be reported and fixed,
     // instead of everything looking like a network problem.
     default: return `Something went wrong. Tell the owner this: ${raw.trim().slice(0, 120)}`;

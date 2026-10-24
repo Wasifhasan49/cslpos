@@ -1,27 +1,26 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
-import { KeyRound, LogOut, PackageOpen } from "lucide-react";
-import { NoShopCard } from "@/components/no-shop-card";
+import { useSearchParams } from "next/navigation";
+import { PackageOpen } from "lucide-react";
+import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
-import { getBackend } from "@/lib/backend";
 import { computeTotals, isSessionExpired, parseDiscount, saleBlocker, searchProducts } from "@/lib/sale";
 import { useSale } from "@/lib/store/sale-store";
-import type { Approver, Category, Product, Receipt, Staff } from "@/lib/types";
+import type { Approver, Category, Product, Receipt } from "@/lib/types";
 import { ProductPicker } from "./product-picker";
 import { ReceiptDialog } from "./receipt-dialog";
 import { SalePanel } from "./sale-panel";
 
 export function CounterScreen() {
-  const backend = React.useMemo(() => getBackend(), []);
+  // Who and where comes from the shell, so switching branch re-renders the counter
+  // with that branch's stock rather than reloading the whole app.
+  const { backend, staff, branch, branches } = useStaff();
   const sale = useSale();
+  const denied = useSearchParams().get("denied");
   const searchRef = React.useRef<HTMLInputElement>(null);
   const flashTimer = React.useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  const [staff, setStaff] = React.useState<Staff | null>(null);
-  const [noShopEmail, setNoShopEmail] = React.useState<string | null>(null);
-  const [noShop, setNoShop] = React.useState(false);
   const [categories, setCategories] = React.useState<Category[]>([]);
   const [products, setProducts] = React.useState<Product[]>([]);
   const [approvers, setApprovers] = React.useState<Approver[]>([]);
@@ -35,7 +34,6 @@ export function CounterScreen() {
   const [pinMessage, setPinMessage] = React.useState("");
   const [checkingPin, setCheckingPin] = React.useState(false);
   const [approvedBy, setApprovedBy] = React.useState<string | null>(null);
-  const [menuOpen, setMenuOpen] = React.useState(false);
   const [receipt, setReceipt] = React.useState<Receipt | null>(null);
 
   const say = React.useCallback((msg: string) => {
@@ -46,27 +44,24 @@ export function CounterScreen() {
   React.useEffect(() => () => clearTimeout(flashTimer.current), []);
 
   const loadProducts = React.useCallback(async () => {
-    setProducts(await backend.listProducts());
-  }, [backend]);
+    setProducts(await backend.listProducts(branch.id));
+  }, [backend, branch.id]);
 
+  // Reloads whenever the branch changes: stock and serials are per branch, so the
+  // catalogue the counter shows has to change with it.
   React.useEffect(() => {
     let cancelled = false;
+    setLoading(true);
     (async () => {
       try {
-        const me = await backend.currentStaff();
-        if (cancelled) return;
-        // Three outcomes, not two. A failed lookup throws instead of landing here, so a
-        // network blip can never be mistaken for a sign-out.
-        if (me.kind === "signed-out") { window.location.assign("/login?next=%2Fcounter"); return; }
-        if (me.kind === "no-staff") { setNoShopEmail(me.email); setNoShop(true); setLoading(false); return; }
-        setStaff(me.staff);
         const [cats, prods, apprs] = await Promise.all([
-          backend.listCategories(), backend.listProducts(), backend.listApprovers(),
+          backend.listCategories(), backend.listProducts(branch.id), backend.listApprovers(),
         ]);
         if (cancelled) return;
         setCategories(cats);
         setProducts(prods);
         setApprovers(apprs);
+        setLoadError("");
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : "Couldn't load the shop.");
       } finally {
@@ -74,7 +69,20 @@ export function CounterScreen() {
       }
     })();
     return () => { cancelled = true; };
-  }, [backend]);
+  }, [backend, branch.id]);
+
+  // A part-built sale belongs to the branch it was started in, so switching clears it
+  // rather than quietly moving the lines to another branch's stock.
+  const lastBranch = React.useRef(branch.id);
+  React.useEffect(() => {
+    if (lastBranch.current !== branch.id) {
+      lastBranch.current = branch.id;
+      useSale.getState().reset();
+      setReceipt(null);
+      setApprovedBy(null);
+      setPinMessage("");
+    }
+  }, [branch.id]);
 
   const byId = React.useMemo(() => new Map(products.map((p) => [p.id, p])), [products]);
   const results = React.useMemo(() => searchProducts(products, query, categoryId), [products, query, categoryId]);
@@ -133,6 +141,7 @@ export function CounterScreen() {
     try {
       const r = await backend.completeSale({
         lines: sale.lines,
+        branchId: branch.id,
         paymentMethod: sale.method,
         discountPct,
         approvalId: discountPct > (staff?.discountLimitPct ?? 0) ? sale.approvalId : null,
@@ -166,90 +175,34 @@ export function CounterScreen() {
   if (loading) {
     return <div className="flex min-h-screen items-center justify-center text-muted">Loading the shop…</div>;
   }
-  if (noShop) return <NoShopCard email={noShopEmail} />;
-  if (loadError || !staff) {
+  if (loadError) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-3 p-6 text-center">
-        <p className="text-bad-ink">{loadError || "Couldn't load the shop."}</p>
+        <p className="text-bad-ink">{loadError}</p>
         <Button onClick={() => window.location.reload()}>Try again</Button>
       </div>
     );
   }
 
-  const today = new Date().toLocaleDateString("en-GB", { timeZone: "Asia/Dhaka", weekday: "short", day: "numeric", month: "short", year: "numeric" });
-
   return (
-    <div className="flex min-h-screen flex-col">
-      <header className="flex flex-wrap items-center justify-between gap-3 bg-ink px-6 py-3 text-white">
-        <div className="flex items-center gap-3.5">
-          <div className="flex size-9 items-center justify-center rounded-lg bg-brand text-sm font-bold">CSL</div>
-          <div className="flex flex-col">
-            <span className="text-[17px] font-semibold">Counter</span>
-            <span className="text-[13px] text-[#c9d2cc]">{staff.shopName}</span>
-          </div>
-          {backend.mode === "demo" && (
-            <span className="rounded-full bg-focus px-2.5 py-0.5 text-xs font-semibold text-ink">Demo mode · sample data</span>
-          )}
+    <>
+      {/* Why a nav click bounced them here. The menu hides sections a role cannot
+          open, but a typed-in URL still has to say something. */}
+      {denied && (
+        <div role="alert" className="border-b border-warn-line bg-warn-bg px-4 py-2.5 text-sm font-semibold text-warn-ink sm:px-6">
+          {denied}
         </div>
-        <div className="flex flex-wrap items-center gap-4 text-sm">
-          <span className="text-[#c9d2cc]">{today}</span>
-          {/* The PIN link lives in here, not in the header itself: the header already
-              wraps to two rows at 390px, and setting a PIN is a once-a-year task. */}
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setMenuOpen((v) => !v)}
-              aria-expanded={menuOpen}
-              aria-haspopup="menu"
-              className="flex min-h-11 items-center gap-2 rounded-lg px-2 py-1 hover:bg-white/10 focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus"
-            >
-              <span className="flex size-7 items-center justify-center rounded-full bg-[#2c3a34] text-xs font-semibold">
-                {staff.name.slice(0, 2).toUpperCase()}
-              </span>
-              <span>{staff.name} · <span className="capitalize">{staff.role}</span></span>
-            </button>
+      )}
 
-            {menuOpen && (
-              <>
-                <button
-                  type="button"
-                  aria-label="Close the menu"
-                  className="fixed inset-0 z-10 cursor-default"
-                  onClick={() => setMenuOpen(false)}
-                />
-                <div
-                  role="menu"
-                  className="absolute right-0 z-20 mt-1 flex w-56 flex-col overflow-hidden rounded-lg border border-line bg-surface py-1 text-ink shadow-lg"
-                >
-                  {staff.role !== "cashier" && (
-                    <Link
-                      href="/pin"
-                      role="menuitem"
-                      className="flex min-h-11 items-center gap-2.5 px-3 text-[15px] hover:bg-subtle"
-                    >
-                      <KeyRound className="size-4 text-muted" aria-hidden />
-                      {staff.hasPin ? "Change approval PIN" : "Set approval PIN"}
-                    </Link>
-                  )}
-                  {backend.mode === "supabase" ? (
-                    <a
-                      href="/logout"
-                      role="menuitem"
-                      className="flex min-h-11 items-center gap-2.5 px-3 text-[15px] hover:bg-subtle"
-                    >
-                      <LogOut className="size-4 text-muted" aria-hidden /> Sign out
-                    </a>
-                  ) : (
-                    <span className="px-3 py-2 text-[13px] text-muted">
-                      Demo mode · no sign-in, nothing is saved
-                    </span>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
+      {/* Which branch is selling. Only worth saying when there is more than one, but
+          then it matters: it decides the stock, the serials and the invoice number. */}
+      {branches.length > 1 && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-subtle bg-subtle px-4 py-2 text-[13px] sm:px-6">
+          <span className="font-semibold">Selling at {branch.name}</span>
+          <span className="code text-muted">{branch.code}</span>
+          <span className="text-muted">· switch branch at the top of the screen</span>
         </div>
-      </header>
+      )}
 
       {/* The live database starts empty, so this is the genuine first screen after a
           fresh setup — not a hypothetical edge case. */}
@@ -302,6 +255,6 @@ export function CounterScreen() {
       )}
 
       {receipt && <ReceiptDialog receipt={receipt} onNewSale={onNewSale} />}
-    </div>
+    </>
   );
 }

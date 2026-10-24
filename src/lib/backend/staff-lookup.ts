@@ -1,4 +1,4 @@
-import type { Role, Staff, StaffLookup } from "../types";
+import type { Branch, Role, Staff, StaffLookup } from "../types";
 
 /** The shape current_staff() returns, or null when the login has no staff row. */
 export interface CurrentStaffRow {
@@ -9,6 +9,12 @@ export interface CurrentStaffRow {
   discount_limit_pct: number | string;
   shop_name: string;
   has_pin: boolean;
+  branches: {
+    id: string;
+    name: string;
+    code: string;
+    locations: { id: string; name: string; is_default: boolean }[];
+  }[];
 }
 
 export interface LookupInput {
@@ -33,6 +39,13 @@ export function classifyStaffLookup({ user, row }: LookupInput): StaffLookup {
   if (!user) return { kind: "signed-out" };
   if (!row) return { kind: "no-staff", email: user.email ?? null };
 
+  const branches: Branch[] = (row.branches ?? []).map((b) => ({
+    id: b.id,
+    name: b.name,
+    code: b.code,
+    locations: (b.locations ?? []).map((l) => ({ id: l.id, name: l.name, isDefault: l.is_default })),
+  }));
+
   const staff: Staff = {
     id: row.staff_id,
     name: row.name,
@@ -40,6 +53,7 @@ export function classifyStaffLookup({ user, row }: LookupInput): StaffLookup {
     discountLimitPct: Number(row.discount_limit_pct),
     shopName: row.shop_name,
     hasPin: Boolean(row.has_pin),
+    branches,
   };
   return { kind: "ok", staff };
 }

@@ -1,6 +1,29 @@
 export type Role = "owner" | "manager" | "cashier";
 export type PaymentMethod = "cash" | "bkash" | "nagad" | "card";
 
+/** A stock location inside a branch — BMS calls these "stores". */
+export interface StockLocation {
+  id: string;
+  name: string;
+  isDefault: boolean;
+}
+
+export interface Branch {
+  id: string;
+  name: string;
+  /** Short, and it goes in every document number. */
+  code: string;
+  locations: StockLocation[];
+}
+
+/** A branch as the owner administers it, with the fields the switcher doesn't need. */
+export interface BranchAdmin extends Branch {
+  address: string | null;
+  phone: string | null;
+  active: boolean;
+  nextInvoice: number;
+}
+
 export interface Staff {
   id: string;
   name: string;
@@ -10,6 +33,20 @@ export interface Staff {
   /** Whether this person has an approval PIN. The hash itself is never readable, so
    *  the PIN screen asks the database. */
   hasPin: boolean;
+  /** Branches this person may work in. Owners get all of them. Never empty for a
+   *  usable login — a staff member with no branch can't sell anywhere. */
+  branches: Branch[];
+}
+
+/** One staff member as the owner sees them in Settings. */
+export interface StaffMember {
+  id: string;
+  name: string;
+  role: Role;
+  discountLimitPct: number;
+  active: boolean;
+  hasPin: boolean;
+  branchIds: string[];
 }
 
 /**
@@ -56,8 +93,10 @@ export interface Product {
   price: number;
   warrantyMonths: number;
   isSerial: boolean;
+  /** Stock AT THE CURRENT BRANCH, not the shop total. */
   stock: number;
-  serials: SerialUnit[]; // in-stock units, for serial items
+  reorderLevel: number;
+  serials: SerialUnit[]; // in-stock units at this branch, for serial items
 }
 
 export interface CartLine {
@@ -67,6 +106,9 @@ export interface CartLine {
 }
 
 export interface SaleInput {
+  /** Which branch is selling. Checked against staff_branches in the database, so the
+   *  browser cannot sell out of a branch it does not work in. */
+  branchId: string;
   lines: CartLine[];
   paymentMethod: PaymentMethod;
   discountPct: number;
@@ -94,6 +136,11 @@ export interface Receipt {
   staffName: string;
   shopName: string;
   shopAddress: string | null;
+  branchName: string;
+  /** The branch's own address and phone go on the receipt: a customer needs the shop
+   *  they actually bought from, not head office. */
+  branchAddress: string | null;
+  branchPhone: string | null;
   subtotal: number;
   discountPct: number;
   discountAmount: number;

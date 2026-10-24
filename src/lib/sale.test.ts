@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { createDemoBackend } from "./backend/demo";
-import { demoProducts } from "./backend/demo-data";
 import {
   SALE_ERROR_CODES, addMonths, computeTotals, dhakaToday, friendlyError, isSessionExpired,
   pinScreenError, quickCashAmounts, saleBlocker, searchProducts, type CheckoutState,
 } from "./sale";
 
-const products = demoProducts();
+// Stock is per branch now, so the product map comes from a branch.
+const B1 = "b1";
+const products = await createDemoBackend().listProducts(B1);
 const byId = new Map(products.map((p) => [p.id, p]));
 const base: CheckoutState = {
   lines: [{ productId: "a1", qty: 2, serialIds: [] }],
@@ -111,27 +112,27 @@ describe("demo backend follows the same rules as the database", () => {
   it("sells, lowers stock, numbers invoices, sets warranty", async () => {
     const b = createDemoBackend();
     const r = await b.completeSale({
-      lines: [{ productId: "a1", qty: 2, serialIds: [] }], paymentMethod: "cash",
+      branchId: B1, lines: [{ productId: "a1", qty: 2, serialIds: [] }], paymentMethod: "cash",
       discountPct: 0, approvalId: null, customerPhone: null, cashReceived: 1000, paymentRef: null,
     });
-    expect(r.invoiceNo).toMatch(/^DEMO\d{4}000001$/);
+    expect(r.invoiceNo).toMatch(/^DEMO-MB-\d{4}000001$/);
     expect(r.changeGiven).toBe(0);
     expect(r.items[0].warrantyUntil).toBe(addMonths(dhakaToday(), 12));
-    expect((await b.listProducts()).find((p) => p.id === "a1")?.stock).toBe(2);
+    expect((await b.listProducts(B1)).find((p) => p.id === "a1")?.stock).toBe(2);
   });
   it("an over-limit discount without an approval is refused, and stock is untouched", async () => {
     const b = createDemoBackend();
     await expect(b.completeSale({
-      lines: [{ productId: "a1", qty: 1, serialIds: [] }], paymentMethod: "cash",
+      branchId: B1, lines: [{ productId: "a1", qty: 1, serialIds: [] }], paymentMethod: "cash",
       discountPct: 20, approvalId: null, customerPhone: null, cashReceived: 500, paymentRef: null,
     })).rejects.toThrow(/manager's approval/);
-    expect((await b.listProducts()).find((p) => p.id === "a1")?.stock).toBe(4);
+    expect((await b.listProducts(B1)).find((p) => p.id === "a1")?.stock).toBe(4);
   });
 
   it("a made-up approval id is refused", async () => {
     const b = createDemoBackend();
     await expect(b.completeSale({
-      lines: [{ productId: "a1", qty: 1, serialIds: [] }], paymentMethod: "cash",
+      branchId: B1, lines: [{ productId: "a1", qty: 1, serialIds: [] }], paymentMethod: "cash",
       discountPct: 20, approvalId: crypto.randomUUID(), customerPhone: null, cashReceived: 500, paymentRef: null,
     })).rejects.toThrow(/expired or was already used/);
   });
@@ -153,7 +154,7 @@ describe("demo backend follows the same rules as the database", () => {
     if (!res.ok) throw new Error("unreachable");
 
     const sale = {
-      lines: [{ productId: "a1", qty: 1, serialIds: [] }], paymentMethod: "cash" as const,
+      branchId: B1, lines: [{ productId: "a1", qty: 1, serialIds: [] }], paymentMethod: "cash" as const,
       discountPct: 20, approvalId: res.approvalId, customerPhone: null,
       cashReceived: 500, paymentRef: null,
     };
@@ -180,11 +181,11 @@ describe("demo backend follows the same rules as the database", () => {
   it("a sold serial disappears from stock", async () => {
     const b = createDemoBackend();
     const r = await b.completeSale({
-      lines: [{ productId: "a8", qty: 1, serialIds: ["a8-s0"] }], paymentMethod: "nagad",
+      branchId: B1, lines: [{ productId: "a8", qty: 1, serialIds: ["a8-s0"] }], paymentMethod: "nagad",
       discountPct: 0, approvalId: null, customerPhone: "01711000000", cashReceived: null, paymentRef: "NGD12345",
     });
     expect(r.items[0].serials).toEqual(["S64DNX0T41822"]);
-    const ssd = (await b.listProducts()).find((p) => p.id === "a8")!;
+    const ssd = (await b.listProducts(B1)).find((p) => p.id === "a8")!;
     expect(ssd.stock).toBe(2);
     expect(ssd.serials.map((s) => s.serial)).not.toContain("S64DNX0T41822");
   });
