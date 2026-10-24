@@ -42,3 +42,6 @@ next-env.d.ts
 
 # allow the template
 !.env.example
+
+# local sample data from BMS (screenshots, report exports)
+reports_samples/

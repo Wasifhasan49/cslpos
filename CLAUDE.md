@@ -47,14 +47,41 @@ chains with many branches; CSL's single-branch store is only the first customer.
   `src/components/ui/` are hand-written in the shadcn style (the shadcn registry was
   unreachable when this was built). Running `npx shadcn add …` later is fine.
 - Supabase for Postgres, auth and row-level security. Deploy on Vercel.
+- **Auth**: `src/middleware.ts` refreshes the session and owns every redirect. The rules
+  are a pure function in `src/lib/auth-route.ts` (unit-tested, deny-by-default: only
+  `/login` is public). If Supabase Auth is *unreachable* the request is let through
+  rather than treated as signed out — the database re-checks `auth.uid()` everywhere, and
+  bouncing a signed-in cashier to `/login` mid-sale would destroy the sale (the cart is
+  in-memory). `src/lib/env.ts` is the only place that decides demo mode; it has no
+  imports so middleware can use it without pulling the backend into the edge bundle.
+- **Demo mode is opt-in** (`NEXT_PUBLIC_DEMO_MODE=1`, or missing keys in development).
+  It used to switch on whenever the keys were absent, so a production deploy with one
+  forgotten env var served an open, sign-in-free counter. A half-filled `.env.local` is
+  a config error, not demo mode.
 - **Multi-shop from day one**: every table has `shop_id`; RLS limits each login to its shop.
 - **Rules live in the database.** Sales, stock and serials have no insert/update policies;
   they change only through `complete_sale()` and `receive_stock()` (security definer).
-  `complete_sale()` reads prices from `products`, checks stock, serials, discount limit +
-  manager PIN (bcrypt via pgcrypto), payment, phone; numbers the invoice
-  (`<prefix><year><6 digits>`, CSL starts at 1790 to follow on from BMS); sets warranty
-  end dates in Dhaka time; logs approvals. Errors are short codes like `OUT_OF_STOCK:<name>`;
-  `friendlyError()` in `src/lib/sale.ts` turns them into plain words.
+  `complete_sale()` reads prices from `products`, checks stock, serials, discount limit,
+  payment, phone; numbers the invoice (`<prefix><year><6 digits>`); sets warranty end
+  dates in Dhaka time; logs approvals. It locks product rows in `product_id` order so
+  two concurrent sales can't deadlock. Errors are short codes like `OUT_OF_STOCK:<name>`;
+  `friendlyError()` in `src/lib/sale.ts` turns them into plain words — and a test greps
+  the migrations so a new `raise exception` can't ship without a message.
+- **PIN approvals go through `verify_manager_pin()`, not `complete_sale()`.** The counter
+  names *which* manager is approving, that one person's PIN is checked immediately, and
+  the function returns a single-use approval (10 minutes) that the sale consumes.
+  It **returns** a result rather than raising, because raising rolled back the attempt
+  row with it — which is why failed PINs used to leave no trace at all. Five wrong tries
+  in 10 minutes locks that approver out. Every attempt lands in `pin_attempts` and
+  `audit_log`. `set_pin()` also refuses guessable PINs (`1234`, `0000`).
+- **Roles, discount limits and turning staff off are owner-only**, through
+  `set_staff_access()`: it refuses self-edits, refuses to remove the last owner, and logs
+  before/after. Before this, the `authenticated` UPDATE grant on `staff` included `role`,
+  `discount_limit_pct` and `active`, so any manager could raise their own limit to 100%,
+  promote themselves to owner, or deactivate the owner — unlogged. Only `name` is
+  directly writable now.
+- RLS helpers are wrapped as `(select public.current_shop_id())` so they are evaluated
+  once per statement, not once per row.
 - `src/lib/sale.ts` repeats the rules for instant on-screen feedback. Keep the two in sync;
   the tests in `src/lib/sale.test.ts` and `supabase/tests/sales_rules_test.sql` cover the
   same cases (e.g. 5% off 450 → 23 discount, total 427).
@@ -68,6 +95,16 @@ chains with many branches; CSL's single-branch store is only the first customer.
 - Touch targets ≥ 44 px; works at phone width; light theme only.
 - Product codes and serials use the `.code` (monospace) class; amounts use `.num` (tabular digits).
 
+## Setup commands
+
+`pnpm check` (alias `pnpm run doctor` — bare `pnpm doctor` is pnpm's own built-in) checks
+an install end to end and names the fix for each failure. `pnpm shop:init` creates a shop
+with its own name, invoice prefix and starting number, so no shop inherits another's
+identity. `pnpm staff:add` creates logins (with `email_confirm: true`, or they silently
+cannot sign in), and does `--list`, `--deactivate`, `--reset-password`. It refuses to move
+someone between shops without `--move`, because `staff.user_id` is globally unique and a
+silent move orphans their past sales. Scripts are `.mts` so tsx runs them as ESM.
+
 ## Next steps (in rough order)
 
 The full build plan, as step-by-step prompts, is in `docs/BUILD_PROMPTS.md` (P0–P18):
@@ -75,8 +112,10 @@ branches, setup lists, price lists, purchase orders, transfers and full accounts
 are all in scope because this is sold to many shops, including multi-branch chains.
 The list below is the original short version; BUILD_PROMPTS.md wins where they differ.
 
-1. **Supabase project + real logins** for the store's staff; set manager PINs (needs a small
-   "Set my PIN" screen for managers; today it's `select set_pin('…')`).
+1. ~~**Supabase project + real logins**~~ — done (P0). Middleware, `pnpm shop:init`,
+   `pnpm staff:add`, `pnpm check`, and the `/pin` screen all exist. Still outstanding from
+   P0: the migration has never been applied to a live Supabase project, so the end-to-end
+   acceptance test (sell a splitter, approve a discount) has not been run against one.
 2. **Import from BMS**: CSV/Excel import of products (code, name, brand, category, price,
    warranty, serial flag, stock) and serials. Fix category typos while importing.
 3. **Stock in** screen (calls `receive_stock()`), with serial scanning for serial items.

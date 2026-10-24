@@ -7,7 +7,33 @@ export interface Staff {
   role: Role;
   discountLimitPct: number;
   shopName: string;
+  /** Whether this person has an approval PIN. The hash itself is never readable, so
+   *  the PIN screen asks the database. */
+  hasPin: boolean;
 }
+
+/**
+ * The result of asking "who is signed in?". Three outcomes, not two: a login with no
+ * staff row is a real, recoverable situation ("ask the owner to add you") and must not
+ * be confused with being signed out, which is what a plain `Staff | null` did.
+ */
+export type StaffLookup =
+  | { kind: "ok"; staff: Staff }
+  | { kind: "signed-out" }
+  | { kind: "no-staff"; email: string | null };
+
+/** An owner or manager who has a PIN and can approve a discount. */
+export interface Approver {
+  id: string;
+  name: string;
+  role: Role;
+}
+
+/** What verify_manager_pin() answers. A wrong PIN is a result, not an error, so the
+ *  attempt can be recorded instead of rolled back. */
+export type ApprovalResult =
+  | { ok: true; approvalId: string; approverId: string; approverName: string }
+  | { ok: false; locked: boolean; triesLeft: number };
 
 export interface Category {
   id: string;
@@ -44,7 +70,9 @@ export interface SaleInput {
   lines: CartLine[];
   paymentMethod: PaymentMethod;
   discountPct: number;
-  managerPin: string | null;
+  /** From verify_manager_pin(). Needed only when the discount is over the seller's
+   *  limit. The PIN itself never travels with the sale. */
+  approvalId: string | null;
   customerPhone: string | null;
   cashReceived: number | null;
   paymentRef: string | null;

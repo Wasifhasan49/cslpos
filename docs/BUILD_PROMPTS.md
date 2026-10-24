@@ -6,16 +6,34 @@ including chains with many branches.
 
 ## How to use
 
-1. Do them **in order**. Each one assumes the ones before it are done and merged.
-   The order matters: branches and price lists come early because almost everything
-   else depends on them.
-2. For each prompt: start a fresh Claude Code session in the `cslpos` folder, run
-   `/autoplan`, paste the prompt, approve the plan, let it build. Then `/review` →
-   `/qa` → `/ship` → `/context-save`, as usual.
-3. Every prompt starts with the same **ground rules** block. Paste it each time.
-4. Prompts marked **[You first]** need something from you before you paste them.
-5. After each prompt, use the feature in the browser for 5 minutes. Most bugs show up
-   there, not in tests.
+The prompts below ARE the plan. They're written tight on purpose, so Claude Code
+doesn't need to re-plan or re-review them. That saves a lot of usage.
+
+**Hands-off (recommended).** Paste this once in Claude Code, in the `cslpos` folder:
+
+```
+Read CLAUDE.md and docs/BUILD_PROMPTS.md. Work through the prompts in the table's
+order, starting after the last one marked done in docs/PROGRESS.md (create it if
+missing). The prompt text is the plan: don't re-plan or re-review it. For each one:
+build it, run the checks listed in the ground rules, fix failures, commit as
+"<number>: <name>", and add a line to docs/PROGRESS.md (done, 2-line summary, what
+I should test). Skip prompts marked [You first] and note what you need from me. If
+checks still fail after 3 fix attempts, note the problem in PROGRESS.md and continue
+with the next prompt that doesn't depend on it. Keep going until all are done or
+skipped.
+```
+
+When a session stops (usage limit, new day), open Claude Code and type:
+`Continue from docs/PROGRESS.md.`
+
+**One at a time.** `Read docs/BUILD_PROMPTS.md and do P5.` (any number).
+
+Notes:
+- Prompts marked **[You first]** need something from you; do it, then tell Claude Code
+  "<number> is unblocked".
+- Check `docs/PROGRESS.md` any time to see where it's up to and what to test.
+- Reference material from the store is in `reports_samples/` (BMS report PDFs and
+  screenshots). Keep it out of git.
 
 | # | Prompt | What it gives you |
 |---|---|---|
@@ -30,16 +48,21 @@ including chains with many branches.
 | P8 | Shifts and cash check | Catch missing cash |
 | P9 | Sales history, reprint, void, returns | Mistakes and refunds |
 | P10 | Credit sales (baki) and customers | Selling on due, collecting dues |
+| P10a | Counter: everything BMS's sales screen can do | EMI, card details, exchange, extra fields, last price, bulk serials |
 | P11 | Warranty lookup and claims | The computer-shop special |
 | P12 | Owner dashboard (phone) | Per branch and whole business |
 | P13 | Accounts 1: ledger, auto-posting, vouchers, cheques | Real double-entry books |
 | P14 | Accounts 2: reports, period lock, export | Cash book, trial balance, P&L, balance sheet |
+| P14a | Quotations, sales orders and challans | Quote → order with advance → deliver → bill later |
+| P14b | HR: employees, attendance, salary | BMS HR module and the dashboard's attendance box |
+| P14c | Sales reps, dealers and delivery points | SR targets, dealer networks, security deposits |
 | P15 | SMS receipts and reminders | Receipts, due reminders, promotions |
 | P16 | Printing: receipts, invoices, labels | Real hardware at the counter |
 | P17 | Launch hardening and parallel run | Safe to trust with real money |
 | P18 | Multi-shop signup and billing | Other shops can join and pay |
 
-CSL's store needs P0–P12 to switch off BMS. P13–P14 bring accounts in line with BMS.
+CSL's store needs P0–P12 to switch off BMS. P13–P14c bring the rest of BMS across, so
+every BMS module has an equivalent.
 
 ---
 
@@ -59,6 +82,11 @@ Ground rules for this task:
   RLS limits each login to its shop AND to the branches it's allowed to use.
   Catalogue data (products, price lists, setup lists, customers, suppliers, chart of
   accounts) is shop-wide.
+- Later prompts add quotations, sales orders with advance payment, challans (deliver
+  now, bill later), HR (employees linked to staff logins), sales reps with targets, and
+  dealer delivery points. Design earlier work so these slot in without rework: a sale
+  can come from another document, stock can be reserved, a customer can have several
+  delivery addresses and an assigned sales rep, a staff login can belong to an employee.
 - Business rules live in the DATABASE. Any write that touches money, stock, serials,
   prices, accounts or permissions goes through a Postgres function (security definer,
   `set search_path = public`, checks role, shop and branch inside). The browser never
@@ -194,6 +222,18 @@ Settings sections (owner, managers read-only unless allowed):
   addresses. Countries list for suppliers.
 - Warranty terms: named terms (e.g. "1 year replacement", "3 years service only") with
   months and the text printed on receipts. Products pick a term.
+- Transaction categories (BMS "Transaction Category"): owner-defined labels for
+  classifying purchases, sales and expenses in reports (e.g. "Corporate", "Online",
+  "Service"). Ask me what CSL uses them for if unsure; build them as a simple tagged list.
+- Permissions (BMS User Access Control, User Default Access Control, User Permission
+  Change, Print Permission, Cheque Print Permission, User Wise Store Fixing, User Wise
+  Ledger Fixing, Menu Configuration): on top of roles, a permission list per action —
+  sell, give discount (with limit), change price within band, see cost, void, return,
+  reprint, print/export reports, print cheques, receive stock, adjust stock, transfer,
+  approve, view accounts, edit settings. Default permission sets per role, then per-user
+  overrides. Per-user access to specific branches/locations and (for P13) specific
+  accounts/ledgers. Owner can hide menu items per role. Every permission change is
+  logged. Database functions check permissions, not just the UI.
 - Document settings: numbering per branch and per document type, with the next number
   editable by the owner (only forward, logged).
 - Feature switches: VAT, multiple locations, price lists, credit sales, purchase
@@ -226,8 +266,23 @@ Products (/products):
   serial items, no price set). Columns: name, code, category, price, cost and margin
   (managers only), stock for current branch and total, warranty.
 - Add/edit: name, brand, model, code, barcode, category, unit, warranty term, HS code
-  and VAT (if on), serial tracked, reorder level (per branch), active, photo.
+  and VAT (if on: flat amount or %), serial tracked, reorder level (per branch), active,
+  photo, specification (free text, e.g. "i5-1235U / 16GB / 512GB"), weight.
   Blocking "serial tracked" changes when stock exists.
+- Product attributes (BMS "Product Classification": Group, Brand, Category, Color,
+  Size, Manufacturer, Article, Grade): a generic attribute system — the shop turns on
+  which attributes it uses and defines their values; products carry them; search and
+  reports can filter by them. Group and Brand are on by default.
+- Non-inventory items (BMS "Inventory" checkbox off): services and charges like
+  installation, OS setup, repair labour — sold at the counter, no stock tracked.
+- Product default discount (BMS Discount FLAT/PCT on the product): an optional flat or %
+  discount applied automatically to that product, within staff limits.
+- Purchase price fixing (BMS "Purchase Price Fixing"): an agreed purchase price per
+  product (optionally per supplier). Receiving goods (P5) pre-fills it and flags any
+  invoice price that differs.
+- Price view (BMS "Sales Price View" / "Sales Price MRP View"): a read-only, searchable,
+  printable price list per price list and branch, for staff and for customers.
+- A "Barcode" action on each product prints its label (P16 does the layouts).
 - Categories and brands: add, rename, reorder, merge (to fix BMS typos like
   "Convarter").
 
@@ -298,13 +353,23 @@ and the counter finds products by their BMS codes.
 Task: receive goods directly (no purchase order) and fix stock when it's wrong, per
 branch and location. P6 adds the formal purchase-order route on top of this.
 
-- Suppliers (/suppliers): name, contact, phone, address (areas from P2), opening
-  balance, notes. Shop-wide.
+- Suppliers (/suppliers): name, contact, phone, address (areas from P2), supplier group
+  (BMS "Trader Group"), opening balance, notes. Shop-wide. "Cash supplier" option for a
+  one-off seller with just a name and phone, no account (BMS "Cash Supplier").
 - Receive goods: supplier (optional), supplier invoice no., date, branch/location,
   cash or credit purchase, lines by scan/search like the counter. Non-serial: qty +
-  unit cost. Serial: scan serials one after another (scanner sends Enter), paste many,
-  or enter a range (BMS "Serial From/To") for sequential serials; duplicates flagged
-  before saving. Extra costs (transport, labour) spread across lines by value. One
+  unit cost and line discount. Serial: scan serials one after another (scanner sends
+  Enter), paste many, or enter a range with a common prefix (BMS "Serial Common",
+  "Serial From/To") for sequential serials; scan a QR code that contains several serials
+  (BMS "QR Code"); "Digit check": each product can set the expected serial length/pattern
+  and wrong scans are rejected; "Auto serial" (BMS "A.G Serial") generates shop serials
+  for items that have none, and prints barcode labels for them. Duplicates flagged before
+  saving. While adding a line, show qty available, last purchase price and last serial
+  received for that product.
+- Import lines from Excel/CSV (a supplier's packing list with models, qty, cost,
+  serials). Attach a photo/PDF of the supplier's invoice to the GRN. Pay the supplier
+  right from the receive screen (cash/bank/bKash/cheque) for full or part payment.
+  Document-level discount, extra charges and VAT/AIT. Extra costs (transport, labour) spread across lines by value. One
   function receive_goods() in one transaction; updates product cost using weighted
   average cost (explain it in CLAUDE.md, with a test). Number: GRN-<branch>-2026-000001.
   Viewable and printable later. Credit purchases add to the supplier's due.
@@ -378,6 +443,8 @@ but as one clear flow (feature switch "Branch transfers").
   mark short/damaged items with a reason), confirms. Stock goes into B. Shortages stay
   "in transit — disputed" until a manager resolves them (return to A, write off).
 - Within one branch: move between locations (Shop floor ↔ Warehouse) in one step.
+- Transfer routes (BMS "Branch Wise Transfer Fixing"): owner sets which branches may send
+  to which; others are blocked.
 - Transfers move stock at cost (no profit); P13 posts inter-branch entries.
 - Lists: outgoing, incoming, in transit with age; alert if in transit over 3 days.
 - RLS: each branch sees transfers it sends or receives; owners see all.
@@ -434,6 +501,12 @@ Task: find any past sale, reprint it, and handle mistakes and returns.
   ask "Is it faulty?"), logs. Partial returns recalculate discount, VAT and gift items
   proportionally; write the rule in CLAUDE.md and test it.
 - Returns are accepted at any branch of the same shop (stock goes back where returned).
+  Returns can arrive by courier: record courier name and tracking number (BMS
+  "Courier"); attach photos of the returned item.
+- Optional approval (BMS Approve/Cancel menus): a shop setting so that sales, returns and
+  challans above a value, or all of them, wait for manager approval before they post to
+  accounts. Approve and Cancel are buttons on the document, never separate menus. Off by
+  default.
 - Exchange = return + new sale with the refund paying toward it, one counter flow.
 - Cash refunds count against the open shift (P8).
 
@@ -474,6 +547,52 @@ due list shows ৳22,000 aged correctly.
 
 ---
 
+## P10a — Counter: everything BMS's sales screen can do
+
+```
+[Ground rules]
+
+Task: give the counter every capability of BMS's Sales Invoice/Bill screen WITHOUT
+losing the 4-action simple sale. The simple sale stays exactly as it is; everything
+below lives behind a "More options" area or appears only when relevant.
+
+From BMS's sales screen (fields and buttons we saw):
+- Customer details on the sale: Attention (contact person), address, BIN and NID for
+  corporate buyers, narration/notes, "sold by" sales person (defaults to the logged-in
+  user, can be changed; used for staff performance and commission).
+- Additional info (BMS "Additional Info" / "Edit Details"): shop-defined extra fields
+  on a sale (e.g. "Reference", "PO number", "Laptop password noted"), shown on the
+  invoice if the shop wants.
+- Payments:
+  - Card: card type (from P2), bank, POS machine/account it went through (BMS "POS A/C
+    No"), last 4 digits, card charge % — shop setting: charge added to the bill or
+    absorbed by the shop.
+  - EMI: EMI allowed yes/no per product/category, tenure (3/6/9/12/18/24/36 months)
+    with the bank, bank EMI charge rules per tenure, shown on the receipt.
+  - Split payment across any methods (cash + card + bKash + due), with change worked out.
+- Exchange / trade-in (BMS "Exchange", "Product Exchange" total): take an old item from
+  the customer as part payment — describe it, value it, optionally add it to stock as a
+  used item (with serial), and deduct the value from the bill.
+- Price help for staff: last price this customer paid for this product, and last selling
+  price; qty available at this branch and other branches. "Show cost" exists only as a
+  permission (P2), off for cashiers.
+- Serial items in bulk (BMS "Bulk Qty", "Serial From/To"): sell a run of serials by
+  scanning first and last, or paste a list; import sale lines from Excel for big
+  corporate orders.
+- Extra charges (delivery, installation) and discount types (P2) on the sale.
+- Print choices at the end: receipt, A4 invoice, challan, money receipt, warranty
+  stickers, "print directly" without preview (BMS "Direct Print"), and choosing between
+  saved print templates (BMS "Custom Preview"). Layouts come from P16.
+- complete_sale() (or its successor) gets the new fields; every new rule (EMI eligibility,
+  card charges, exchange value limits, sales person) is enforced in the database.
+
+Done when: a simple cash sale still takes 4 actions, AND I can do a ৳72,000 laptop sale
+on 12-month EMI by card with the bank charge added, taking an old laptop in exchange for
+৳15,000, with Attention and BIN filled, and the receipt shows all of it correctly.
+```
+
+---
+
 ## P11 — Warranty lookup and claims
 
 ```
@@ -491,7 +610,10 @@ handle a busy service counter too without BMS's 10 screens.
   Delivered (or Rejected / Repaired in-house). Each change timed and attributed.
   Swap unit: replacement serial recorded, old serial 'rma'. In-house repair: parts
   used come out of stock; optional service charge billed as a sale.
-- Problem types list and technician assignment (BMS "Engineer Fixing").
+- Problem types list (BMS "Problem Setup") and technician assignment (BMS "Engineer
+  Fixing"). Items held for warranty are their own stock status, so the RMA stock report
+  (P14) shows what's with the shop, with suppliers, and ready for pickup.
+- Optional approval/cancel of claim steps by a manager, as a shop setting.
 - Claim slip WC-<branch>-2026-000001 for the customer.
 - Claims list: by status, branch, technician, "waiting over 14 days". Supplier RMA
   list: what's with which supplier and since when.
@@ -520,6 +642,9 @@ branch picker (All branches / one branch):
 - Today: sales, profit, number of sales, average sale, each vs yesterday and vs same
   day last week. Per-branch comparison table when "All branches".
 - Payment split (cash / bKash / Nagad / card / due).
+- BMS-style summary row (what owners are used to): cash sales, credit sales, sales
+  returns, cash purchases, credit purchases, purchase returns, warranty/service bills,
+  money received, money paid, staff present/late/absent (once P14b exists).
 - Busy hours (last 7 days).
 - Best sellers by profit and quantity (7/30 days).
 - Low stock per branch, with sold-in-last-30-days and "transfer from Branch B (has 8)".
@@ -569,11 +694,18 @@ Screens (/accounts, owner and allowed managers):
 - Vouchers (BMS Credit/Debit/Journal/Contra): receipt voucher, payment voucher,
   journal voucher, contra (cash ↔ bank). Number per branch. Optional two-step
   "entered → approved" (BMS "Voucher Posting") as a shop setting.
-- Inter-branch vouchers (one branch pays for another), posting to both.
+- Inter-branch vouchers (one branch pays for another), posting to both. The receiving
+  branch must accept ("authenticate") an inter-branch journal before it posts on their
+  side (BMS "Inter BR. Journal Authentication").
+- Fund transfer between branches (BMS "Fund Received"): branch A sends cash or bank
+  money to branch B; B confirms receipt; both cash books update.
 - Bank and wallet accounts: balances, deposits, withdrawals.
 - Cheques (BMS Cheque Book, Cheque Treatment, Cheque History): cheque books for bank
   accounts; cheques issued and received with status (issued, cleared, bounced,
   cancelled); bounced cheques reverse their entries and flag the customer/supplier.
+  Print cheques onto the bank's cheque leaf (payee, amount in figures and words, date)
+  with a per-bank layout, only for users with the cheque-print permission (P2).
+- Respect per-user account access from P2 (BMS "User Wise Ledger Fixing").
 - Expense entry: quick screen for daily expenses by category and branch.
 
 Tests: every auto-posted event balances; trial balance totals equal; a sale's COGS
@@ -593,6 +725,9 @@ the recorded shortfall, and every entry balances.
 
 Task: the reports an accountant and owner need, and closing periods.
 
+Use the BMS report samples in reports_samples/ as the reference for which reports shops
+expect and what columns they show; match their content, not their look.
+
 Reports (per branch and consolidated, any date range, PDF and Excel export, Dhaka
 dates):
 - Cash book and bank book (per account), day book (all entries for a day).
@@ -608,6 +743,9 @@ dates):
 - Sales register, purchase register, stock register, transfer register, warranty
   register (BMS "Reports" menu equivalents), each a filterable list with totals.
 - Modification register (BMS): the audit log as a report.
+- RMA service register and RMA stock register (BMS): claims and items under warranty.
+- Report settings (BMS "Report Sort", "Customising Report Caption"): owner can rename
+  report titles and column captions and set default sort order; saved per shop.
 
 Period lock (BMS "Transaction Lock"): owner locks a month; nothing dated in it can be
 created, edited, voided or returned without the owner unlocking (logged).
@@ -617,6 +755,121 @@ Tally's import format; if it's too uncertain, a clean CSV + a note in CLAUDE.md)
 
 Done when: the trial balance balances, the balance sheet's inventory equals the stock
 valuation report, and locking September stops me from voiding a September sale.
+```
+
+---
+
+## P14a — Quotations, sales orders and challans
+
+```
+[Ground rules]
+
+Task: the BMS sales paperwork for corporate and bulk buyers (feature switch
+"Sales documents"). BMS screens: Price Quotation, Sales Order, Sales Order Adjustment,
+Sales Bill From Sales Order, Challan, Challan Return, Sales Bill From Challan,
+Delivery Requisition approval. Walk-in sales at the counter stay exactly as they are.
+
+Flow: Quotation → Sales order → Challan (goods leave) → Bill. Any step can be skipped
+(order straight to bill, challan without order).
+
+- Quotation: customer, items, prices from the customer's price list (P3), discount,
+  VAT, extra charges, validity date, terms. Number QT-<branch>-2026-000001.
+  Status: draft → sent → accepted / expired / lost. "Convert to order" or "to sale".
+- Sales order: customer, delivery date, delivery point (P14c), sales rep, items, free
+  items (BMS "Free" column), payment terms (days), advance received (method and
+  account). Reserves stock at the branch: reserved qty shows on the counter as
+  "4 in stock, 2 reserved" and can't be sold to walk-ins. Number SO-…
+  Order adjust (BMS "Sales Order Adjustment"): change qty or cancel lines, releasing
+  the reservation; logged. Approval rule: orders over ৳X or with discount over the
+  user's limit need a manager (PIN or login).
+- Challan (delivery note): from an order or standalone; pick serials for serial items;
+  stock leaves the branch now, status "delivered, not billed". Partial deliveries
+  show ordered / delivered / pending per line. Challan return brings goods back.
+  Number CH-…
+- Bill from challan or order: picks up delivered lines, applies the advance, the rest
+  goes to cash/due as a normal sale through complete_sale() (or a sibling function
+  that shares its rules). Warranty starts on the delivery date.
+- Lists with filters: open quotations, orders by delivery date (late ones in red),
+  delivered-not-billed challans with age, advances not yet used.
+- Accounts (P13): advance = customer advance (liability) until billed; challan moves
+  stock at cost to "goods delivered not invoiced"; the bill clears both. Tests that
+  everything balances.
+- Printables for all four documents (layouts in P16).
+
+Done when: I quote a company 10 keyboards, convert to an order with ৳5,000 advance,
+the counter shows them reserved, I deliver 6 on a challan, bill those 6 using the
+advance, deliver and bill the last 4 next week, and every ledger balances.
+```
+
+---
+
+## P14b — HR: employees, attendance and salary
+
+```
+[Ground rules]
+
+Task: the BMS HR module (Department, Profession, Designation, Position, Employee
+Information) plus the attendance numbers BMS shows on its dashboard (Attendance, Late,
+Absent), and a simple salary sheet. Feature switch "HR".
+
+- Setup lists: departments, designations, positions, professions (shop-wide).
+- Employees: name, photo, phone, address (areas), joining date, branch, department,
+  designation, NID number, emergency contact, documents (upload), status (active /
+  left with date). Optional link to a staff login (P0), so cashiers are employees
+  too. Religion and nationality fields exist in BMS: include them as OPTIONAL and
+  hidden unless the shop turns them on. HR data is owner/HR-manager only (new role
+  'hr' or a permission), never visible to other staff. Salary fields are owner-only.
+- Attendance: check-in / check-out from the app (staff tap "I'm in" at the branch,
+  limited to the branch's own computers or a branch PIN, explain your choice), or a
+  manager marks it. Shift start time per branch; late after a grace period; absent if
+  no check-in. Leave types (casual, sick, annual) with balances and approval.
+  Holidays per shop.
+- Dashboard (P12): today's present / late / absent per branch, like BMS.
+- Monthly attendance report per employee and branch (Excel/PDF).
+- Salary sheet: monthly, per employee: basic + allowances − deductions (absence, advance
+  taken) = net; mark paid (method, account); salary slip printable; posts salary
+  expense to accounts (P13). Salary advances to staff tracked and deducted.
+
+Done when: two employees check in (one late), one takes a day's sick leave, the dashboard
+shows present/late/absent correctly, and the month's salary sheet deducts the right
+amount and posts to the salary expense account.
+```
+
+---
+
+## P14c — Sales reps, dealers and delivery points
+
+```
+[Ground rules]
+
+Task: the distribution side of BMS for shops that sell through sales reps and dealers
+(feature switch "Distribution"). BMS screens: SR Fixing, Trader wise SR Fixing, SR
+Wise Target, Dealer Information, Retailer Information, Delivery Point Fixing, Customer
+Security, Trading Wise Trader Flag Fixing, Trader Convert, Branch Wise Trader Transfer,
+Trader Search.
+
+- Sales reps (SR): an SR is an employee or staff member with a territory (areas from
+  P2). Assign customers/dealers to an SR. Sales, orders and quotations record the SR
+  (defaults from the customer).
+- Targets: monthly targets per SR by amount, quantity, or category/brand. Achievement
+  report: target vs actual, % done, per day run-rate, ranking. SR's own view on the
+  phone shows only their numbers.
+- Commission (optional setting): % of sales or of profit per SR, monthly statement.
+- Customer types: retail, dealer, retailer (sub-dealer), corporate, with the price list
+  from P3. "Convert" a customer from one type to another (cash → credit, retail →
+  dealer), logged.
+- Delivery points: a customer can have several delivery addresses with contact person
+  and phone; orders and challans (P14a) pick one.
+- Customer security deposit (BMS "Customer Security"): money a dealer leaves with the
+  shop; recorded, refundable, held as a liability in accounts, shown on the customer.
+- Customer flags (BMS "Trader Flag"): e.g. "blocked", "cash only", "VIP", which the
+  counter respects (blocked customers can't buy on due).
+- Move a customer's home branch (BMS "Branch Wise Trader Transfer"), with their dues.
+- Customer search across all fields (name, phone, company, SR, area, type).
+
+Done when: an SR with a ৳5 lakh monthly target sees 40% achieved on their phone after
+I record their dealers' orders, a dealer with a ৳50,000 security deposit shows it on
+their profile and in the accounts, and a blocked customer can't buy on due.
 ```
 
 ---
@@ -663,11 +916,15 @@ Task: printing that works on real counter hardware: <PRINTER MODEL>, <LABEL PRIN
 none>, <SCANNER MODEL>, and still works for other shops' hardware.
 
 - Receipt layouts: 80 mm, 58 mm, A4/Letter invoice for corporate buyers (VAT/BIN,
-  terms, signature lines), chosen per branch. Logo, branch address, footer text. Invoice
+  terms, signature lines), chosen per branch. Match what the real BMS invoice carries:
+  amount in words ("Taka One Thousand Only", plus a Bangla option), prepared by, entry
+  time, print date and time, bill type (paid/due), payment date, sales person,
+  customer and authorised signature lines, page x of y — and add what BMS lacks: serial
+  numbers, warranty end dates, payment method and change. Logo, branch address, footer text. Invoice
   barcode for returns. Warranty lines with serials and end dates.
-- Other printables in the same style: delivery note (challan) for goods leaving before
-  payment, GRN, PO, transfer slip, claim slip, payment receipts, customer/supplier
-  statements, quotation (simple: items + prices + validity, convertible into a sale).
+- Other printables in the same style: quotation, sales order, challan (P14a), GRN, PO,
+  transfer slip, claim slip, payment and advance receipts, salary slip (P14b),
+  customer/supplier statements. Check reports_samples/ for the layouts shops are used to.
 - Near one-click printing: dedicated print pages, correct @page size, documented Chrome
   kiosk-printing setup for counter PCs.
 - Barcode labels (Code128) for products without one and for serial items; warranty
@@ -700,6 +957,8 @@ Task: make it safe to run with real money, then plan the side-by-side run with B
 - Sentry (same setup as Kinetic CRM), shop/branch/staff ids on events, no customer
   phone numbers.
 - Backups: Supabase options on our plan, plus a nightly per-shop export to storage.
+  Owners can also download a full copy of their shop's data from Settings (BMS
+  "DataBase Backup"), as Excel/CSV files in one zip.
 - Vercel deployment, production env checklist, custom domain.
 - Look up (don't guess) current Supabase and Vercel pricing for a commercial product;
   what we need for 1, 20 and 100 shops; write it in docs/COSTS.md.
@@ -743,8 +1002,9 @@ products, sells one at each branch, and I see the shop in the admin area.
 
 ---
 
-## Still not included (from BMS)
+## Coverage check against BMS
 
-HR (departments, designations, attendance), sales orders with advance payment and
-delivery dates, SR (sales representative) targets, dealer delivery points. If a paying
-shop asks for one, write a new prompt in the same format and slot it in after P14.
+With P14a–P14c, every BMS module we photographed has an equivalent. Not seen in the
+photos, so check before launch (P17): the inside of each BMS report (use
+reports_samples/), the RMA screens themselves, and BMS's admin settings. Anything found
+there becomes a new prompt in this format, slotted in before P17.

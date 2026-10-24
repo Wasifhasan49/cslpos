@@ -1,12 +1,13 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { Minus, Plus, ScanBarcode, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { PAYMENT_METHODS, formatTaka, quickCashAmounts, warrantyLabel, type Totals } from "@/lib/sale";
 import { useSale } from "@/lib/store/sale-store";
-import type { Product, Staff } from "@/lib/types";
+import type { Approver, Product, Staff } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -17,13 +18,17 @@ interface Props {
   nextInvoiceHint: string;
   submitting: boolean;
   error: string;
-  pinMode: "local" | "server";
+  /** Owners and managers who have set an approval PIN. */
+  approvers: Approver[];
+  checkingPin: boolean;
+  /** What verify_manager_pin() said last, in plain words. */
+  pinMessage: string;
+  approvedBy: string | null;
   onCheckPin: () => void;
-  pinError: boolean;
   onComplete: () => void;
 }
 
-export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, submitting, error, pinMode, onCheckPin, pinError, onComplete }: Props) {
+export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, submitting, error, approvers, checkingPin, pinMessage, approvedBy, onCheckPin, onComplete }: Props) {
   const s = useSale();
   const overLimit = totals.discountPct > staff.discountLimitPct;
   const received = parseFloat(s.cashReceived);
@@ -128,22 +133,57 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
             </div>
           </div>
 
-          {overLimit && !s.pinApproved && (
+          {overLimit && !s.approvalId && (
             <div role="alert" className="flex flex-col gap-2 rounded-[10px] border border-warn-line bg-warn-bg p-3">
               <span className="text-sm font-semibold text-warn-ink">
                 {totals.discountPct}% is over your {staff.discountLimitPct}% limit. A manager needs to approve it.
               </span>
-              <div className="flex flex-wrap items-center gap-2">
-                <label htmlFor="pin" className="text-sm text-warn-ink">Manager PIN</label>
-                <Input id="pin" type="password" inputMode="numeric" autoComplete="off" value={s.pin} onChange={(e) => s.setPin(e.target.value)} placeholder="••••" className="num h-10 w-28 border-warn-line" />
-                <Button variant="warning" className="h-10" onClick={onCheckPin} disabled={s.pin.length < 4}>Approve</Button>
-              </div>
-              {pinError && <span className="text-[13px] text-bad-ink">Wrong PIN. Ask the manager to enter it.</span>}
+
+              {approvers.length === 0 ? (
+                /* Surfaced here, at the moment it is needed, rather than as a permanent
+                   link in a header that already wraps on a phone. */
+                <span className="text-[13px] text-warn-ink">
+                  No approval PIN has been set yet.{" "}
+                  <Link href="/pin" className="font-semibold underline">Set one</Link>, then come back.
+                </span>
+              ) : (
+                <>
+                  <div className="flex flex-col gap-1.5">
+                    <label htmlFor="approver" className="text-sm text-warn-ink">Who is approving?</label>
+                    <select
+                      id="approver"
+                      value={s.approverId ?? ""}
+                      onChange={(e) => s.setApprover(e.target.value || null)}
+                      className="h-11 w-full rounded-lg border border-warn-line bg-surface px-3 text-base text-ink focus-visible:outline-3 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                    >
+                      <option value="">Pick a manager…</option>
+                      {approvers.map((a) => (
+                        <option key={a.id} value={a.id}>{a.name} ({a.role})</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label htmlFor="pin" className="text-sm text-warn-ink">Their PIN</label>
+                    <Input
+                      id="pin" type="password" inputMode="numeric" autoComplete="off" maxLength={6}
+                      value={s.pin} onChange={(e) => s.setPin(e.target.value)} placeholder="••••"
+                      className="num h-11 w-28 border-warn-line"
+                    />
+                    <Button
+                      variant="warning" className="h-11" onClick={onCheckPin}
+                      disabled={s.pin.length < 4 || !s.approverId || checkingPin}
+                    >
+                      {checkingPin ? "Checking…" : "Approve"}
+                    </Button>
+                  </div>
+                </>
+              )}
+              {pinMessage && <span className="text-[13px] font-semibold text-bad-ink">{pinMessage}</span>}
             </div>
           )}
-          {overLimit && s.pinApproved && (
+          {overLimit && s.approvalId && (
             <span className="text-[13px] text-ok-ink">
-              {pinMode === "local" ? "Discount approved by manager · logged" : "PIN entered · checked when the sale is saved"}
+              Approved by {approvedBy ?? "a manager"} · logged
             </span>
           )}
 

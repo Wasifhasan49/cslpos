@@ -1,27 +1,30 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
-import { LogOut } from "lucide-react";
+import Link from "next/link";
+import { KeyRound, LogOut, PackageOpen } from "lucide-react";
+import { NoShopCard } from "@/components/no-shop-card";
 import { Button } from "@/components/ui/button";
 import { getBackend } from "@/lib/backend";
-import { computeTotals, parseDiscount, saleBlocker, searchProducts } from "@/lib/sale";
+import { computeTotals, isSessionExpired, parseDiscount, saleBlocker, searchProducts } from "@/lib/sale";
 import { useSale } from "@/lib/store/sale-store";
-import type { Category, Product, Receipt, Staff } from "@/lib/types";
+import type { Approver, Category, Product, Receipt, Staff } from "@/lib/types";
 import { ProductPicker } from "./product-picker";
 import { ReceiptDialog } from "./receipt-dialog";
 import { SalePanel } from "./sale-panel";
 
 export function CounterScreen() {
   const backend = React.useMemo(() => getBackend(), []);
-  const router = useRouter();
   const sale = useSale();
   const searchRef = React.useRef<HTMLInputElement>(null);
   const flashTimer = React.useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const [staff, setStaff] = React.useState<Staff | null>(null);
+  const [noShopEmail, setNoShopEmail] = React.useState<string | null>(null);
+  const [noShop, setNoShop] = React.useState(false);
   const [categories, setCategories] = React.useState<Category[]>([]);
   const [products, setProducts] = React.useState<Product[]>([]);
+  const [approvers, setApprovers] = React.useState<Approver[]>([]);
   const [loadError, setLoadError] = React.useState("");
   const [loading, setLoading] = React.useState(true);
   const [query, setQuery] = React.useState("");
@@ -29,7 +32,10 @@ export function CounterScreen() {
   const [flash, setFlash] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [saleError, setSaleError] = React.useState("");
-  const [pinError, setPinError] = React.useState(false);
+  const [pinMessage, setPinMessage] = React.useState("");
+  const [checkingPin, setCheckingPin] = React.useState(false);
+  const [approvedBy, setApprovedBy] = React.useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = React.useState(false);
   const [receipt, setReceipt] = React.useState<Receipt | null>(null);
 
   const say = React.useCallback((msg: string) => {
@@ -49,12 +55,18 @@ export function CounterScreen() {
       try {
         const me = await backend.currentStaff();
         if (cancelled) return;
-        if (!me) { router.replace("/login"); return; }
-        setStaff(me);
-        const [cats, prods] = await Promise.all([backend.listCategories(), backend.listProducts()]);
+        // Three outcomes, not two. A failed lookup throws instead of landing here, so a
+        // network blip can never be mistaken for a sign-out.
+        if (me.kind === "signed-out") { window.location.assign("/login?next=%2Fcounter"); return; }
+        if (me.kind === "no-staff") { setNoShopEmail(me.email); setNoShop(true); setLoading(false); return; }
+        setStaff(me.staff);
+        const [cats, prods, apprs] = await Promise.all([
+          backend.listCategories(), backend.listProducts(), backend.listApprovers(),
+        ]);
         if (cancelled) return;
         setCategories(cats);
         setProducts(prods);
+        setApprovers(apprs);
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : "Couldn't load the shop.");
       } finally {
@@ -62,7 +74,7 @@ export function CounterScreen() {
       }
     })();
     return () => { cancelled = true; };
-  }, [backend, router]);
+  }, [backend]);
 
   const byId = React.useMemo(() => new Map(products.map((p) => [p.id, p])), [products]);
   const results = React.useMemo(() => searchProducts(products, query, categoryId), [products, query, categoryId]);
@@ -71,13 +83,14 @@ export function CounterScreen() {
   const blocker = staff
     ? saleBlocker({
         lines: sale.lines, products: byId, discountPct, discountLimitPct: staff.discountLimitPct,
-        pinApproved: sale.pinApproved, phone: sale.phone, method: sale.method,
+        pinApproved: sale.approvalId !== null, phone: sale.phone, method: sale.method,
         cashReceived: sale.cashReceived, paymentRef: sale.paymentRef,
       })
     : "Loading";
 
   // Any change to the sale clears the last error.
   React.useEffect(() => { setSaleError(""); }, [sale.lines, sale.discount, sale.phone, sale.method, sale.cashReceived, sale.paymentRef]);
+  React.useEffect(() => { setPinMessage(""); }, [sale.pin, sale.approverId]);
 
   const add = (p: Product) => { setSaleError(""); say(sale.addProduct(p)); };
 
@@ -88,10 +101,29 @@ export function CounterScreen() {
   };
 
   const onCheckPin = async () => {
-    const ok = await backend.checkManagerPin(sale.pin);
-    if (ok === false) { setPinError(true); return; }
-    setPinError(false);
-    sale.setPinApproved(true); // null = the database checks it when saving
+    if (!sale.approverId || checkingPin) return;
+    setCheckingPin(true);
+    setPinMessage("");
+    try {
+      // Checked for real, now, against the named manager — and the attempt is recorded
+      // whether or not it worked. The old version just carried the PIN into the sale
+      // and let the cashier find out it was wrong after the customer had waited.
+      const r = await backend.verifyManagerPin(sale.approverId, sale.pin);
+      if (r.ok) {
+        sale.setApproval(r.approvalId);
+        setApprovedBy(r.approverName);
+        return;
+      }
+      setPinMessage(
+        r.locked
+          ? "Too many wrong tries. This manager's PIN is locked for 10 minutes. The owner can see the attempts."
+          : `Wrong PIN. ${r.triesLeft} ${r.triesLeft === 1 ? "try" : "tries"} left before it locks.`,
+      );
+    } catch (e) {
+      setPinMessage(e instanceof Error ? e.message : "Couldn't check the PIN.");
+    } finally {
+      setCheckingPin(false);
+    }
   };
 
   const onComplete = async () => {
@@ -103,7 +135,7 @@ export function CounterScreen() {
         lines: sale.lines,
         paymentMethod: sale.method,
         discountPct,
-        managerPin: discountPct > (staff?.discountLimitPct ?? 0) ? sale.pin : null,
+        approvalId: discountPct > (staff?.discountLimitPct ?? 0) ? sale.approvalId : null,
         customerPhone: sale.phone || null,
         cashReceived: sale.method === "cash" ? Number(sale.cashReceived) : null,
         paymentRef: sale.method === "cash" ? null : sale.paymentRef,
@@ -112,7 +144,10 @@ export function CounterScreen() {
       loadProducts().catch(() => say("Sale saved, but stock didn't refresh. Reload the page."));
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Couldn't complete the sale.";
-      if (/PIN/i.test(msg)) { sale.setPinApproved(false); setPinError(true); }
+      // An expired session must not look like a broken account, and the sale lines stay
+      // exactly where they are so nothing has to be rung up twice.
+      if (isSessionExpired(msg)) { setSaleError(msg); return; }
+      if (/approval|PIN/i.test(msg)) { sale.setApproval(null); setPinMessage(msg); }
       setSaleError(msg);
     } finally {
       setSubmitting(false);
@@ -122,7 +157,8 @@ export function CounterScreen() {
   const onNewSale = React.useCallback(() => {
     setReceipt(null);
     useSale.getState().reset();
-    setPinError(false);
+    setPinMessage("");
+    setApprovedBy(null);
     setQuery("");
     setTimeout(() => searchRef.current?.focus(), 0);
   }, []);
@@ -130,10 +166,11 @@ export function CounterScreen() {
   if (loading) {
     return <div className="flex min-h-screen items-center justify-center text-muted">Loading the shop…</div>;
   }
+  if (noShop) return <NoShopCard email={noShopEmail} />;
   if (loadError || !staff) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-3 p-6 text-center">
-        <p className="text-bad-ink">{loadError || "Not signed in."}</p>
+        <p className="text-bad-ink">{loadError || "Couldn't load the shop."}</p>
         <Button onClick={() => window.location.reload()}>Try again</Button>
       </div>
     );
@@ -156,25 +193,78 @@ export function CounterScreen() {
         </div>
         <div className="flex flex-wrap items-center gap-4 text-sm">
           <span className="text-[#c9d2cc]">{today}</span>
-          <span className="flex items-center gap-2">
-            <span className="flex size-7 items-center justify-center rounded-full bg-[#2c3a34] text-xs font-semibold">
-              {staff.name.slice(0, 2).toUpperCase()}
-            </span>
-            {staff.name} · <span className="capitalize">{staff.role}</span>
-          </span>
-          {backend.mode === "supabase" && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-white hover:bg-white/10"
-              onClick={async () => { await backend.signOut(); router.replace("/login"); }}
+          {/* The PIN link lives in here, not in the header itself: the header already
+              wraps to two rows at 390px, and setting a PIN is a once-a-year task. */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setMenuOpen((v) => !v)}
+              aria-expanded={menuOpen}
+              aria-haspopup="menu"
+              className="flex min-h-11 items-center gap-2 rounded-lg px-2 py-1 hover:bg-white/10 focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus"
             >
-              <LogOut className="size-4" aria-hidden /> Sign out
-            </Button>
-          )}
+              <span className="flex size-7 items-center justify-center rounded-full bg-[#2c3a34] text-xs font-semibold">
+                {staff.name.slice(0, 2).toUpperCase()}
+              </span>
+              <span>{staff.name} · <span className="capitalize">{staff.role}</span></span>
+            </button>
+
+            {menuOpen && (
+              <>
+                <button
+                  type="button"
+                  aria-label="Close the menu"
+                  className="fixed inset-0 z-10 cursor-default"
+                  onClick={() => setMenuOpen(false)}
+                />
+                <div
+                  role="menu"
+                  className="absolute right-0 z-20 mt-1 flex w-56 flex-col overflow-hidden rounded-lg border border-line bg-surface py-1 text-ink shadow-lg"
+                >
+                  {staff.role !== "cashier" && (
+                    <Link
+                      href="/pin"
+                      role="menuitem"
+                      className="flex min-h-11 items-center gap-2.5 px-3 text-[15px] hover:bg-subtle"
+                    >
+                      <KeyRound className="size-4 text-muted" aria-hidden />
+                      {staff.hasPin ? "Change approval PIN" : "Set approval PIN"}
+                    </Link>
+                  )}
+                  {backend.mode === "supabase" ? (
+                    <a
+                      href="/logout"
+                      role="menuitem"
+                      className="flex min-h-11 items-center gap-2.5 px-3 text-[15px] hover:bg-subtle"
+                    >
+                      <LogOut className="size-4 text-muted" aria-hidden /> Sign out
+                    </a>
+                  ) : (
+                    <span className="px-3 py-2 text-[13px] text-muted">
+                      Demo mode · no sign-in, nothing is saved
+                    </span>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </header>
 
+      {/* The live database starts empty, so this is the genuine first screen after a
+          fresh setup — not a hypothetical edge case. */}
+      {products.length === 0 ? (
+        <main className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center gap-3 px-6 py-12 text-center">
+          <PackageOpen className="size-12 text-line-strong" aria-hidden />
+          <h2 className="text-lg font-semibold">No products yet</h2>
+          <p className="text-ink-soft">
+            There is nothing to sell until this shop has a catalogue. Load the sample
+            products with <span className="code">supabase/seed.sql</span>, or run{" "}
+            <span className="code">pnpm doctor</span> to see what else is missing.
+          </p>
+          <Button onClick={() => window.location.reload()}>Check again</Button>
+        </main>
+      ) : (
       <main className="mx-auto box-border flex w-full max-w-[1480px] flex-1 flex-wrap items-start gap-5 px-6 pb-8 pt-5">
         <ProductPicker
           searchRef={searchRef}
@@ -201,12 +291,15 @@ export function CounterScreen() {
           nextInvoiceHint="Invoice number is added when you complete"
           submitting={submitting}
           error={saleError}
-          pinMode={backend.mode === "demo" ? "local" : "server"}
+          approvers={approvers}
+          checkingPin={checkingPin}
+          pinMessage={pinMessage}
+          approvedBy={approvedBy}
           onCheckPin={onCheckPin}
-          pinError={pinError}
           onComplete={onComplete}
         />
       </main>
+      )}
 
       {receipt && <ReceiptDialog receipt={receipt} onNewSale={onNewSale} />}
     </div>

@@ -8,8 +8,12 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
+    "typecheck": "tsc --noEmit",
     "test:db": "scripts/test-db.sh",
-    "typecheck": "tsc --noEmit"
+    "doctor": "tsx scripts/doctor.mts",
+    "shop:init": "tsx scripts/shop-init.mts",
+    "staff:add": "tsx scripts/create-staff.mts",
+    "check": "tsx scripts/doctor.mts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",
@@ -32,7 +36,12 @@
     "eslint": "^9",
     "eslint-config-next": "15.5.28",
     "tailwindcss": "^4",
+    "tsx": "^4.23.15",
     "typescript": "^5",
     "vitest": "^5.0.5"
-  }
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "packageManager": "pnpm@12.14.0"
 }

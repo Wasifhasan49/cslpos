@@ -1,10 +1,15 @@
--- Sample catalogue for trying the app. Replace with the real BMS export later.
--- Safe to run once on a fresh database.
+-- Sample data for trying the app: a generic "Demo Shop" with a small catalogue.
+--
+-- This is NOT any real shop. A real shop gets created by `pnpm shop:init`, which asks
+-- for its own name, invoice prefix and starting invoice number — so no shop inherits
+-- another shop's identity or invoice sequence.
+--
+-- Safe to run more than once: everything is `on conflict do nothing`.
 
 insert into public.shops (id, name, address, phone, invoice_prefix, next_invoice)
-values ('00000000-0000-4000-8000-000000000001', 'Computer Services',
-        'Shop 9 & 10, Ground Floor, BCS Computer City, IDB Bhaban, Agargaon, Dhaka-1207',
-        '01678-090027', 'CSLINV', 1790);
+values ('00000000-0000-4000-8000-000000000001', 'Demo Shop',
+        '123 Example Road, Dhaka', '01700-000000', 'DEMO', 1)
+on conflict (id) do nothing;
 
 insert into public.categories (id, shop_id, name, sort) values
   ('00000000-0000-4000-8000-0000000000c1', '00000000-0000-4000-8000-000000000001', 'Cables & adapters', 1),
@@ -12,7 +17,8 @@ insert into public.categories (id, shop_id, name, sort) values
   ('00000000-0000-4000-8000-0000000000c3', '00000000-0000-4000-8000-000000000001', 'RAM & storage', 3),
   ('00000000-0000-4000-8000-0000000000c4', '00000000-0000-4000-8000-000000000001', 'Networking', 4),
   ('00000000-0000-4000-8000-0000000000c5', '00000000-0000-4000-8000-000000000001', 'Laptops', 5),
-  ('00000000-0000-4000-8000-0000000000c6', '00000000-0000-4000-8000-000000000001', 'Printing', 6);
+  ('00000000-0000-4000-8000-0000000000c6', '00000000-0000-4000-8000-000000000001', 'Printing', 6)
+on conflict (id) do nothing;
 
 insert into public.products (id, shop_id, category_id, code, name, brand, price, warranty_months, is_serial, stock, reorder_level) values
   ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000c1', 'VEN-AUD-35',  'Vention Audio 3.5mm to 2 Female 3.5mm',    'Vention',  500,   12, false, 4,  3),
@@ -25,7 +31,8 @@ insert into public.products (id, shop_id, category_id, code, name, brand, price,
   ('00000000-0000-4000-8000-0000000000a8', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000c3', 'SAM-980-500', 'Samsung 980 500GB NVMe SSD',               'Samsung',  6200,  60, true,  3,  2),
   ('00000000-0000-4000-8000-0000000000a9', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000c4', 'TPL-C6',      'TP-Link Archer C6 Router',                 'TP-Link',  3300,  12, true,  2,  2),
   ('00000000-0000-4000-8000-0000000000aa', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000c5', 'ASU-X1504',   'ASUS Vivobook 15 (i5, 16GB, 512GB SSD)',   'ASUS',     72000, 24, true,  2,  1),
-  ('00000000-0000-4000-8000-0000000000ab', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000c6', 'HP-680-BK',   'HP 680 Black Ink Cartridge',               'HP',       1050,   0, false, 0,  2);
+  ('00000000-0000-4000-8000-0000000000ab', '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000c6', 'HP-680-BK',   'HP 680 Black Ink Cartridge',               'HP',       1050,   0, false, 0,  2)
+on conflict (id) do nothing;
 
 insert into public.serials (shop_id, product_id, serial) values
   ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000a7', 'KVR8A2410933'),
@@ -37,7 +44,9 @@ insert into public.serials (shop_id, product_id, serial) values
   ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000a9', '22406C6010382'),
   ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000a9', '22406C6010415'),
   ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000aa', 'R9N0CV12A345'),
-  ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000aa', 'R9N0CV12A388');
+  ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000aa', 'R9N0CV12A388')
+on conflict (shop_id, serial) do nothing;
 
 insert into public.product_costs (product_id, shop_id, cost) values
-  ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-000000000001', 250);
+  ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-000000000001', 250)
+on conflict (product_id) do nothing;

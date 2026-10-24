@@ -6,7 +6,12 @@ interface SaleState {
   lines: CartLine[];
   discount: string;
   pin: string;
-  pinApproved: boolean;
+  /** Which owner/manager is being asked to approve. The counter names the approver so
+   *  the audit log records who it actually was, instead of whichever hash matched. */
+  approverId: string | null;
+  /** From verify_manager_pin(). Non-null means really approved, checked and recorded —
+   *  not "typed, we'll find out when the customer has already waited." */
+  approvalId: string | null;
   phone: string;
   method: PaymentMethod;
   cashReceived: string;
@@ -19,7 +24,8 @@ interface SaleState {
   removeLine: (productId: string) => void;
   setDiscount: (v: string) => void;
   setPin: (v: string) => void;
-  setPinApproved: (v: boolean) => void;
+  setApprover: (id: string | null) => void;
+  setApproval: (id: string | null) => void;
   setPhone: (v: string) => void;
   setMethod: (m: PaymentMethod) => void;
   setCashReceived: (v: string) => void;
@@ -31,7 +37,8 @@ const empty = {
   lines: [] as CartLine[],
   discount: "",
   pin: "",
-  pinApproved: false,
+  approverId: null as string | null,
+  approvalId: null as string | null,
   phone: "",
   method: "cash" as PaymentMethod,
   cashReceived: "",
@@ -74,9 +81,11 @@ export const useSale = create<SaleState>((set, get) => ({
     }),
 
   removeLine: (productId) => set({ lines: get().lines.filter((l) => l.productId !== productId) }),
-  setDiscount: (v) => set({ discount: v.replace(/[^0-9.]/g, "").slice(0, 5), pin: "", pinApproved: false }),
+  // Changing the discount drops any approval: it was approved for a different amount.
+  setDiscount: (v) => set({ discount: v.replace(/[^0-9.]/g, "").slice(0, 5), pin: "", approvalId: null }),
   setPin: (v) => set({ pin: v.replace(/\D/g, "").slice(0, 6) }),
-  setPinApproved: (v) => set({ pinApproved: v }),
+  setApprover: (id) => set({ approverId: id, pin: "", approvalId: null }),
+  setApproval: (id) => set({ approvalId: id }),
   setPhone: (v) => set({ phone: v.replace(/\D/g, "").slice(0, 11) }),
   setMethod: (m) => set({ method: m, paymentRef: "" }),
   setCashReceived: (v) => set({ cashReceived: v.replace(/\D/g, "").slice(0, 9) }),
