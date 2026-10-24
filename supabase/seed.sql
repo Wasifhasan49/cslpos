@@ -92,3 +92,15 @@ on conflict (shop_id, serial) do nothing;
 insert into public.product_costs (product_id, shop_id, cost) values
   ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-000000000001', 250)
 on conflict (product_id) do nothing;
+
+-- Units, VAT rates, payment methods, warranty terms, discount reasons, role
+-- permissions and document sequences. Same function shop:init calls, so the demo shop
+-- is set up exactly like a real one.
+select public.seed_shop_defaults('00000000-0000-4000-8000-000000000001');
+
+-- A unit and a warranty term on a couple of products, so P3's screens have something
+-- to show and the receipt can print real warranty wording.
+update public.products set unit_id = (select id from public.units where shop_id = '00000000-0000-4000-8000-000000000001' and name = 'pcs')
+  where shop_id = '00000000-0000-4000-8000-000000000001';
+update public.products set warranty_term_id = (select id from public.warranty_terms where shop_id = '00000000-0000-4000-8000-000000000001' and name = '1 year replacement')
+  where shop_id = '00000000-0000-4000-8000-000000000001' and warranty_months = 12;

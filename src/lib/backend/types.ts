@@ -1,6 +1,6 @@
 import type {
-  ApprovalResult, Approver, BranchAdmin, Category, Product, Receipt, Role, SaleInput,
-  StaffLookup, StaffMember,
+  ApprovalResult, Approver, BranchAdmin, Category, FeatureKey, Product, Receipt, Role,
+  SaleInput, SettingRow, SettingTable, SettingsBundle, StaffLookup, StaffMember,
 } from "../types";
 
 /** Everything the screens need from "the server". Demo mode and Supabase both implement this. */
@@ -38,4 +38,19 @@ export interface Backend {
   setStaffAccess(input: {
     staffId: string; role?: Role; discountLimitPct?: number; active?: boolean;
   }): Promise<void>;
+
+  // --- Settings (P2). Which features are on decides what the menu shows. ---
+  /** The whole Settings area in one load, so switching section is instant. */
+  loadSettings(): Promise<SettingsBundle>;
+  /** Which features this shop has turned on. Loaded with the staff, because the menu
+   *  needs it before any Settings screen is opened. */
+  listFeatures(): Promise<Record<string, boolean>>;
+  setFeature(feature: FeatureKey, enabled: boolean): Promise<void>;
+  saveShopDetails(values: Record<string, string | number | null>): Promise<void>;
+  /** Add (no id) or change (id) a row in one of the setup lists. */
+  saveSettingRow(table: SettingTable, id: string | null, values: Record<string, string | number | boolean | null>): Promise<SettingRow>;
+  setRolePermission(role: Role, perm: string, allowed: boolean, limit?: number | null): Promise<void>;
+  /** `allowed: null` clears the override and puts the person back on their role. */
+  setStaffPermission(staffId: string, perm: string, allowed: boolean | null, limit?: number | null): Promise<void>;
+  setDocumentNextNumber(branchId: string, docType: string, next: number, prefix?: string): Promise<void>;
 }

@@ -78,3 +78,40 @@ describe("the phone tab bar", () => {
     }
   });
 });
+
+describe("feature switches hide sections", () => {
+  // "Off features disappear from menus": a one-branch cable shop should not be looking
+  // at a trial balance or a transfer screen.
+  const allOff = {
+    purchase_orders: false, transfers: false, accounts: false,
+  };
+
+  it("hides Purchases, Transfers and Accounts until the shop turns them on", () => {
+    expect(navFor("owner", {}, allOff).map((n) => n.href))
+      .not.toContain("/purchases");
+    expect(navFor("owner", {}, allOff).map((n) => n.href)).not.toContain("/transfers");
+    expect(navFor("owner", {}, allOff).map((n) => n.href)).not.toContain("/accounts");
+  });
+
+  it("hides them from the OWNER too, because the switch is where that decision lives", () => {
+    expect(canSee("/accounts", "owner", {}, allOff)).toBe(false);
+  });
+
+  it("shows them once the feature is on", () => {
+    const on = { ...allOff, transfers: true };
+    expect(canSee("/transfers", "owner", {}, on)).toBe(true);
+    expect(canSee("/transfers", "manager", {}, on)).toBe(true);
+    expect(canSee("/accounts", "owner", {}, on)).toBe(false);
+  });
+
+  it("a feature being on never promotes a role that could not see it anyway", () => {
+    const on = { purchase_orders: true, transfers: true, accounts: true };
+    expect(canSee("/accounts", "cashier", {}, on)).toBe(false);
+    expect(canSee("/purchases", "cashier", {}, on)).toBe(false);
+    expect(canSee("/accounts", "manager", {}, on)).toBe(false);
+  });
+
+  it("with no feature map at all, nothing is hidden (so the menu never goes blank)", () => {
+    expect(navFor("owner")).toHaveLength(12);
+  });
+});

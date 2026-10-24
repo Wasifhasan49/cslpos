@@ -155,8 +155,31 @@ export const SALE_ERROR_CODES = [
   "NOT_OWNER", "NO_SELF_EDIT", "STAFF_NOT_FOUND", "LAST_OWNER", "BAD_ROLE", "BAD_LIMIT",
   "BRANCH_REQUIRED", "BRANCH_NOT_ALLOWED", "BRANCH_NOT_FOUND", "BRANCH_NAME_REQUIRED",
   "BAD_BRANCH_CODE", "LAST_BRANCH", "NO_STOCK_LOCATION", "LOCATION_NAME_REQUIRED",
-  "LOCATION_NOT_FOUND",
+  "LOCATION_NOT_FOUND", "NOT_ALLOWED", "BAD_PERMISSION", "BAD_SETTING_TABLE",
+  "BAD_SETTING_FIELD", "NOTHING_TO_SAVE", "SETTING_NOT_FOUND", "BAD_DOCUMENT_NUMBER",
+  "NUMBER_GOES_BACKWARDS", "BAD_DISCOUNT_TYPE", "BAD_CATEGORY", "BAD_CHARGE",
 ] as const;
+
+/** Plain English for each permission, so "you can't do that" says which thing. */
+const PERMISSION_WORDS: Record<string, string> = {
+  sell: "sell at the counter",
+  give_discount: "give a discount",
+  change_price: "change a price",
+  see_cost: "see cost prices",
+  void_sale: "void a sale",
+  return_sale: "take a return",
+  reprint: "print a receipt again",
+  approve: "approve this",
+  receive_stock: "receive stock",
+  adjust_stock: "adjust stock",
+  transfer_stock: "transfer stock",
+  view_reports: "see reports",
+  export_reports: "print or export reports",
+  view_accounts: "see the accounts",
+  print_cheques: "print cheques",
+  edit_settings: "change settings",
+  manage_staff: "manage staff",
+};
 
 /** Split a Postgres error message into its code and the detail after the first colon.
  *  Product names can contain colons, so only the FIRST one separates them. */
@@ -214,6 +237,19 @@ export function friendlyError(raw: string): string {
     case "NO_STOCK_LOCATION": return `${detail ?? "That branch"} has no stock location yet. Add one in Settings → Branches.`;
     case "LOCATION_NAME_REQUIRED": return "Give the stock location a name.";
     case "LOCATION_NOT_FOUND": return "That stock location isn't in this branch.";
+    case "NOT_ALLOWED":
+      return `You aren't allowed to ${PERMISSION_WORDS[detail ?? ""] ?? "do that"}. Ask the owner.`;
+    case "BAD_PERMISSION": return `"${detail ?? ""}" isn't a permission.`;
+    case "BAD_SETTING_TABLE": return "That isn't a setting that can be changed here.";
+    case "BAD_SETTING_FIELD": return `"${detail ?? ""}" isn't a field on that setting.`;
+    case "NOTHING_TO_SAVE": return "Nothing was changed.";
+    case "SETTING_NOT_FOUND": return "That setting no longer exists. Reload and try again.";
+    case "BAD_DOCUMENT_NUMBER": return "A document number must be a whole number of 1 or more.";
+    case "NUMBER_GOES_BACKWARDS":
+      return `Document numbers only go forward. This one is already at ${detail ?? "a higher number"}.`;
+    case "BAD_DISCOUNT_TYPE": return "Pick a discount reason from the list.";
+    case "BAD_CATEGORY": return "Pick a category from the list.";
+    case "BAD_CHARGE": return "That extra charge isn't set up in this shop.";
     // Keep the raw text so a code we have not seen can still be reported and fixed,
     // instead of everything looking like a network problem.
     default: return `Something went wrong. Tell the owner this: ${raw.trim().slice(0, 120)}`;

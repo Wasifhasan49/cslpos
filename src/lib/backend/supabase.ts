@@ -2,8 +2,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { friendlyError } from "../sale";
 import { supabaseBrowser } from "../supabase/client";
 import type {
-  ApprovalResult, Approver, BranchAdmin, Category, PaymentMethod, Product, Receipt, Role,
-  SaleInput, StaffLookup, StaffMember,
+  ApprovalResult, Approver, BranchAdmin, Category, FeatureKey, PaymentMethod, Product,
+  Receipt, Role, SaleInput, SettingRow, SettingTable, SettingsBundle, StaffLookup,
+  StaffMember,
 } from "../types";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
 import type { Backend } from "./types";
@@ -115,12 +116,16 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         p_customer_phone: input.customerPhone,
         p_cash_received: input.cashReceived,
         p_payment_ref: input.paymentRef,
+        p_charges: input.chargeIds?.length ? input.chargeIds.map((id) => ({ charge_id: id })) : null,
+        p_discount_type_id: input.discountTypeId ?? null,
+        p_category_id: input.categoryId ?? null,
       });
       if (error) throw new Error(friendlyError(error.message));
       const r = data as Record<string, unknown>;
       const items = (r.items as Record<string, unknown>[]).map((i) => ({
         name: String(i.name), qty: num(i.qty), unitPrice: num(i.unit_price), lineTotal: num(i.line_total),
         warrantyUntil: (i.warranty_until as string | null) ?? null, serials: (i.serials as string[]) ?? [],
+        vatPct: num(i.vat_pct), vatAmount: num(i.vat_amount), vatInclusive: i.vat_inclusive !== false,
       }));
       return {
         id: String(r.id), invoiceNo: String(r.invoice_no), createdAt: String(r.created_at),
@@ -129,6 +134,11 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         branchAddress: (r.branch_address as string | null) ?? null,
         branchPhone: (r.branch_phone as string | null) ?? null,
         subtotal: num(r.subtotal), discountPct: num(r.discount_pct), discountAmount: num(r.discount_amount), total: num(r.total),
+        vatAmount: num(r.vat_amount),
+        chargesAmount: num(r.charges_amount),
+        charges: ((r.charges as { name: string; amount: number | string }[] | null) ?? []).map((c) => ({ name: c.name, amount: num(c.amount) })),
+        receiptFooter: (r.receipt_footer as string | null) ?? null,
+        binVat: (r.bin_vat as string | null) ?? null,
         paymentMethod: r.payment_method as PaymentMethod,
         cashReceived: numOrNull(r.cash_received), changeGiven: numOrNull(r.change_given),
         paymentRef: (r.payment_ref as string | null) ?? null, customerPhone: (r.customer_phone as string | null) ?? null,
@@ -221,6 +231,101 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         p_role: role ?? null,
         p_discount_limit_pct: discountLimitPct ?? null,
         p_active: active ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    // --- Settings ---
+
+    async listFeatures(): Promise<Record<string, boolean>> {
+      const { data, error } = await sb.from("shop_features").select("feature, enabled");
+      // Never block the app on this: with no answer, nothing extra is switched on,
+      // which is the same as a brand-new shop.
+      if (error) return {};
+      return Object.fromEntries((data ?? []).map((r) => [r.feature, r.enabled]));
+    },
+
+    async loadSettings(): Promise<SettingsBundle> {
+      const TABLES: SettingTable[] = [
+        "units", "vat_rates", "hs_codes", "extra_charges", "discount_types",
+        "payment_methods", "card_types", "bank_accounts", "warranty_terms",
+        "transaction_categories",
+      ];
+      const [shopRes, featRes, keysRes, roleRes, staffPermRes, docRes, ...listRes] = await Promise.all([
+        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct").limit(1).maybeSingle(),
+        sb.from("shop_features").select("feature, enabled"),
+        sb.from("permission_keys").select("key, label, area, has_limit").order("sort"),
+        sb.from("role_permissions").select("role, perm, allowed, num_limit"),
+        sb.from("staff_permissions").select("staff_id, perm, allowed, num_limit"),
+        sb.from("document_sequences").select("branch_id, doc_type, prefix, next_number"),
+        ...TABLES.map((t) => sb.from(t).select("*")),
+      ]);
+      if (shopRes.error) throw loadError("the shop settings", shopRes.error);
+      const shop = shopRes.data;
+      if (!shop) throw new Error("This shop no longer exists.");
+
+      const lists = Object.fromEntries(
+        TABLES.map((t, i) => [t, ((listRes[i].data ?? []) as SettingRow[])]),
+      ) as Record<SettingTable, SettingRow[]>;
+
+      return {
+        shop: {
+          name: shop.name, address: shop.address, phone: shop.phone, email: shop.email,
+          logoUrl: shop.logo_url, binVat: shop.bin_vat, receiptFooter: shop.receipt_footer,
+          invoicePrefix: shop.invoice_prefix, currency: shop.currency, aitPct: num(shop.ait_pct),
+        },
+        features: Object.fromEntries((featRes.data ?? []).map((r) => [r.feature, r.enabled])),
+        lists,
+        permissionKeys: (keysRes.data ?? []).map((k) => ({
+          key: k.key, label: k.label, area: k.area, hasLimit: k.has_limit,
+        })),
+        rolePermissions: (roleRes.data ?? []).map((r) => ({
+          role: r.role as Role, perm: r.perm, allowed: r.allowed, numLimit: numOrNull(r.num_limit),
+        })),
+        staffPermissions: (staffPermRes.data ?? []).map((r) => ({
+          staffId: r.staff_id, perm: r.perm, allowed: r.allowed, numLimit: numOrNull(r.num_limit),
+        })),
+        documentSequences: (docRes.data ?? []).map((d) => ({
+          branchId: d.branch_id, docType: d.doc_type, prefix: d.prefix, nextNumber: d.next_number,
+        })),
+      };
+    },
+
+    async setFeature(feature: FeatureKey, enabled: boolean): Promise<void> {
+      const { error } = await sb.rpc("set_feature", { p_feature: feature, p_enabled: enabled });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async saveShopDetails(values): Promise<void> {
+      const { error } = await sb.rpc("save_shop_details", { p_values: values });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async saveSettingRow(table, id, values): Promise<SettingRow> {
+      const { data, error } = await sb.rpc("save_setting_row", {
+        p_table: table, p_id: id, p_values: values,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return data as SettingRow;
+    },
+
+    async setRolePermission(role, perm, allowed, limit): Promise<void> {
+      const { error } = await sb.rpc("set_role_permission", {
+        p_role: role, p_perm: perm, p_allowed: allowed, p_limit: limit ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async setStaffPermission(staffId, perm, allowed, limit): Promise<void> {
+      const { error } = await sb.rpc("set_staff_permission", {
+        p_staff_id: staffId, p_perm: perm, p_allowed: allowed, p_limit: limit ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async setDocumentNextNumber(branchId, docType, next, prefix): Promise<void> {
+      const { error } = await sb.rpc("set_document_next_number", {
+        p_branch_id: branchId, p_doc_type: docType, p_next: next, p_prefix: prefix ?? null,
       });
       if (error) throw new Error(friendlyError(error.message));
     },

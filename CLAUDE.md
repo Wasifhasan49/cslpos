@@ -93,6 +93,20 @@ chains with many branches; CSL's single-branch store is only the first customer.
   directly writable now.
 - RLS helpers are wrapped as `(select public.current_shop_id())` so they are evaluated
   once per statement, not once per row.
+- **Permissions sit on top of roles** (P2). 17 keys in `permission_keys`, defaults per
+  role in `role_permissions`, per-person overrides in `staff_permissions`, and
+  `has_permission()` / `permission_limit()` are what the FUNCTIONS check — so an owner
+  can let one trusted cashier take deliveries without making them a manager. Owners
+  always pass, or a shop could lock itself out of its own settings.
+- **Feature switches** in `shop_features`, read by `feature_on()` and by `navFor()`, so
+  an off feature has no menu item. Everything advanced is off for a new shop.
+- **VAT** is per line, not per total, in `complete_sale()`. Inclusive (the normal case
+  here) does not change what the customer pays; exclusive is added on top. A discount
+  reduces the taxable amount, so inclusive VAT is recalculated on the discounted line —
+  doing it on the total overstates the tax on every discounted sale.
+- **The Bangladesh area list** (divisions → districts → upazilas) is national reference
+  data with no `shop_id`, generated into a migration by `scripts/gen-areas.mts` from
+  github.com/nuhil/bangladesh-geocode. Re-run the generator rather than hand-editing.
 - `src/lib/sale.ts` repeats the rules for instant on-screen feedback. Keep the two in sync;
   the tests in `src/lib/sale.test.ts` and `supabase/tests/sales_rules_test.sql` cover the
   same cases (e.g. 5% off 450 → 23 discount, total 427).
@@ -127,7 +141,8 @@ The list below is the original short version; BUILD_PROMPTS.md wins where they d
    `pnpm staff:add`, `pnpm check`, and the `/pin` screen all exist. Still outstanding from
    P0: the migration has never been applied to a live Supabase project, so the end-to-end
    acceptance test (sell a splitter, approve a discount) has not been run against one.
-2. ~~**Branches, app shell and roles**~~ — done (P1).
+2. ~~**Branches, app shell and roles**~~ — done (P1). Setup lists, permissions, VAT and
+   feature switches — database done (P2); the Settings screens are still to build.
 3. **Import from BMS**: CSV/Excel import of products and serials (P4).
 4. **Owner dashboard** (phone-first), see product decisions above.
 5. **Shifts + cash check**: open with opening cash, close with counted cash; flag shortfalls.

@@ -6,8 +6,9 @@
 // mode is also the sales demo. Nothing here names a real shop.
 import { addMonths, computeTotals, dhakaToday, friendlyError, isValidPhone, roundTaka } from "../sale";
 import type {
-  ApprovalResult, Approver, BranchAdmin, Product, Receipt, ReceiptLine, Role, SaleInput,
-  SerialUnit, Staff, StaffLookup, StaffMember,
+  ApprovalResult, Approver, BranchAdmin, FeatureKey, Product, Receipt, ReceiptLine, Role,
+  SaleInput, SerialUnit, SettingRow, SettingTable, SettingsBundle, Staff, StaffLookup,
+  StaffMember,
 } from "../types";
 import type { Backend } from "./types";
 import {
@@ -50,6 +51,102 @@ export function createDemoBackend(): Backend {
 
   const nextInvoice: Record<string, number> = {};
   for (const b of branches) nextInvoice[b.id] = 1;
+
+  // Demo settings: the same defaults seed_shop_defaults() gives a real new shop, so the
+  // demo shows what a shop actually opens with.
+  const features: Record<string, boolean> = {
+    vat: false, multi_location: false, price_lists: false, credit_sales: false,
+    purchase_orders: false, transfers: false, accounts: false, sms: false,
+    extra_charges: false, hs_codes: false, managers_see_dashboard: false,
+    managers_see_accounts: false, managers_see_settings: false,
+  };
+  const shopDetails = {
+    name: DEMO_SHOP_NAME, address: "123 Example Road, Dhaka", phone: "01700-000000",
+    email: null as string | null, logoUrl: null as string | null, binVat: null as string | null,
+    receiptFooter: "Thank you. Keep this receipt for warranty claims.",
+    invoicePrefix: "DEMO", currency: "BDT", aitPct: 0,
+  };
+  const row = (o: Record<string, string | number | boolean | null>): SettingRow =>
+    ({ id: crypto.randomUUID(), ...o }) as SettingRow;
+  const lists: Record<SettingTable, SettingRow[]> = {
+    units: [
+      row({ name: "pcs", allow_decimals: false }), row({ name: "box", allow_decimals: false }),
+      row({ name: "set", allow_decimals: false }), row({ name: "pair", allow_decimals: false }),
+      row({ name: "metre", allow_decimals: true }), row({ name: "kg", allow_decimals: true }),
+    ],
+    vat_rates: [
+      row({ name: "VAT 5% (inclusive)", pct: 5, inclusive: true, is_default: true }),
+      row({ name: "VAT 7.5% (inclusive)", pct: 7.5, inclusive: true, is_default: false }),
+      row({ name: "VAT 15% (inclusive)", pct: 15, inclusive: true, is_default: false }),
+      row({ name: "No VAT", pct: 0, inclusive: true, is_default: false }),
+    ],
+    hs_codes: [],
+    extra_charges: [
+      row({ name: "Delivery", kind: "fixed", value: 0, taxable: false }),
+      row({ name: "Installation", kind: "fixed", value: 0, taxable: false }),
+      row({ name: "Service charge", kind: "percent", value: 0, taxable: false }),
+    ],
+    discount_types: [
+      row({ name: "Regular customer" }), row({ name: "Bulk purchase" }),
+      row({ name: "Staff discount" }), row({ name: "Festival offer" }), row({ name: "Price match" }),
+    ],
+    payment_methods: [
+      row({ key: "cash", label: "Cash", enabled: true, needs_ref: false }),
+      row({ key: "bkash", label: "bKash", enabled: true, needs_ref: true }),
+      row({ key: "nagad", label: "Nagad", enabled: true, needs_ref: true }),
+      row({ key: "card", label: "Card", enabled: true, needs_ref: true }),
+      row({ key: "rocket", label: "Rocket", enabled: false, needs_ref: true }),
+      row({ key: "bank", label: "Bank transfer", enabled: false, needs_ref: true }),
+      row({ key: "cheque", label: "Cheque", enabled: false, needs_ref: true }),
+      row({ key: "due", label: "On due (baki)", enabled: false, needs_ref: false }),
+    ],
+    card_types: [
+      row({ name: "Visa", charge_pct: 2 }), row({ name: "Mastercard", charge_pct: 2 }),
+      row({ name: "American Express", charge_pct: 3 }),
+    ],
+    bank_accounts: [row({ name: "Counter cash drawer", kind: "cash_drawer" })],
+    warranty_terms: [
+      row({ name: "No warranty", months: 0, receipt_text: "No warranty on this item." }),
+      row({ name: "6 months replacement", months: 6, receipt_text: "Replacement within 6 months for manufacturing faults." }),
+      row({ name: "1 year replacement", months: 12, receipt_text: "Replacement within 1 year for manufacturing faults. Physical damage and burn marks are not covered." }),
+      row({ name: "1 year service only", months: 12, receipt_text: "Service within 1 year. Replacement is not included." }),
+      row({ name: "3 years service", months: 36, receipt_text: "Service within 3 years. Replacement is not included." }),
+    ],
+    transaction_categories: [
+      row({ name: "Walk-in" }), row({ name: "Corporate" }), row({ name: "Online" }), row({ name: "Service" }),
+    ],
+  };
+  const PERMISSION_KEYS = [
+    { key: "sell", label: "Sell at the counter", area: "counter", hasLimit: false },
+    { key: "give_discount", label: "Give a discount", area: "counter", hasLimit: true },
+    { key: "change_price", label: "Change a price within the band", area: "counter", hasLimit: false },
+    { key: "see_cost", label: "See cost prices", area: "counter", hasLimit: false },
+    { key: "void_sale", label: "Void a sale", area: "counter", hasLimit: false },
+    { key: "return_sale", label: "Take a return", area: "counter", hasLimit: false },
+    { key: "reprint", label: "Print a receipt again", area: "counter", hasLimit: false },
+    { key: "approve", label: "Approve what others need signed off", area: "counter", hasLimit: false },
+    { key: "receive_stock", label: "Receive stock", area: "stock", hasLimit: false },
+    { key: "adjust_stock", label: "Adjust or write off stock", area: "stock", hasLimit: false },
+    { key: "transfer_stock", label: "Transfer stock between branches", area: "stock", hasLimit: false },
+    { key: "view_reports", label: "See reports", area: "reports", hasLimit: false },
+    { key: "export_reports", label: "Print or export reports", area: "reports", hasLimit: false },
+    { key: "view_accounts", label: "See the accounts", area: "accounts", hasLimit: false },
+    { key: "print_cheques", label: "Print cheques", area: "accounts", hasLimit: false },
+    { key: "edit_settings", label: "Change settings", area: "admin", hasLimit: false },
+    { key: "manage_staff", label: "Add staff and change what they can do", area: "admin", hasLimit: false },
+  ];
+  const MANAGER_CAN = new Set(["sell","give_discount","change_price","see_cost","void_sale",
+    "return_sale","reprint","approve","receive_stock","adjust_stock","transfer_stock",
+    "view_reports","export_reports"]);
+  const CASHIER_CAN = new Set(["sell","give_discount","reprint"]);
+  const rolePermissions = (["owner","manager","cashier"] as Role[]).flatMap((role) =>
+    PERMISSION_KEYS.map((k) => ({
+      role, perm: k.key,
+      allowed: role === "owner" ? true : role === "manager" ? MANAGER_CAN.has(k.key) : CASHIER_CAN.has(k.key),
+      numLimit: k.key === "give_discount" ? (role === "owner" ? 100 : role === "manager" ? 10 : 5) : null,
+    })),
+  );
+  const staffPermissions: { staffId: string; perm: string; allowed: boolean; numLimit: number | null }[] = [];
 
   let pin = DEMO_PIN;
   let failedPinTries = 0;
@@ -172,6 +269,8 @@ export function createDemoBackend(): Backend {
           name: p.name, qty, unitPrice: p.price, lineTotal: p.price * qty,
           warrantyUntil: p.warrantyMonths > 0 ? addMonths(today, p.warrantyMonths) : null,
           serials: serials.filter((s) => line.serialIds.includes(s.id)).map((s) => s.serial),
+          // Demo mode does not charge VAT: the switch is off, like a new shop.
+          vatPct: 0, vatAmount: 0, vatInclusive: true,
         });
       }
 
@@ -205,7 +304,10 @@ export function createDemoBackend(): Backend {
         subtotal: totals.subtotal, discountPct: totals.discountPct, discountAmount: totals.discountAmount, total: totals.total,
         paymentMethod: input.paymentMethod,
         cashReceived: input.paymentMethod === "cash" ? input.cashReceived : null,
-        changeGiven: change, paymentRef: input.paymentRef, customerPhone: input.customerPhone, items,
+        changeGiven: change, paymentRef: input.paymentRef, customerPhone: input.customerPhone,
+        vatAmount: 0, chargesAmount: 0, charges: [],
+        receiptFooter: shopDetails.receiptFooter, binVat: shopDetails.binVat,
+        items,
       };
     },
 
@@ -287,6 +389,81 @@ export function createDemoBackend(): Backend {
       m!.role = (role ?? m!.role) as Role;
       m!.discountLimitPct = discountLimitPct ?? m!.discountLimitPct;
       m!.active = active ?? m!.active;
+    },
+
+    // --- Settings ---
+
+    async listFeatures() { return { ...features }; },
+
+    async loadSettings(): Promise<SettingsBundle> {
+      return structuredClone({
+        shop: shopDetails,
+        features,
+        lists,
+        permissionKeys: PERMISSION_KEYS,
+        rolePermissions,
+        staffPermissions,
+        documentSequences: branches.flatMap((b) =>
+          ["invoice", "grn", "po", "transfer", "return"].map((docType) => ({
+            branchId: b.id, docType, prefix: "", nextNumber: docType === "invoice" ? b.nextInvoice : 1,
+          })),
+        ),
+      });
+    },
+
+    async setFeature(feature: FeatureKey, enabled: boolean) { features[feature] = enabled; },
+
+    async saveShopDetails(values) {
+      Object.assign(shopDetails, {
+        name: (values.name as string)?.trim() || shopDetails.name,
+        address: values.address !== undefined ? (values.address as string) : shopDetails.address,
+        phone: values.phone !== undefined ? (values.phone as string) : shopDetails.phone,
+        email: values.email !== undefined ? (values.email as string) : shopDetails.email,
+        binVat: values.bin_vat !== undefined ? (values.bin_vat as string) : shopDetails.binVat,
+        receiptFooter: values.receipt_footer !== undefined ? (values.receipt_footer as string) : shopDetails.receiptFooter,
+        invoicePrefix: (values.invoice_prefix as string)?.toUpperCase() || shopDetails.invoicePrefix,
+      });
+      staff.shopName = shopDetails.name;
+    },
+
+    async saveSettingRow(table, id, values) {
+      const list = lists[table];
+      if (!list) fail(`BAD_SETTING_TABLE:${table}`);
+      if (id) {
+        const found = list.find((r) => r.id === id);
+        if (!found) fail("SETTING_NOT_FOUND");
+        Object.assign(found!, values);
+        return structuredClone(found!);
+      }
+      const created = row(values);
+      list.push(created);
+      return structuredClone(created);
+    },
+
+    async setRolePermission(role, perm, allowed, limit) {
+      const found = rolePermissions.find((r) => r.role === role && r.perm === perm);
+      if (!found) fail(`BAD_PERMISSION:${perm}`);
+      found!.allowed = allowed;
+      found!.numLimit = limit ?? found!.numLimit;
+    },
+
+    async setStaffPermission(staffId, perm, allowed, limit) {
+      const i = staffPermissions.findIndex((p) => p.staffId === staffId && p.perm === perm);
+      if (allowed === null) {
+        if (i >= 0) staffPermissions.splice(i, 1);
+        return;
+      }
+      const entry = { staffId, perm, allowed, numLimit: limit ?? null };
+      if (i >= 0) staffPermissions[i] = entry; else staffPermissions.push(entry);
+    },
+
+    async setDocumentNextNumber(branchId, docType, next) {
+      const b = branches.find((x) => x.id === branchId);
+      if (!b) fail("BRANCH_NOT_FOUND");
+      if (docType === "invoice") {
+        if (next < b!.nextInvoice) fail(`NUMBER_GOES_BACKWARDS:${b!.nextInvoice}`);
+        b!.nextInvoice = next;
+      }
     },
   };
 }

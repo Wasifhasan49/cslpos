@@ -15,6 +15,8 @@ export interface NavItem {
   roles: readonly Role[];
   /** Shown in the phone tab bar (cashiers get at most 3 items there). */
   tab?: boolean;
+  /** Hidden until the shop turns this feature on, so a small shop sees a simple app. */
+  feature?: string;
 }
 
 export type IconName =
@@ -32,14 +34,14 @@ export const NAV: readonly NavItem[] = [
   { href: "/warranty",  label: "Warranty",  short: "Warranty", icon: "warranty",  roles: EVERYONE, tab: true },
   // Managers and owners.
   { href: "/stock",     label: "Stock",     short: "Stock",    icon: "stock",     roles: MANAGERS },
-  { href: "/purchases", label: "Purchases", short: "Buy",      icon: "purchases", roles: MANAGERS },
-  { href: "/transfers", label: "Transfers", short: "Moves",    icon: "transfers", roles: MANAGERS },
+  { href: "/purchases", label: "Purchases", short: "Buy",      icon: "purchases", roles: MANAGERS, feature: "purchase_orders" },
+  { href: "/transfers", label: "Transfers", short: "Moves",    icon: "transfers", roles: MANAGERS, feature: "transfers" },
   { href: "/products",  label: "Products",  short: "Items",    icon: "products",  roles: MANAGERS },
   { href: "/customers", label: "Customers", short: "People",   icon: "customers", roles: MANAGERS },
   { href: "/suppliers", label: "Suppliers", short: "Supply",   icon: "suppliers", roles: MANAGERS },
   // Owners, and managers only if the owner turns the flag on.
   { href: "/dashboard", label: "Dashboard", short: "Today",    icon: "dashboard", roles: OWNERS },
-  { href: "/accounts",  label: "Accounts",  short: "Books",    icon: "accounts",  roles: OWNERS },
+  { href: "/accounts",  label: "Accounts",  short: "Books",    icon: "accounts",  roles: OWNERS, feature: "accounts" },
   { href: "/settings",  label: "Settings",  short: "Setup",    icon: "settings",  roles: OWNERS },
 ] as const;
 
@@ -59,10 +61,19 @@ const FLAG_FOR: Partial<Record<string, keyof ShopFlags>> = {
   "/settings": "managersSeeSettings",
 };
 
-/** Can this role open this path? */
-export function canSee(path: string, role: Role, flags: ShopFlags = {}): boolean {
+/**
+ * Can this role open this path?
+ *
+ * `features` is which features the shop has switched on. A section whose feature is off
+ * is hidden from everyone, including the owner, because turning the feature on is the
+ * way to get it back — the menu is not where that decision lives.
+ */
+export function canSee(
+  path: string, role: Role, flags: ShopFlags = {}, features?: Record<string, boolean>,
+): boolean {
   const item = NAV.find((n) => n.href === path || path.startsWith(`${n.href}/`));
   if (!item) return true; // not a nav section (e.g. /pin); other guards apply
+  if (item.feature && features && !features[item.feature]) return false;
   if (item.roles.includes(role)) return true;
   if (role === "manager") {
     const flag = FLAG_FOR[item.href];
@@ -71,16 +82,20 @@ export function canSee(path: string, role: Role, flags: ShopFlags = {}): boolean
   return false;
 }
 
-export function navFor(role: Role, flags: ShopFlags = {}): NavItem[] {
-  return NAV.filter((n) => canSee(n.href, role, flags));
+export function navFor(
+  role: Role, flags: ShopFlags = {}, features?: Record<string, boolean>,
+): NavItem[] {
+  return NAV.filter((n) => canSee(n.href, role, flags, features));
 }
 
 /**
  * The phone tab bar. Cashiers get at most 3, so the bar stays thumb-sized; managers
  * and owners get 4 plus a More menu for the rest.
  */
-export function tabsFor(role: Role, flags: ShopFlags = {}): NavItem[] {
-  const allowed = navFor(role, flags);
+export function tabsFor(
+  role: Role, flags: ShopFlags = {}, features?: Record<string, boolean>,
+): NavItem[] {
+  const allowed = navFor(role, flags, features);
   if (role === "cashier") return allowed.filter((n) => n.tab).slice(0, 3);
   const tabs = allowed.filter((n) => n.tab);
   const extra = allowed.filter((n) => !n.tab);
@@ -88,9 +103,11 @@ export function tabsFor(role: Role, flags: ShopFlags = {}): NavItem[] {
 }
 
 /** Sections that don't fit in the tab bar, for the More menu. */
-export function overflowFor(role: Role, flags: ShopFlags = {}): NavItem[] {
-  const shown = new Set(tabsFor(role, flags).map((n) => n.href));
-  return navFor(role, flags).filter((n) => !shown.has(n.href));
+export function overflowFor(
+  role: Role, flags: ShopFlags = {}, features?: Record<string, boolean>,
+): NavItem[] {
+  const shown = new Set(tabsFor(role, flags, features).map((n) => n.href));
+  return navFor(role, flags, features).filter((n) => !shown.has(n.href));
 }
 
 /** A plain-English reason, for the redirect message when someone opens a page they

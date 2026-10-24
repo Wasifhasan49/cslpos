@@ -349,7 +349,7 @@ select pg_temp.check((select public.receive_stock(:'BRANCH_B', '00000000-0000-40
 
 -- A cashier cannot receive stock at all.
 select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
-select pg_temp.expect_error(format($q$select public.receive_stock('%s', '00000000-0000-4000-8000-0000000000a1', 5)$q$, :'BRANCH_A'), 'NOT_MANAGER');
+select pg_temp.expect_error(format($q$select public.receive_stock('%s', '00000000-0000-4000-8000-0000000000a1', 5)$q$, :'BRANCH_A'), 'NOT_ALLOWED:receive_stock');
 
 -- 12. Branch administration is owner-only, and a shop cannot lose its last branch.
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
@@ -386,6 +386,197 @@ select pg_temp.check(
 select pg_temp.check(
   (public.complete_sale(:'BRANCH_B', '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]', 'cash', 0, null, null, 500)->>'invoice_no') = 'DEMO-SB-2026000002',
   'Branch B''s numbering carries on from its own last invoice');
+
+-- ===========================================================================
+-- 13. SETTINGS, PERMISSIONS AND VAT (P2)
+-- ===========================================================================
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+
+-- A new shop is usable with nothing configured.
+select pg_temp.check((select count(*) from public.units where shop_id = :'SHOP') >= 6, 'a new shop has units');
+select pg_temp.check((select count(*) from public.payment_methods where shop_id = :'SHOP' and enabled) >= 4, 'a new shop takes cash, bKash, Nagad and card');
+select pg_temp.check((select count(*) from public.warranty_terms where shop_id = :'SHOP') >= 4, 'a new shop has warranty terms with receipt wording');
+select pg_temp.check((select count(*) from public.discount_types where shop_id = :'SHOP') >= 4, 'a new shop has discount reasons');
+select pg_temp.check((select count(*) from public.vat_rates where shop_id = :'SHOP') >= 3, 'a new shop has VAT rates ready');
+select pg_temp.check(public.feature_on('vat') = false, 'but VAT is OFF until the shop turns it on');
+select pg_temp.check(public.feature_on('accounts') = false, 'and so are accounts, so a small shop sees a simple app');
+
+-- Permissions: the defaults match the roles that already existed.
+select pg_temp.check(public.has_permission('edit_settings'), 'the owner can change settings');
+select pg_temp.check(public.has_permission('see_cost'), 'the owner can see costs');
+select set_config('request.jwt.claim.sub', '44444444-4444-4444-8444-444444444444', false);
+select pg_temp.check(public.has_permission('receive_stock'), 'a manager can receive stock');
+select pg_temp.check(public.has_permission('see_cost'), 'a manager can see costs');
+select pg_temp.check(public.has_permission('edit_settings') = false, 'a manager cannot change settings');
+select pg_temp.check(public.has_permission('view_accounts') = false, 'a manager cannot see the accounts');
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.check(public.has_permission('sell'), 'a cashier can sell');
+select pg_temp.check(public.has_permission('see_cost') = false, 'a cashier cannot see costs');
+select pg_temp.check(public.has_permission('receive_stock') = false, 'a cashier cannot receive stock');
+select pg_temp.check(public.permission_limit('give_discount') = 5, 'the cashier''s discount limit is 5%');
+
+-- Only the owner changes permissions, and it is logged.
+select pg_temp.expect_error($q$select public.set_role_permission('cashier', 'see_cost', true)$q$, 'NOT_OWNER');
+select pg_temp.expect_error($q$select public.set_staff_permission('aaaaaaaa-0000-4000-8000-000000000002', 'see_cost', true)$q$, 'NOT_OWNER');
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+select public.set_staff_permission(:'CASHIER', 'receive_stock', true);
+select pg_temp.check((select count(*) from public.audit_log where action = 'permission_changed') = 1, 'the permission change is logged');
+select pg_temp.expect_error($q$select public.set_role_permission('cashier', 'not_a_real_permission', true)$q$, 'BAD_PERMISSION');
+
+-- That one cashier can now take a delivery, without becoming a manager.
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.check(public.has_permission('receive_stock'), 'the per-person override beats the role default');
+select pg_temp.check((select public.receive_stock(:'BRANCH_A', '00000000-0000-4000-8000-0000000000a2', 1)) = 1, 'and the function lets them through');
+-- Taking it away again puts them back on the role default.
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+select public.set_staff_permission(:'CASHIER', 'receive_stock', null);
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.check(public.has_permission('receive_stock') = false, 'clearing the override restores the role default');
+
+-- VAT. The prompt'''s done-when: turn it on, set 5% inclusive, sell, see the VAT part.
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+select public.set_feature('vat', true);
+select pg_temp.check(public.feature_on('vat'), 'VAT is on');
+update public.products set vat_rate_id = (select id from public.vat_rates where shop_id = :'SHOP' and pct = 5 and inclusive)
+  where shop_id = :'SHOP' and code = 'LOG-K120';
+
+-- Inclusive: an 850 keyboard still costs 850, and 40.48 of it is VAT.
+--   850 * 5 / 105 = 40.476… -> 40.48
+do $$
+declare r jsonb;
+begin
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1}]', 'cash', 0, null, null, 850);
+  if (r->>'total')::numeric <> 850 then raise exception 'INCLUSIVE VAT CHANGED THE TOTAL: %', r->>'total'; end if;
+  if (r->'items'->0->>'vat_amount')::numeric <> 40.48 then
+    raise exception 'WRONG INCLUSIVE VAT: %', r->'items'->0->>'vat_amount';
+  end if;
+  raise notice 'ok: 5%% inclusive VAT on 850 is 40.48 and the customer still pays 850';
+end $$;
+
+-- Inclusive VAT after a discount is worked out on the DISCOUNTED line, or every
+-- discounted sale overstates the tax. 850 - 10% = 765; 765 * 5 / 105 = 36.43.
+do $$
+declare r jsonb; a jsonb;
+begin
+  a := public.verify_manager_pin('aaaaaaaa-0000-4000-8000-000000000001', '4821');
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1}]', 'cash', 10,
+        (a->>'approval_id')::uuid, null, 850);
+  if (r->>'total')::numeric <> 765 then raise exception 'WRONG DISCOUNTED TOTAL: %', r->>'total'; end if;
+  if (r->'items'->0->>'vat_amount')::numeric <> 36.43 then
+    raise exception 'VAT NOT RECALCULATED AFTER DISCOUNT: %', r->'items'->0->>'vat_amount';
+  end if;
+  raise notice 'ok: a 10%% discount drops the inclusive VAT from 40.48 to 36.43';
+end $$;
+
+-- Exclusive: the tax goes ON TOP, so the customer pays more than the shelf price.
+-- Changed through the saver, because vat_rates has no write policy: the setup lists are
+-- only writable through the functions, which is the point.
+select public.save_setting_row('vat_rates',
+  (select id from public.vat_rates where shop_id = :'SHOP' and pct = 5), '{"inclusive":false}');
+do $$
+declare r jsonb;
+begin
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1}]', 'cash', 0, null, null, 900);
+  if (r->>'total')::numeric <> 892.50 then raise exception 'EXCLUSIVE VAT NOT ADDED: %', r->>'total'; end if;
+  if (r->>'vat_amount')::numeric <> 42.50 then raise exception 'WRONG EXCLUSIVE VAT: %', r->>'vat_amount'; end if;
+  raise notice 'ok: 5%% exclusive VAT turns 850 into 892.50, with 42.50 of tax';
+end $$;
+
+-- A product with no rate is untaxed even with VAT on, so a shop can tax some lines.
+do $$
+declare r jsonb;
+begin
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a4","qty":1}]', 'cash', 0, null, null, 450);
+  if (r->>'vat_amount')::numeric <> 0 then raise exception 'UNTAXED PRODUCT GOT VAT: %', r->>'vat_amount'; end if;
+  if (r->>'total')::numeric <> 450 then raise exception 'UNTAXED TOTAL CHANGED: %', r->>'total'; end if;
+  raise notice 'ok: a product with no VAT rate is untaxed';
+end $$;
+
+-- Turning VAT off goes back to no tax anywhere.
+select public.set_feature('vat', false);
+do $$
+declare r jsonb;
+begin
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1}]', 'cash', 0, null, null, 850);
+  if (r->>'vat_amount')::numeric <> 0 then raise exception 'VAT STILL CHARGED WHEN OFF: %', r->>'vat_amount'; end if;
+  if (r->'items'->0->>'vat_amount')::numeric <> 0 then raise exception 'LINE VAT STILL SET WHEN OFF'; end if;
+  raise notice 'ok: turning VAT off stops it being charged';
+end $$;
+
+-- A payment method the shop has not turned on is refused.
+select pg_temp.expect_error(format($q$select public.complete_sale('%s', '[{"product_id":"00000000-0000-4000-8000-0000000000a4","qty":1}]', 'cheque', 0, null, null, null, 'CHQ123456')$q$, :'BRANCH_A'), 'BAD_PAYMENT_METHOD');
+
+-- Extra charges are added on top and named on the receipt.
+select public.set_feature('extra_charges', true);
+select public.save_setting_row('extra_charges',
+  (select id from public.extra_charges where shop_id = :'SHOP' and name = 'Delivery'), '{"value":100}');
+do $$
+declare r jsonb; chg uuid;
+begin
+  select id into chg from public.extra_charges where name = 'Delivery';
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a4","qty":1}]', 'cash', 0, null, null, 600,
+        null, jsonb_build_array(jsonb_build_object('charge_id', chg)));
+  if (r->>'total')::numeric <> 550 then raise exception 'CHARGE NOT ADDED: %', r->>'total'; end if;
+  if (r->'charges'->0->>'name') <> 'Delivery' then raise exception 'CHARGE NOT NAMED: %', r->'charges'; end if;
+  raise notice 'ok: a 100 delivery charge turns a 450 mouse into 550, named on the receipt';
+end $$;
+
+-- A discount reason is recorded, so the owner's report says WHY.
+-- Sold by the CASHIER on purpose: an owner's 20% is inside their own 100% limit, so it
+-- needs no approval and correctly logs nothing to approve.
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+do $$
+declare r jsonb; a jsonb; dt uuid;
+begin
+  select id into dt from public.discount_types where name = 'Festival offer';
+  a := public.verify_manager_pin('aaaaaaaa-0000-4000-8000-000000000001', '4821');
+  if not (a->>'ok')::boolean then raise exception 'APPROVAL REFUSED: %', a; end if;
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a4","qty":1}]', 'cash', 20,
+        (a->>'approval_id')::uuid, null, 400, null, null, dt);
+  if (select discount_type_id from public.sales where id = (r->>'id')::uuid) <> dt then
+    raise exception 'DISCOUNT REASON NOT SAVED';
+  end if;
+  raise notice 'ok: the discount reason is saved on the sale';
+end $$;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+select pg_temp.check(
+  (select count(*) from public.audit_log where action = 'discount_approved' and details->>'reason' = 'Festival offer') = 1,
+  'and the reason is in the audit log the owner reads');
+
+-- Document numbering: per branch, per type, forward only, logged.
+select pg_temp.check(public.next_document_number(:'BRANCH_A', 'grn') = 'GRN-MB-' || to_char(public.dhaka_today(), 'YYYY') || '000001', 'the first GRN at Branch A');
+select pg_temp.check(public.next_document_number(:'BRANCH_A', 'grn') = 'GRN-MB-' || to_char(public.dhaka_today(), 'YYYY') || '000002', 'and the next one follows');
+select pg_temp.check(public.next_document_number(:'BRANCH_B', 'grn') = 'GRN-SB-' || to_char(public.dhaka_today(), 'YYYY') || '000001', 'Branch B numbers its own GRNs from 1');
+select public.set_document_next_number(:'BRANCH_A', 'grn', 500);
+select pg_temp.check(public.next_document_number(:'BRANCH_A', 'grn') = 'GRN-MB-' || to_char(public.dhaka_today(), 'YYYY') || '000500', 'the owner can skip ahead to match a paper book');
+select pg_temp.expect_error(format($q$select public.set_document_next_number('%s', 'grn', 2)$q$, :'BRANCH_A'), 'NUMBER_GOES_BACKWARDS');
+select pg_temp.check((select count(*) from public.audit_log where action = 'document_number_changed') = 1, 'changing a document number is logged');
+
+-- Settings writes need the permission, go through the one saver, and are logged.
+select pg_temp.check((public.save_setting_row('units', null, '{"name":"dozen","allow_decimals":false}')->>'name') = 'dozen', 'the owner can add a unit');
+select pg_temp.expect_error($q$select public.save_setting_row('staff', null, '{"name":"nope"}')$q$, 'BAD_SETTING_TABLE');
+select pg_temp.expect_error($q$select public.save_setting_row('units', null, '{"shop_id":"00000000-0000-4000-8000-000000000099"}')$q$, 'BAD_SETTING_FIELD');
+select pg_temp.check((public.save_shop_details('{"receipt_footer":"Thank you. Keep this for warranty."}')->>'receipt_footer') = 'Thank you. Keep this for warranty.', 'the owner can set the receipt footer');
+select set_config('request.jwt.claim.sub', '44444444-4444-4444-8444-444444444444', false);
+select pg_temp.expect_error($q$select public.save_setting_row('units', null, '{"name":"sneaky"}')$q$, 'NOT_ALLOWED:edit_settings');
+select pg_temp.expect_error($q$select public.save_shop_details('{"name":"Rafi Shop"}')$q$, 'NOT_ALLOWED:edit_settings');
+select pg_temp.expect_error($q$select public.set_feature('accounts', true)$q$, 'NOT_OWNER');
+
+-- The area list is national reference data every shop reads.
+select pg_temp.check((select count(*) from public.divisions) = 8, 'all 8 divisions');
+select pg_temp.check((select count(*) from public.districts) = 64, 'all 64 districts');
+select pg_temp.check((select count(*) from public.upazilas) > 480, 'nearly 500 upazilas (thanas)');
+select pg_temp.check((select name from public.districts where id = 1) = 'Comilla', 'districts carry real names');
+select pg_temp.check((select count(*) from public.upazilas u join public.districts d on d.id = u.district_id where d.name = 'Dhaka') > 1, 'Dhaka district has its thanas');
+select pg_temp.check((select count(*) from public.countries) > 10, 'countries for suppliers who import');
 
 reset role;
 \echo ALL DATABASE CHECKS PASSED
