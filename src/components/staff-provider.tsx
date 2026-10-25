@@ -11,6 +11,9 @@ const BRANCH_KEY = "csl.branch";
 interface StaffContextValue {
   backend: Backend;
   staff: Staff;
+  /** Which features this shop has turned on. The menu reads it, so an off feature has
+   *  no section at all. */
+  features: Record<string, boolean>;
   /** The branch being worked in. Never null once the app has loaded: a staff member
    *  with no branch cannot sell anywhere, so that is treated as a setup problem. */
   branch: Branch;
@@ -37,6 +40,7 @@ export function useStaff(): StaffContextValue {
 export function StaffProvider({ children }: { children: React.ReactNode }) {
   const backend = React.useMemo(() => getBackend(), []);
   const [staff, setStaff] = React.useState<Staff | null>(null);
+  const [features, setFeatures] = React.useState<Record<string, boolean>>({});
   const [branchId, setBranchId] = React.useState<string | null>(null);
   const [noShopEmail, setNoShopEmail] = React.useState<string | null>(null);
   const [state, setState] = React.useState<"loading" | "no-staff" | "no-branch" | "ready">("loading");
@@ -58,6 +62,9 @@ export function StaffProvider({ children }: { children: React.ReactNode }) {
         if (me.kind === "no-staff") { setNoShopEmail(me.email); setState("no-staff"); return; }
 
         setStaff(me.staff);
+        // Loaded here rather than per screen: the menu needs it on first paint.
+        setFeatures(await backend.listFeatures());
+        if (cancelled) return;
         if (me.staff.branches.length === 0) { setState("no-branch"); return; }
 
         // Remember the last branch, but only if it is still one this person may use:
@@ -110,7 +117,7 @@ export function StaffProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <StaffContext.Provider
-      value={{ backend, staff, branch, branches: staff.branches, setBranch, reload }}
+      value={{ backend, staff, features, branch, branches: staff.branches, setBranch, reload }}
     >
       {children}
     </StaffContext.Provider>

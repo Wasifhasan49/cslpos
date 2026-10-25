@@ -29,11 +29,18 @@ const ICONS: Record<IconName, React.ComponentType<{ className?: string }>> = {
 };
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { staff, branch, branches, setBranch, backend } = useStaff();
+  const { staff, features, branch, branches, setBranch, backend } = useStaff();
   const path = usePathname();
-  const items = navFor(staff.role);
-  const tabs = tabsFor(staff.role);
-  const overflow = overflowFor(staff.role);
+  // The settings flags that share owner-only sections with managers live alongside the
+  // feature switches, so they come from the same map.
+  const flags = {
+    managersSeeDashboard: features.managers_see_dashboard,
+    managersSeeAccounts: features.managers_see_accounts,
+    managersSeeSettings: features.managers_see_settings,
+  };
+  const items = navFor(staff.role, flags, features);
+  const tabs = tabsFor(staff.role, flags, features);
+  const overflow = overflowFor(staff.role, flags, features);
 
   const active = (href: string) => path === href || path.startsWith(`${href}/`);
 

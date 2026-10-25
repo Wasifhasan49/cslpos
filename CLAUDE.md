@@ -141,8 +141,10 @@ The list below is the original short version; BUILD_PROMPTS.md wins where they d
    `pnpm staff:add`, `pnpm check`, and the `/pin` screen all exist. Still outstanding from
    P0: the migration has never been applied to a live Supabase project, so the end-to-end
    acceptance test (sell a splitter, approve a discount) has not been run against one.
-2. ~~**Branches, app shell and roles**~~ — done (P1). Setup lists, permissions, VAT and
-   feature switches — database done (P2); the Settings screens are still to build.
+2. ~~**Branches, app shell and roles**~~ — done (P1).
+   ~~**Setup lists, permissions, VAT and feature switches**~~ — done (P2). The ten setup
+   lists share one config-driven editor driven by `src/lib/settings-schema.ts`; adding a
+   list means adding a spec there, not writing a screen.
 3. **Import from BMS**: CSV/Excel import of products and serials (P4).
 4. **Owner dashboard** (phone-first), see product decisions above.
 5. **Shifts + cash check**: open with opening cash, close with counted cash; flag shortfalls.

@@ -28,7 +28,17 @@ export async function guardSection(path: string): Promise<void> {
   const role = (data as { role?: string }).role as Role | undefined;
   if (!role) return;
 
-  if (!canSee(path, role)) {
+  // The same feature switches the menu uses, so a typed-in URL for a switched-off
+  // section is refused rather than rendering an empty screen.
+  const { data: featRows } = await supabase.from("shop_features").select("feature, enabled");
+  const features = Object.fromEntries((featRows ?? []).map((r) => [r.feature, r.enabled]));
+  const flags = {
+    managersSeeDashboard: features.managers_see_dashboard,
+    managersSeeAccounts: features.managers_see_accounts,
+    managersSeeSettings: features.managers_see_settings,
+  };
+
+  if (!canSee(path, role, flags, features)) {
     redirect(`/counter?denied=${encodeURIComponent(noAccessMessage(path, role))}`);
   }
 }

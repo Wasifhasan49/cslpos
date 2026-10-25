@@ -66,8 +66,10 @@ export function createDemoBackend(): Backend {
     receiptFooter: "Thank you. Keep this receipt for warranty claims.",
     invoicePrefix: "DEMO", currency: "BDT", aitPct: 0,
   };
+  // `active` defaults to true in every setup table, so the demo rows have to say so
+  // too or the whole list reads as switched off.
   const row = (o: Record<string, string | number | boolean | null>): SettingRow =>
-    ({ id: crypto.randomUUID(), ...o }) as SettingRow;
+    ({ id: crypto.randomUUID(), active: true, ...o }) as SettingRow;
   const lists: Record<SettingTable, SettingRow[]> = {
     units: [
       row({ name: "pcs", allow_decimals: false }), row({ name: "box", allow_decimals: false }),
