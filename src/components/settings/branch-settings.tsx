@@ -6,22 +6,29 @@ import { ArrowLeft, Check, Plus } from "lucide-react";
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
-import type { BranchAdmin, Role, StaffMember } from "@/lib/types";
+import type { Backend } from "@/lib/backend";
+import type { BranchAdmin, Role, StaffMember, TransferRoute } from "@/lib/types";
 
 /** Settings → Branches and staff. Owner only; the database refuses anyone else. */
 export function BranchSettings() {
-  const { backend, staff, reload } = useStaff();
+  const { backend, features, staff, reload } = useStaff();
   const [branches, setBranches] = React.useState<BranchAdmin[] | null>(null);
   const [team, setTeam] = React.useState<StaffMember[] | null>(null);
+  const [routes, setRoutes] = React.useState<TransferRoute[]>([]);
   const [error, setError] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [adding, setAdding] = React.useState(false);
 
   const load = React.useCallback(async () => {
     try {
-      const [b, t] = await Promise.all([backend.listBranches(), backend.listStaff()]);
+      const [b, t, r] = await Promise.all([
+        backend.listBranches(), backend.listStaff(),
+        // Routes only matter once there are two branches to route between.
+        backend.listTransferRoutes().catch(() => [] as TransferRoute[]),
+      ]);
       setBranches(b);
       setTeam(t);
+      setRoutes(r);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't load the branches.");
     }
@@ -90,6 +97,13 @@ export function BranchSettings() {
         ))}
       </section>
 
+      {features.transfers && branches.filter((b) => b.active).length > 1 && (
+        <TransferRoutes
+          branches={branches.filter((b) => b.active)} routes={routes}
+          busy={busy} onRun={run} backend={backend}
+        />
+      )}
+
       <section className="flex flex-col gap-2">
         <h2 className="pt-2 text-lg font-semibold">Who works where</h2>
         <p className="text-[13px] text-muted">
@@ -104,6 +118,58 @@ export function BranchSettings() {
         <ArrowLeft className="size-4" aria-hidden /> Back to settings
       </Link>
     </Shell>
+  );
+}
+
+/**
+ * Which branch may send stock to which (BMS calls it "Branch Wise Transfer Fixing").
+ *
+ * Leaving every box ticked off means no rule at all, and any branch can send anywhere.
+ * The moment one box is ticked, the ticks become the rule — so the first thing the
+ * owner does here narrows what was open, which is said on screen rather than guessed.
+ */
+function TransferRoutes({
+  branches, routes, busy, onRun, backend,
+}: {
+  branches: BranchAdmin[];
+  routes: TransferRoute[];
+  busy: boolean;
+  onRun: (fn: () => Promise<void>) => Promise<void>;
+  backend: Backend;
+}) {
+  const open = (from: string, to: string) =>
+    routes.some((r) => r.fromBranchId === from && r.toBranchId === to);
+
+  return (
+    <section className="flex flex-col gap-2">
+      <h2 className="pt-2 text-lg font-semibold">Who may send stock to whom</h2>
+      <p className="text-[13px] text-muted">
+        {routes.length === 0
+          ? "Nothing is set, so any branch can send to any other. Tick one pair and only the ticked pairs will be allowed."
+          : "Only the ticked pairs are allowed. Untick them all to go back to letting any branch send anywhere."}
+      </p>
+      <ul className="flex flex-col gap-1.5">
+        {branches.flatMap((from) =>
+          branches.filter((to) => to.id !== from.id).map((to) => (
+            <li key={`${from.id}-${to.id}`}>
+              <label className="flex min-h-11 items-center gap-2.5 rounded-lg border border-line bg-surface px-3 py-2 text-[15px]">
+                <input
+                  type="checkbox"
+                  checked={open(from.id, to.id)}
+                  disabled={busy}
+                  onChange={(e) => onRun(() =>
+                    backend.saveTransferRoute(from.id, to.id, e.target.checked))}
+                  className="size-5 accent-[var(--color-brand)]"
+                />
+                <span>
+                  {from.name} <span className="text-muted">may send to</span> {to.name}
+                </span>
+              </label>
+            </li>
+          )),
+        )}
+      </ul>
+    </section>
   );
 }
 

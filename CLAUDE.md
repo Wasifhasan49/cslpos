@@ -130,6 +130,28 @@ chains with many branches; CSL's single-branch store is only the first customer.
   the delivery charge than a 350 adapter. The result is the landed cost, and that is what
   the average cost uses — otherwise the margin looks better than it is by exactly the
   cost of getting the goods there.
+- **Purchase paperwork is one chain, not four menus** (P6). Requisition → purchase order
+  → receiving against it. Approve, send, cancel and close are buttons on the document
+  (`set_po_status()`), not BMS's separate approve and cancel menus, so a decision
+  happens where the thing being decided is visible. `receive_against_po()` delegates
+  the goods to P5's `receive_goods()`, so there is still ONE path that moves stock,
+  writes serials and moves the average cost. Prices come off the order; a manager may
+  override one and both figures are logged, because an order whose agreed price is
+  quietly ignored is decoration. An order over `shops.po_approval_limit` goes to
+  `awaiting_approval` instead of out. Supplier payments are applied **oldest first** in
+  `supplier_aging()`, which is what a supplier assumes — newest-first would keep the
+  oldest invoice perpetually overdue while the shop paid steadily.
+- **Transferred stock is off both shelves while it is in the van** (P7). `send_transfer()`
+  takes it out of the sending branch and puts it NOWHERE; the goods are the transfer
+  document until someone receives them, and serials go to `status = 'in_transit'`. The
+  shop's on-hand dips for as long as the van is on the road, which is the truth — nobody
+  can sell those units at either end. A hidden "in transit" location that counted as
+  stock would make the figures add up on paper while letting a branch promise goods it
+  hasn't got. A shortage is never absorbed: the transfer stays `disputed` until a
+  manager says in `resolve_transfer()` whether the missing units went back or are a
+  loss, and either answer is logged. Writing off does NOT deduct stock again, because
+  it already left the shelf when it was sent. Transfer routes default to "anywhere";
+  the first route an owner adds makes the list the rule.
 - **Imports upsert by code and never delete** (P4). A shop's export may be partial or
   last week's, so importing one must never remove anything, and re-running the same file
   must change nothing — that is what makes it safe to retry after a timeout. Opening
@@ -185,13 +207,19 @@ The list below is the original short version; BUILD_PROMPTS.md wins where they d
    export still needs checking against the auto-mapping in `src/lib/import/schema.ts`.
    ~~**Stock in and corrections**~~ — mostly done (P5); supplier groups, line discounts,
    packing-list import, invoice attachments and the GRN print view have no screens yet.
-4. **Owner dashboard** (phone-first), see product decisions above.
-5. **Shifts + cash check**: open with opening cash, close with counted cash; flag shortfalls.
-   Tables exist (`shifts`); `complete_sale()` already links sales to the open shift.
-6. **Returns/exchanges** and **void sale** (manager only, logged).
-7. **Warranty lookup** by serial or phone; simple claim log (received → sent to supplier → returned).
-8. **SMS receipts** via a Bangladeshi SMS gateway (button exists, not connected).
-9. Product/price management screens for owners (today: SQL editor).
+4. ~~**Purchase paperwork and supplier dues**~~ — done (P6). Requisitions, purchase
+   orders with approval limits, receiving against an order, reorder suggestions,
+   supplier ledger and aging.
+   ~~**Branch transfers**~~ — done (P7): send and receive with in-transit stock,
+   disputed shortages, moves inside a branch, and transfer routes.
+5. **Shifts + cash check** (P8): open with opening cash, close with counted cash; flag
+   shortfalls. Tables exist (`shifts`); `complete_sale()` already links sales to the
+   open shift.
+6. **Sales history, reprint, void and returns** (P9), then **credit sales and customers**
+   (P10) and the **full counter** (P10a).
+7. **Warranty lookup** by serial or phone; simple claim log (P11).
+8. **Owner dashboard** (phone-first), see product decisions above (P12).
+9. **Accounts** (P13 onwards), then SMS receipts and printing.
 10. Before charging other shops: paid Supabase + Vercel plans, backups, error monitoring (Sentry).
 
 Not planned yet: HR, sales orders with advance payment, SR targets (see BUILD_PROMPTS.md).

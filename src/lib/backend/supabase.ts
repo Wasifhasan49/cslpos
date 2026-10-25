@@ -8,6 +8,8 @@ import type {
   SettingsBundle, StaffLookup, StaffMember, StockMovementRow, Supplier, SupplierGroup,
   LedgerEntry, PoReceiveResult, PurchaseOrderRow, PurchaseOrderStatus, ReorderSuggestion,
   RequisitionRow, RequisitionStatus, SupplierAging, SupplierPaymentResult,
+  InTransitRow, TransferReceived, TransferRequestRow, TransferRequestStatus, TransferRoute,
+  TransferRow, TransferSent, TransferStatus,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
@@ -889,6 +891,227 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         supplier: String(r.supplier), amount: num(r.amount), balance: num(r.balance),
         aging: readAging(r.aging),
       };
+    },
+
+    // --- Branch transfers (P7) ---
+
+    async listTransfers(branchId: string, limit = 50): Promise<TransferRow[]> {
+      const { data, error } = await sb
+        .from("transfers")
+        .select(`id, transfer_no, status, from_branch_id, to_branch_id, note, sent_at,
+                 received_at, resolution, total_cost,
+                 fromB:branches!transfers_from_branch_id_fkey(name),
+                 toB:branches!transfers_to_branch_id_fkey(name),
+                 transfer_items(id, qty, received_qty, damaged_qty, unit_cost, note, product_id,
+                                products(name, code, is_serial),
+                                transfer_item_serials(arrived_ok, serials(id, serial)))`)
+        .or(`from_branch_id.eq.${branchId},to_branch_id.eq.${branchId}`)
+        .order("sent_at", { ascending: false })
+        .limit(limit);
+      if (error) throw loadError("the transfers", error);
+      type Row = {
+        id: string; transfer_no: string; status: TransferStatus;
+        from_branch_id: string; to_branch_id: string; note: string | null;
+        sent_at: string; received_at: string | null;
+        resolution: "returned" | "written_off" | null; total_cost: number | string;
+        fromB: { name: string } | null; toB: { name: string } | null;
+        transfer_items: {
+          id: string; qty: number; received_qty: number; damaged_qty: number;
+          unit_cost: number | string | null; note: string | null; product_id: string;
+          products: { name: string; code: string; is_serial: boolean } | null;
+          transfer_item_serials: {
+            arrived_ok: boolean | null; serials: { id: string; serial: string } | null;
+          }[];
+        }[];
+      };
+      return ((data ?? []) as unknown as Row[]).map((t) => ({
+        id: t.id, transferNo: t.transfer_no, status: t.status,
+        fromBranchId: t.from_branch_id, fromBranchName: t.fromB?.name ?? "",
+        toBranchId: t.to_branch_id, toBranchName: t.toB?.name ?? "",
+        note: t.note, sentAt: t.sent_at, receivedAt: t.received_at,
+        resolution: t.resolution, totalCost: num(t.total_cost),
+        lines: (t.transfer_items ?? []).map((i) => ({
+          id: i.id, productId: i.product_id, product: i.products?.name ?? "",
+          code: i.products?.code ?? "", isSerial: Boolean(i.products?.is_serial),
+          qty: i.qty, receivedQty: i.received_qty, damagedQty: i.damaged_qty,
+          unitCost: numOrNull(i.unit_cost), note: i.note,
+          serials: (i.transfer_item_serials ?? [])
+            .filter((x) => x.serials)
+            .map((x) => ({
+              id: x.serials!.id, serial: x.serials!.serial, arrivedOk: x.arrived_ok,
+            })),
+        })),
+      }));
+    },
+
+    async listTransferRequests(branchId: string, limit = 50): Promise<TransferRequestRow[]> {
+      const { data, error } = await sb
+        .from("transfer_requests")
+        .select(`id, req_no, status, from_branch_id, to_branch_id, note, decision_note, created_at,
+                 fromB:branches!transfer_requests_from_branch_id_fkey(name),
+                 toB:branches!transfer_requests_to_branch_id_fkey(name),
+                 staff(name),
+                 transfer_request_items(id, qty, product_id, products(name))`)
+        .or(`from_branch_id.eq.${branchId},to_branch_id.eq.${branchId}`)
+        .order("created_at", { ascending: false })
+        .limit(limit);
+      if (error) throw loadError("the transfer requests", error);
+      type Row = {
+        id: string; req_no: string; status: TransferRequestStatus;
+        from_branch_id: string; to_branch_id: string; note: string | null;
+        decision_note: string | null; created_at: string;
+        fromB: { name: string } | null; toB: { name: string } | null;
+        staff: { name: string } | null;
+        transfer_request_items: {
+          id: string; qty: number; product_id: string; products: { name: string } | null;
+        }[];
+      };
+      return ((data ?? []) as unknown as Row[]).map((r) => ({
+        id: r.id, reqNo: r.req_no, status: r.status,
+        fromBranchId: r.from_branch_id, fromBranchName: r.fromB?.name ?? "",
+        toBranchId: r.to_branch_id, toBranchName: r.toB?.name ?? "",
+        note: r.note, decisionNote: r.decision_note, askedBy: r.staff?.name ?? null,
+        createdAt: r.created_at,
+        lines: (r.transfer_request_items ?? []).map((i) => ({
+          id: i.id, productId: i.product_id, product: i.products?.name ?? "", qty: i.qty,
+        })),
+      }));
+    },
+
+    async saveTransferRequest(input) {
+      const { data, error } = await sb.rpc("save_transfer_request", {
+        p_from_branch: input.fromBranchId,
+        p_to_branch: input.toBranchId,
+        p_lines: input.lines.map((l) => ({ product_id: l.productId, qty: l.qty })),
+        p_note: input.note ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return {
+        id: String(r.id), reqNo: String(r.req_no), status: r.status as TransferRequestStatus,
+      };
+    },
+
+    async decideTransferRequest(requestId, approve, note) {
+      const { data, error } = await sb.rpc("decide_transfer_request", {
+        p_request_id: requestId, p_approve: approve, p_note: note ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return { reqNo: String(r.req_no), status: r.status as TransferRequestStatus };
+    },
+
+    async inTransit(branchId?: string | null): Promise<InTransitRow[]> {
+      const { data, error } = await sb.rpc("in_transit", { p_branch_id: branchId ?? null });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((t) => ({
+        id: String(t.id), transferNo: String(t.transfer_no),
+        status: t.status as TransferStatus,
+        fromBranch: String(t.from_branch), toBranch: String(t.to_branch),
+        sentAt: String(t.sent_at), daysOut: num(t.days_out), totalCost: num(t.total_cost),
+        items: ((t.items as Record<string, unknown>[] | null) ?? []).map((i) => ({
+          product: String(i.product), qty: num(i.qty), received: num(i.received),
+        })),
+      }));
+    },
+
+    async sendTransfer(input): Promise<TransferSent> {
+      const { data, error } = await sb.rpc("send_transfer", {
+        p_from_branch: input.fromBranchId,
+        p_to_branch: input.toBranchId,
+        p_lines: input.lines.map((l) => ({
+          product_id: l.productId, qty: l.qty, serials: l.serialIds ?? [],
+        })),
+        p_note: input.note ?? null,
+        p_to_location: input.toLocationId ?? null,
+        p_from_location: input.fromLocationId ?? null,
+        p_request_id: input.requestId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return {
+        id: String(r.id), transferNo: String(r.transfer_no), totalCost: num(r.total_cost),
+        lines: ((r.lines as Record<string, unknown>[] | null) ?? []).map((l) => ({
+          product: String(l.product), qty: num(l.qty), unitCost: numOrNull(l.unit_cost),
+        })),
+      };
+    },
+
+    async receiveTransfer(input): Promise<TransferReceived> {
+      const { data, error } = await sb.rpc("receive_transfer", {
+        p_transfer_id: input.transferId,
+        p_lines: input.lines.map((l) => ({
+          item_id: l.itemId,
+          ok_qty: l.okQty ?? 0,
+          damaged_qty: l.damagedQty ?? 0,
+          serials_ok: l.serialsOk ?? [],
+          serials_damaged: l.serialsDamaged ?? [],
+          note: l.note ?? null,
+        })),
+        p_note: input.note ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return {
+        transferNo: String(r.transfer_no), status: r.status as TransferStatus,
+        lines: ((r.lines as Record<string, unknown>[] | null) ?? []).map((l) => ({
+          product: String(l.product), sent: num(l.sent), ok: num(l.ok),
+          damaged: num(l.damaged), short: num(l.short),
+        })),
+      };
+    },
+
+    async resolveTransfer(transferId, action, note) {
+      const { data, error } = await sb.rpc("resolve_transfer", {
+        p_transfer_id: transferId, p_action: action, p_note: note,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return {
+        transferNo: String(r.transfer_no), resolution: String(r.resolution),
+        costOfShortage: num(r.cost_of_shortage),
+      };
+    },
+
+    async cancelTransfer(transferId: string, reason: string): Promise<void> {
+      const { error } = await sb.rpc("cancel_transfer", {
+        p_transfer_id: transferId, p_reason: reason,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async moveWithinBranch(input) {
+      const { data, error } = await sb.rpc("move_within_branch", {
+        p_branch_id: input.branchId,
+        p_from_location: input.fromLocationId,
+        p_to_location: input.toLocationId,
+        p_lines: input.lines.map((l) => ({
+          product_id: l.productId, qty: l.qty, serials: l.serialIds ?? [],
+        })),
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return {
+        lines: ((r.lines as Record<string, unknown>[] | null) ?? []).map((l) => ({
+          product: String(l.product), qty: num(l.qty),
+        })),
+      };
+    },
+
+    async listTransferRoutes(): Promise<TransferRoute[]> {
+      const { data, error } = await sb
+        .from("transfer_routes").select("from_branch_id, to_branch_id");
+      if (error) throw loadError("the transfer routes", error);
+      return (data ?? []).map((r) => ({
+        fromBranchId: r.from_branch_id, toBranchId: r.to_branch_id,
+      }));
+    },
+
+    async saveTransferRoute(fromBranchId, toBranchId, allowed) {
+      const { error } = await sb.rpc("save_transfer_route", {
+        p_from: fromBranchId, p_to: toBranchId, p_allowed: allowed,
+      });
+      if (error) throw new Error(friendlyError(error.message));
     },
 
     async setOpeningBalance(input) {

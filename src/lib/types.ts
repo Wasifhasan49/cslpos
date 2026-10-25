@@ -526,3 +526,89 @@ export interface PoReceiveResult extends ReceiveResult {
   poStatus: PurchaseOrderStatus;
   pending: { product: string; ordered: number; received: number; pending: number }[];
 }
+
+// --- P7: branch transfers --------------------------------------------------
+
+export type TransferStatus = "in_transit" | "received" | "disputed" | "cancelled";
+
+export interface TransferLine {
+  id: string;
+  productId: string;
+  product: string;
+  code: string;
+  isSerial: boolean;
+  qty: number;
+  receivedQty: number;
+  damagedQty: number;
+  unitCost: number | null;
+  note: string | null;
+  serials: { id: string; serial: string; arrivedOk: boolean | null }[];
+}
+
+export interface TransferRow {
+  id: string;
+  transferNo: string;
+  status: TransferStatus;
+  fromBranchId: string;
+  fromBranchName: string;
+  toBranchId: string;
+  toBranchName: string;
+  note: string | null;
+  sentAt: string;
+  receivedAt: string | null;
+  resolution: "returned" | "written_off" | null;
+  totalCost: number;
+  lines: TransferLine[];
+}
+
+export type TransferRequestStatus =
+  | "submitted" | "approved" | "rejected" | "sent" | "cancelled";
+
+export interface TransferRequestRow {
+  id: string;
+  reqNo: string;
+  status: TransferRequestStatus;
+  /** The branch being asked. */
+  fromBranchId: string;
+  fromBranchName: string;
+  /** The branch that asked. */
+  toBranchId: string;
+  toBranchName: string;
+  note: string | null;
+  decisionNote: string | null;
+  askedBy: string | null;
+  createdAt: string;
+  lines: { id: string; productId: string; product: string; qty: number }[];
+}
+
+export interface TransferSent {
+  id: string;
+  transferNo: string;
+  totalCost: number;
+  lines: { product: string; qty: number; unitCost: number | null }[];
+}
+
+export interface TransferReceived {
+  transferNo: string;
+  status: TransferStatus;
+  lines: { product: string; sent: number; ok: number; damaged: number; short: number }[];
+}
+
+/** What is on the road right now, with how long it has been out. */
+export interface InTransitRow {
+  id: string;
+  transferNo: string;
+  status: TransferStatus;
+  fromBranch: string;
+  toBranch: string;
+  sentAt: string;
+  daysOut: number;
+  totalCost: number;
+  items: { product: string; qty: number; received: number }[];
+}
+
+/** One allowed direction. A shop with none set may send anywhere. */
+export interface TransferRoute {
+  fromBranchId: string;
+  toBranchId: string;
+}

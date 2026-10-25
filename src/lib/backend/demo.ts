@@ -11,7 +11,8 @@ import type {
   ReceiveResult, Role, SaleInput, SerialUnit, SettingRow, SettingTable, SettingsBundle,
   Staff, StaffLookup, StaffMember, StockMovementRow, Supplier, SupplierGroup,
   LedgerEntry, PoReceiveResult, PurchaseOrderRow, PurchaseOrderStatus, RequisitionRow,
-  SupplierAging,
+  SupplierAging, TransferLine, TransferReceived, TransferRequestRow, TransferRoute,
+  TransferRow, TransferSent,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import type { Backend } from "./types";
@@ -27,6 +28,8 @@ interface DemoSerial extends SerialUnit {
   productId: string;
   branchId: string;
   sold: boolean;
+  /** On the road between branches: not on either shelf, not sellable anywhere. */
+  inTransit?: boolean;
 }
 
 export function createDemoBackend(): Backend {
@@ -207,6 +210,12 @@ export function createDemoBackend(): Backend {
   };
   let reqCounter = 1;
   let poCounter = 1;
+  // Branch transfers (P7). Nothing on the road to start with.
+  const transfers: TransferRow[] = [];
+  const transferRequests: TransferRequestRow[] = [];
+  const routes: TransferRoute[] = [];
+  let trCounter = 1;
+  let trqCounter = 1;
   const costs: Record<string, number> = { a1: 250 };
 
   const noteMovement = (m: StockMovementRow) => movements.unshift(m);
@@ -231,6 +240,13 @@ export function createDemoBackend(): Backend {
     { id: "demo-razu", name: "Razu", role: "cashier", discountLimitPct: 5, active: true, hasPin: false, branchIds: [branches[0].id] },
   ];
 
+  /** No routes set means anywhere; the first route the owner adds becomes the rule. */
+  const canTransfer = (from: string, to: string): boolean => {
+    if (from === to) return false;
+    if (routes.length === 0) return true;
+    return routes.some((r) => r.fromBranchId === from && r.toBranchId === to);
+  };
+
   const fail = (code: string): never => {
     throw new Error(friendlyError(code));
   };
@@ -246,7 +262,7 @@ export function createDemoBackend(): Backend {
     catalogue.map((p) => {
       const pr = priceFor(p.id, listId);
       const mine: SerialUnit[] = serials
-        .filter((s) => s.productId === p.id && s.branchId === branchId && !s.sold)
+        .filter((s) => s.productId === p.id && s.branchId === branchId && !s.sold && !s.inTransit)
         .map(({ id, serial }) => ({ id, serial }));
       return {
         id: p.id, code: p.code, barcode: p.barcode, name: p.name, brand: p.brand,
@@ -1223,6 +1239,322 @@ export function createDemoBackend(): Backend {
       }
       fail("CUSTOMER_NOT_FOUND");
       return { name: "", amount: 0, asOf };
+    },
+
+    // --- Branch transfers (P7) ---
+
+    async listTransfers(branchId, limit = 50) {
+      return structuredClone(
+        transfers.filter((t) => t.fromBranchId === branchId || t.toBranchId === branchId)
+          .slice(0, limit));
+    },
+
+    async listTransferRequests(branchId, limit = 50) {
+      return structuredClone(
+        transferRequests.filter((r) => r.fromBranchId === branchId || r.toBranchId === branchId)
+          .slice(0, limit));
+    },
+
+    async saveTransferRequest(input) {
+      if (!features.transfers) fail("FEATURE_OFF:transfers");
+      // You ask FOR your own branch, so that is the one you must be allowed to work in.
+      const asking = branchOr404(input.toBranchId);
+      const asked = branches.find((b) => b.id === input.fromBranchId && b.active);
+      if (!asked) fail("BRANCH_NOT_FOUND");
+      if (!canTransfer(asked!.id, asking.id)) fail("TRANSFER_NOT_ALLOWED");
+      if (input.lines.length === 0) fail("NOTHING_REQUESTED");
+
+      const lines = input.lines.map((l) => {
+        const p = catalogue.find((x) => x.id === l.productId);
+        if (!p) fail("PRODUCT_NOT_FOUND");
+        return { id: crypto.randomUUID(), productId: p!.id, product: p!.name, qty: l.qty };
+      });
+      const reqNo = `TRQ-${asking.code}-${new Date().getFullYear()}${String(trqCounter++).padStart(6, "0")}`;
+      const row: TransferRequestRow = {
+        id: crypto.randomUUID(), reqNo, status: "submitted",
+        fromBranchId: asked!.id, fromBranchName: asked!.name,
+        toBranchId: asking.id, toBranchName: asking.name,
+        note: input.note ?? null, decisionNote: null, askedBy: staff.name,
+        createdAt: new Date().toISOString(), lines,
+      };
+      transferRequests.unshift(row);
+      return { id: row.id, reqNo, status: row.status };
+    },
+
+    async decideTransferRequest(requestId, approve, note) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:transfer_stock");
+      const r = transferRequests.find((x) => x.id === requestId);
+      if (!r) fail("REQUEST_NOT_FOUND");
+      if (r!.status !== "submitted") fail(`REQUEST_ALREADY_DECIDED:${r!.status}`);
+      // The branch that has to hand the goods over is the one that decides.
+      branchOr404(r!.fromBranchId);
+      r!.status = approve ? "approved" : "rejected";
+      r!.decisionNote = note ?? null;
+      return { reqNo: r!.reqNo, status: r!.status };
+    },
+
+    async inTransit(branchId) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:view_reports");
+      return transfers
+        .filter((t) => ["in_transit", "disputed"].includes(t.status))
+        .filter((t) => !branchId || t.fromBranchId === branchId || t.toBranchId === branchId)
+        .map((t) => ({
+          id: t.id, transferNo: t.transferNo, status: t.status,
+          fromBranch: t.fromBranchName, toBranch: t.toBranchName,
+          sentAt: t.sentAt,
+          daysOut: Math.floor((Date.now() - new Date(t.sentAt).getTime()) / 86_400_000),
+          totalCost: t.totalCost,
+          items: t.lines.map((l) => ({
+            product: l.product, qty: l.qty, received: l.receivedQty,
+          })),
+        }));
+    },
+
+    async sendTransfer(input): Promise<TransferSent> {
+      if (!features.transfers) fail("FEATURE_OFF:transfers");
+      if (staff.role === "cashier") fail("NOT_ALLOWED:transfer_stock");
+      const from = branchOr404(input.fromBranchId);
+      const to = branchOr404(input.toBranchId);
+      if (from.id === to.id) fail("SAME_BRANCH");
+      if (!canTransfer(from.id, to.id)) fail("TRANSFER_NOT_ALLOWED");
+      if (input.lines.length === 0) fail("NOTHING_TO_SEND");
+
+      let totalCost = 0;
+      const lines: TransferLine[] = [];
+      const out: TransferSent["lines"] = [];
+
+      for (const l of input.lines) {
+        const p = catalogue.find((x) => x.id === l.productId);
+        if (!p) fail("PRODUCT_NOT_FOUND");
+        const ids = l.serialIds ?? [];
+        const qty = p!.isSerial ? ids.length : l.qty;
+        if (p!.isSerial && qty === 0) fail(`SERIAL_REQUIRED:${p!.name}`);
+        if (qty <= 0) fail(`BAD_QTY:${p!.name}`);
+
+        const picked = p!.isSerial
+          ? serials.filter((x) => ids.includes(x.id) && !x.sold
+              && x.branchId === from.id && !x.inTransit)
+          : [];
+        if (p!.isSerial && picked.length !== ids.length) fail(`SERIAL_NOT_AVAILABLE:${p!.name}`);
+        if (!p!.isSerial && (stock[from.id]?.[p!.id] ?? 0) < qty) fail(`OUT_OF_STOCK:${p!.name}`);
+
+        // Off the sender's shelf straight away, and nowhere else until it arrives.
+        // A serial product's stock IS its serial count here, so marking the serials is
+        // the whole move; touching the quantity as well would take it off twice.
+        if (p!.isSerial) for (const x of picked) x.inTransit = true;
+        else stock[from.id][p!.id] -= qty;
+
+        const cost = costs[p!.id] ?? null;
+        totalCost += (cost ?? 0) * qty;
+        lines.push({
+          id: crypto.randomUUID(), productId: p!.id, product: p!.name, code: p!.code,
+          isSerial: p!.isSerial, qty, receivedQty: 0, damagedQty: 0, unitCost: cost,
+          note: null,
+          serials: picked.map((x) => ({ id: x.id, serial: x.serial, arrivedOk: null })),
+        });
+        out.push({ product: p!.name, qty, unitCost: cost });
+        noteMovement({
+          at: new Date().toISOString(), product: p!.name, code: p!.code, change: -qty,
+          reason: "transfer_out", why: null, note: `To ${to.name}`, who: staff.name,
+          location: from.locations[0]?.name ?? null,
+        });
+      }
+
+      const transferNo = `TRA-${from.code}-${new Date().getFullYear()}${String(trCounter++).padStart(6, "0")}`;
+      transfers.unshift({
+        id: crypto.randomUUID(), transferNo, status: "in_transit",
+        fromBranchId: from.id, fromBranchName: from.name,
+        toBranchId: to.id, toBranchName: to.name,
+        note: input.note ?? null, sentAt: new Date().toISOString(),
+        receivedAt: null, resolution: null, totalCost, lines,
+      });
+      if (input.requestId) {
+        const r = transferRequests.find((x) => x.id === input.requestId);
+        if (r && r.status === "approved") r.status = "sent";
+      }
+      return { id: transfers[0].id, transferNo, totalCost, lines: out };
+    },
+
+    async receiveTransfer(input): Promise<TransferReceived> {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:transfer_stock");
+      const t = transfers.find((x) => x.id === input.transferId);
+      if (!t) fail("TRANSFER_NOT_FOUND");
+      if (t!.status !== "in_transit") fail(`TRANSFER_NOT_IN_TRANSIT:${t!.status}`);
+      if (input.lines.length === 0) fail("NOTHING_RECEIVED");
+
+      const to = branchOr404(t!.toBranchId);
+      let anyShort = false;
+      const out: TransferReceived["lines"] = [];
+
+      for (const l of input.lines) {
+        const line = t!.lines.find((x) => x.id === l.itemId);
+        if (!line) fail("TRANSFER_LINE_NOT_FOUND");
+        const okIds = l.serialsOk ?? [];
+        const badIds = l.serialsDamaged ?? [];
+        const ok = line!.isSerial ? okIds.length : (l.okQty ?? 0);
+        const damaged = line!.isSerial ? badIds.length : (l.damagedQty ?? 0);
+        if (ok < 0 || damaged < 0) fail(`BAD_QTY:${line!.product}`);
+        if (ok + damaged > line!.qty) fail(`MORE_THAN_SENT:${line!.product}`);
+        const short = line!.qty - ok - damaged;
+        if (short > 0) anyShort = true;
+
+        const onThis = new Set(line!.serials.map((x) => x.id));
+        for (const id of [...okIds, ...badIds]) {
+          if (!onThis.has(id)) fail(`SERIAL_NOT_ON_THIS_TRANSFER:${line!.product}`);
+        }
+        for (const id of okIds) {
+          const sx = serials.find((x) => x.id === id);
+          if (sx) { sx.inTransit = false; sx.branchId = to.id; }
+          const row = line!.serials.find((x) => x.id === id);
+          if (row) row.arrivedOk = true;
+        }
+        // A damaged unit arrived, and is recorded as arrived, but it never reaches a
+        // shelf: it is marked sold-out-of-stock here the way a write-off is.
+        for (const id of badIds) {
+          const sx = serials.find((x) => x.id === id);
+          if (sx) { sx.inTransit = false; sx.sold = true; }
+          const row = line!.serials.find((x) => x.id === id);
+          if (row) row.arrivedOk = false;
+        }
+
+        if (ok > 0) {
+          if (!line!.isSerial) {
+            stock[to.id][line!.productId] = (stock[to.id][line!.productId] ?? 0) + ok;
+          }
+          noteMovement({
+            at: new Date().toISOString(), product: line!.product, code: line!.code,
+            change: ok, reason: "transfer_in", why: null,
+            note: `From ${t!.fromBranchName}`, who: staff.name,
+            location: to.locations[0]?.name ?? null,
+          });
+        }
+        if (damaged > 0) {
+          noteMovement({
+            at: new Date().toISOString(), product: line!.product, code: line!.code,
+            change: 0, reason: "adjust_out", why: "damaged",
+            note: `${t!.transferNo}: arrived damaged`, who: staff.name,
+            location: to.locations[0]?.name ?? null,
+          });
+        }
+
+        line!.receivedQty = ok + damaged;
+        line!.damagedQty = damaged;
+        line!.note = l.note ?? line!.note;
+        out.push({ product: line!.product, sent: line!.qty, ok, damaged, short });
+      }
+
+      t!.status = anyShort ? "disputed" : "received";
+      t!.receivedAt = new Date().toISOString();
+      if (input.note) t!.note = [t!.note, input.note].filter(Boolean).join(" · ");
+      return { transferNo: t!.transferNo, status: t!.status, lines: out };
+    },
+
+    async resolveTransfer(transferId, action, note) {
+      if (staff.role === "cashier") fail("NOT_MANAGER");
+      if (!["returned", "written_off"].includes(action)) fail(`BAD_RESOLUTION:${action}`);
+      if (!note.trim()) fail("RESOLUTION_NOTE_REQUIRED");
+      const t = transfers.find((x) => x.id === transferId);
+      if (!t) fail("TRANSFER_NOT_FOUND");
+      if (t!.status !== "disputed") fail(`TRANSFER_NOT_DISPUTED:${t!.status}`);
+
+      let costOfShortage = 0;
+      for (const line of t!.lines) {
+        const short = line.qty - line.receivedQty;
+        if (short <= 0) continue;
+        costOfShortage += (line.unitCost ?? 0) * short;
+        if (action === "returned") {
+          if (!line.isSerial) {
+            stock[t!.fromBranchId][line.productId] =
+              (stock[t!.fromBranchId][line.productId] ?? 0) + short;
+          }
+          for (const sr of line.serials.filter((x) => x.arrivedOk == null)) {
+            const sx = serials.find((x) => x.id === sr.id);
+            if (sx) { sx.inTransit = false; sx.branchId = t!.fromBranchId; }
+          }
+          noteMovement({
+            at: new Date().toISOString(), product: line.product, code: line.code,
+            change: short, reason: "transfer_in", why: null,
+            note: `${t!.transferNo}: came back`, who: staff.name, location: null,
+          });
+        } else {
+          // The stock already left the shelf when it was sent, so this records the
+          // loss without taking it off a second time.
+          for (const sr of line.serials.filter((x) => x.arrivedOk == null)) {
+            const sx = serials.find((x) => x.id === sr.id);
+            if (sx) { sx.inTransit = false; sx.sold = true; }
+          }
+          noteMovement({
+            at: new Date().toISOString(), product: line.product, code: line.code,
+            change: 0, reason: "adjust_out", why: "lost",
+            note: `${t!.transferNo}: lost in transit`, who: staff.name, location: null,
+          });
+        }
+      }
+      t!.status = "received";
+      t!.resolution = action;
+      t!.note = [t!.note, note].filter(Boolean).join(" · ");
+      return { transferNo: t!.transferNo, resolution: action, costOfShortage };
+    },
+
+    async cancelTransfer(transferId, reason) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:transfer_stock");
+      if (!reason.trim()) fail("CANCEL_REASON_REQUIRED");
+      const t = transfers.find((x) => x.id === transferId);
+      if (!t) fail("TRANSFER_NOT_FOUND");
+      if (t!.status !== "in_transit") fail(`TRANSFER_NOT_IN_TRANSIT:${t!.status}`);
+      for (const line of t!.lines) {
+        if (!line.isSerial) {
+          stock[t!.fromBranchId][line.productId] =
+            (stock[t!.fromBranchId][line.productId] ?? 0) + line.qty;
+        }
+        for (const sr of line.serials) {
+          const sx = serials.find((x) => x.id === sr.id);
+          if (sx) { sx.inTransit = false; sx.branchId = t!.fromBranchId; }
+        }
+      }
+      t!.status = "cancelled";
+      t!.note = [t!.note, reason].filter(Boolean).join(" · ");
+    },
+
+    async moveWithinBranch(input) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:transfer_stock");
+      const branch = branchOr404(input.branchId);
+      if (input.fromLocationId === input.toLocationId) fail("SAME_LOCATION");
+      const names = new Map(branch.locations.map((l) => [l.id, l.name]));
+      if (!names.has(input.fromLocationId) || !names.has(input.toLocationId)) {
+        fail("LOCATION_NOT_FOUND");
+      }
+      if (input.lines.length === 0) fail("NOTHING_TO_SEND");
+      const moved: { product: string; qty: number }[] = [];
+      for (const l of input.lines) {
+        const p = catalogue.find((x) => x.id === l.productId);
+        if (!p) fail("PRODUCT_NOT_FOUND");
+        const qty = p!.isSerial ? (l.serialIds ?? []).length : l.qty;
+        if (p!.isSerial && qty === 0) fail(`SERIAL_REQUIRED:${p!.name}`);
+        if (qty <= 0) fail(`BAD_QTY:${p!.name}`);
+        if (!p!.isSerial && (stock[branch.id]?.[p!.id] ?? 0) < qty) fail(`OUT_OF_STOCK:${p!.name}`);
+        // The demo keeps one figure per branch, not per location, so the branch total
+        // is unchanged — which is the whole point of moving inside one building.
+        moved.push({ product: p!.name, qty });
+        noteMovement({
+          at: new Date().toISOString(), product: p!.name, code: p!.code, change: 0,
+          reason: "transfer_in", why: null,
+          note: `Moved from ${names.get(input.fromLocationId)} to ${names.get(input.toLocationId)}`,
+          who: staff.name, location: names.get(input.toLocationId) ?? null,
+        });
+      }
+      return { lines: moved };
+    },
+
+    async listTransferRoutes() { return structuredClone(routes); },
+
+    async saveTransferRoute(fromBranchId, toBranchId, allowed) {
+      if (staff.role !== "owner") fail("NOT_OWNER");
+      if (fromBranchId === toBranchId) fail("SAME_BRANCH");
+      const at = routes.findIndex(
+        (r) => r.fromBranchId === fromBranchId && r.toBranchId === toBranchId);
+      if (allowed && at === -1) routes.push({ fromBranchId, toBranchId });
+      if (!allowed && at !== -1) routes.splice(at, 1);
     },
   };
 

@@ -7,6 +7,8 @@ import type {
   LedgerEntry, PoAction, PoReceiveResult, PurchaseOrderInput, PurchaseOrderRow,
   PurchaseOrderSaved, PurchaseOrderStatus, ReorderSuggestion, RequisitionRow,
   RequisitionStatus, SupplierAging, SupplierPaymentResult,
+  InTransitRow, TransferRequestRow, TransferRequestStatus, TransferReceived, TransferRoute,
+  TransferRow, TransferSent,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 
@@ -192,4 +194,54 @@ export interface Backend {
     partyKind: "customer" | "supplier"; partyId: string; amount: number;
     asOf?: string | null; note?: string | null;
   }): Promise<{ name: string; amount: number; asOf: string }>;
+
+  // --- Branch transfers (P7) ---
+  /** Everything this branch sent or was sent, newest first. */
+  listTransfers(branchId: string, limit?: number): Promise<TransferRow[]>;
+  listTransferRequests(branchId: string, limit?: number): Promise<TransferRequestRow[]>;
+  /** One branch asks another for stock. `toBranchId` is the branch that needs it. */
+  saveTransferRequest(input: {
+    fromBranchId: string;
+    toBranchId: string;
+    lines: { productId: string; qty: number }[];
+    note?: string | null;
+  }): Promise<{ id: string; reqNo: string; status: TransferRequestStatus }>;
+  /** The branch being asked says yes or no. Sending still has to happen afterwards. */
+  decideTransferRequest(
+    requestId: string, approve: boolean, note?: string | null,
+  ): Promise<{ reqNo: string; status: TransferRequestStatus }>;
+  /** On the road right now, oldest first — over 3 days is worth a look. */
+  inTransit(branchId?: string | null): Promise<InTransitRow[]>;
+  /** Takes the stock off the sending branch's shelf. Serial items go by serial. */
+  sendTransfer(input: {
+    fromBranchId: string;
+    toBranchId: string;
+    lines: { productId: string; qty: number; serialIds?: string[] }[];
+    note?: string | null;
+    toLocationId?: string | null;
+    fromLocationId?: string | null;
+    requestId?: string | null;
+  }): Promise<TransferSent>;
+  /** Anything not accounted for leaves the transfer disputed. */
+  receiveTransfer(input: {
+    transferId: string;
+    lines: {
+      itemId: string; okQty?: number; damagedQty?: number;
+      serialsOk?: string[]; serialsDamaged?: string[]; note?: string | null;
+    }[];
+    note?: string | null;
+  }): Promise<TransferReceived>;
+  /** A manager says where the missing goods went. Both need a reason. */
+  resolveTransfer(
+    transferId: string, action: "returned" | "written_off", note: string,
+  ): Promise<{ transferNo: string; resolution: string; costOfShortage: number }>;
+  cancelTransfer(transferId: string, reason: string): Promise<void>;
+  /** Shop floor ↔ warehouse, in one step. Nothing goes in transit. */
+  moveWithinBranch(input: {
+    branchId: string; fromLocationId: string; toLocationId: string;
+    lines: { productId: string; qty: number; serialIds?: string[] }[];
+  }): Promise<{ lines: { product: string; qty: number }[] }>;
+  listTransferRoutes(): Promise<TransferRoute[]>;
+  /** Owner only. The first route a shop adds turns the list into the rule. */
+  saveTransferRoute(fromBranchId: string, toBranchId: string, allowed: boolean): Promise<void>;
 }

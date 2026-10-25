@@ -186,6 +186,10 @@ export const SALE_ERROR_CODES = [
   "PO_PARTLY_RECEIVED", "CANCEL_REASON_REQUIRED", "BAD_PO_ACTION", "PO_NOT_RECEIVABLE",
   "PO_LINE_NOT_FOUND", "MORE_THAN_ORDERED", "BAD_PARTY_KIND", "BAD_PAYMENT_AMOUNT",
   "OPENING_DATE_IN_FUTURE", "CUSTOMER_NOT_FOUND", "ACCOUNT_NOT_FOUND",
+  "SAME_BRANCH", "TRANSFER_NOT_ALLOWED", "REQUEST_NOT_FOUND", "REQUEST_ALREADY_DECIDED",
+  "NOTHING_TO_SEND", "TRANSFER_NOT_FOUND", "TRANSFER_NOT_IN_TRANSIT",
+  "TRANSFER_LINE_NOT_FOUND", "MORE_THAN_SENT", "SERIAL_NOT_ON_THIS_TRANSFER",
+  "BAD_RESOLUTION", "RESOLUTION_NOTE_REQUIRED", "TRANSFER_NOT_DISPUTED", "SAME_LOCATION",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -346,6 +350,26 @@ export function friendlyError(raw: string): string {
     case "OPENING_DATE_IN_FUTURE": return "An opening balance can't be dated in the future.";
     case "CUSTOMER_NOT_FOUND": return "That customer isn't in this shop.";
     case "ACCOUNT_NOT_FOUND": return "Pick which account the money came from.";
+    case "SAME_BRANCH": return "Pick a different branch to send to.";
+    case "TRANSFER_NOT_ALLOWED":
+      return "These two branches aren't allowed to send to each other. The owner sets that up in Settings.";
+    case "REQUEST_NOT_FOUND": return "That request no longer exists. Reload and try again.";
+    case "REQUEST_ALREADY_DECIDED":
+      return `This request has already been ${detail ?? "decided"}.`;
+    case "NOTHING_TO_SEND": return "Add what is being sent first.";
+    case "TRANSFER_NOT_FOUND": return "That transfer no longer exists. Reload and try again.";
+    case "TRANSFER_NOT_IN_TRANSIT":
+      return `This transfer is ${detail ?? "finished"}, so there is nothing to receive.`;
+    case "TRANSFER_LINE_NOT_FOUND": return "That transfer line no longer exists. Reload and try again.";
+    case "MORE_THAN_SENT":
+      return `More ${detail ?? "of this"} arrived than was sent. Check the slip against the boxes.`;
+    case "SERIAL_NOT_ON_THIS_TRANSFER":
+      return `One of the serials scanned for ${detail ?? "this item"} wasn't on this transfer. Check it.`;
+    case "BAD_RESOLUTION": return "Say whether the missing goods went back or are written off.";
+    case "RESOLUTION_NOTE_REQUIRED": return "Say what happened to the missing goods.";
+    case "TRANSFER_NOT_DISPUTED":
+      return `There is nothing to settle: this transfer is ${detail ?? "already closed"}.`;
+    case "SAME_LOCATION": return "Pick two different places to move between.";
     case "SERIAL_CHANGE_HAS_STOCK":
       return `${detail ?? "This product"} already has stock, so it can't switch between serial-tracked and not. Sell or write off the stock first.`;
     // Keep the raw text so a code we have not seen can still be reported and fixed,

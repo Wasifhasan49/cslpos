@@ -1706,5 +1706,314 @@ select pg_temp.check((select count(*) from public.requisitions) >= 1, 'a cashier
 select pg_temp.check((select count(*) from public.purchase_orders) = 0, 'but not the orders, because those carry prices');
 select pg_temp.check((select count(*) from public.purchase_order_items) = 0, 'nor the agreed prices on them');
 
+-- ===========================================================================
+-- 18. BRANCH TRANSFERS (P7)
+-- ===========================================================================
+-- The done-when: Branch A sends 2 laptops by serial, they show as in transit,
+-- Branch B receives one and marks one damaged, and stock and serial locations
+-- are right everywhere.
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+\set LAPTOP '00000000-0000-4000-8000-0000000000aa'
+
+-- Off until the shop turns it on, like everything advanced.
+select pg_temp.expect_error(format($q$select public.send_transfer('%s', '%s', '[{"product_id":"%s","qty":1}]')$q$, :'BRANCH_A', :'BRANCH_B', :'KEYBOARD'), 'FEATURE_OFF:transfers');
+select public.set_feature('transfers', true);
+
+create table pg_temp.p7 (k text primary key, v uuid);
+
+-- ---- Routes: nothing set means anywhere, one route means only that route ----
+select pg_temp.check(public.can_transfer(:'BRANCH_A', :'BRANCH_B'),
+  'with no routes set, any branch can send to any other');
+select pg_temp.check(public.can_transfer(:'BRANCH_A', :'BRANCH_A') = false,
+  'but never to itself');
+select pg_temp.check(
+  (public.save_transfer_route(:'BRANCH_B', :'BRANCH_A', true)->>'allowed')::boolean,
+  'the owner opens Branch B → Branch A');
+select pg_temp.check(public.can_transfer(:'BRANCH_A', :'BRANCH_B') = false,
+  'and now the other direction is closed, because the list has become the rule');
+select pg_temp.expect_error(format($q$select public.send_transfer('%s', '%s', '[{"product_id":"%s","qty":1}]')$q$, :'BRANCH_A', :'BRANCH_B', :'KEYBOARD'), 'TRANSFER_NOT_ALLOWED');
+-- Open the way we actually want to send, and check the route is logged.
+select public.save_transfer_route(:'BRANCH_A', :'BRANCH_B', true);
+select pg_temp.check(
+  (select count(*) from public.audit_log where action = 'transfer_route_opened') = 2,
+  'and both routes are logged');
+select pg_temp.expect_error(format($q$select public.save_transfer_route('%s', '%s', true)$q$, :'BRANCH_A', :'BRANCH_A'), 'SAME_BRANCH');
+
+-- ---- Branch A sends 2 laptops, by serial ----
+-- Note what is on the shelf first, so the test reads as a change rather than a figure.
+do $$
+declare s1 uuid; s2 uuid; before_a integer; r jsonb;
+begin
+  select coalesce(sum(qty), 0) into before_a from public.branch_stock
+    where product_id = '00000000-0000-4000-8000-0000000000aa'
+      and location_id = '00000000-0000-4000-8000-0000000000e1';
+  insert into pg_temp.p7 values ('before_a', null);
+  -- Stash the figure in a table of its own, since pg_temp.p7 holds uuids.
+  create table pg_temp.p7n (k text primary key, v integer);
+  insert into pg_temp.p7n values ('before_a', before_a);
+
+  select id into s1 from public.serials
+    where product_id = '00000000-0000-4000-8000-0000000000aa' and status = 'in_stock'
+      and location_id = '00000000-0000-4000-8000-0000000000e1' order by serial limit 1;
+  select id into s2 from public.serials
+    where product_id = '00000000-0000-4000-8000-0000000000aa' and status = 'in_stock'
+      and location_id = '00000000-0000-4000-8000-0000000000e1' and id <> s1 order by serial limit 1;
+  if s1 is null or s2 is null then raise exception 'NOT ENOUGH LAPTOPS TO SEND'; end if;
+  insert into pg_temp.p7 values ('s1', s1), ('s2', s2);
+
+  r := public.send_transfer('00000000-0000-4000-8000-0000000000b1',
+        '00000000-0000-4000-8000-0000000000b2',
+        jsonb_build_array(jsonb_build_object(
+          'product_id', '00000000-0000-4000-8000-0000000000aa',
+          'serials', jsonb_build_array(s1, s2))),
+        'Branch B is short of laptops');
+  if (r->>'status') <> 'in_transit' then raise exception 'NOT IN TRANSIT: %', r; end if;
+  if (r->>'transfer_no') not like 'TRA-MB-%' then raise exception 'WRONG NUMBER: %', r->>'transfer_no'; end if;
+  insert into pg_temp.p7 values ('tr', (r->>'id')::uuid);
+  raise notice 'ok: Branch A put 2 laptops on the road as %', r->>'transfer_no';
+end $$;
+
+-- A serial item must be sent by serial; "two of them" is not receivable honestly.
+select pg_temp.expect_error(format($q$select public.send_transfer('%s', '%s', '[{"product_id":"%s","qty":2}]')$q$, :'BRANCH_A', :'BRANCH_B', :'LAPTOP'), 'SERIAL_REQUIRED');
+select pg_temp.expect_error(format($q$select public.send_transfer('%s', '%s', '[]')$q$, :'BRANCH_A', :'BRANCH_B'), 'NOTHING_TO_SEND');
+select pg_temp.expect_error(format($q$select public.send_transfer('%s', '%s', '[{"product_id":"%s","qty":1}]')$q$, :'BRANCH_A', :'BRANCH_A', :'KEYBOARD'), 'SAME_BRANCH');
+select pg_temp.expect_error(format($q$select public.send_transfer('%s', '%s', '[{"product_id":"%s","qty":99999}]')$q$, :'BRANCH_A', :'BRANCH_B', :'KEYBOARD'), 'OUT_OF_STOCK');
+
+-- ---- While the van is on the road ----
+select pg_temp.check(
+  (select coalesce(sum(qty), 0) from public.branch_stock
+   where product_id = :'LAPTOP' and location_id = :'LOC_A')
+  = (select v - 2 from pg_temp.p7n where k = 'before_a'),
+  'the two laptops are off Branch A''s shelf straight away');
+select pg_temp.check(
+  (select count(*) from public.serials where id in (select v from pg_temp.p7 where k in ('s1','s2'))
+   and status = 'in_transit') = 2,
+  'and both serials say they are on the road');
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.branch_products(:'BRANCH_A')) x
+   where x->>'id' = :'LAPTOP' and jsonb_array_length(x->'serials') >= 0) = 1
+  and (select jsonb_array_length(x->'serials') from jsonb_array_elements(public.branch_products(:'BRANCH_A')) x
+       where x->>'id' = :'LAPTOP')
+      = (select count(*) from public.serials where product_id = :'LAPTOP' and status = 'in_stock'
+         and location_id = :'LOC_A'),
+  'and nobody at either end can pick them for a sale');
+select pg_temp.check(
+  (select coalesce(sum(qty), 0) from public.branch_stock
+   where product_id = :'LAPTOP' and location_id = :'LOC_B') = 0,
+  'they have not arrived yet, so Branch B has none');
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.in_transit()) x
+   where x->>'transfer_no' like 'TRA-MB-%') = 1,
+  'the transfer shows on the in-transit list with how long it has been out');
+select pg_temp.check(
+  (select (x->>'days_out')::int from jsonb_array_elements(public.in_transit()) x limit 1) = 0,
+  'and it went out today');
+
+-- The sending branch cannot sign for its own delivery.
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.expect_error($q$select public.receive_transfer((select v from pg_temp.p7 where k='tr'), '[]')$q$, 'NOT_ALLOWED');
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+
+-- ---- Branch B receives one and marks one damaged ----
+do $$
+declare item uuid; s1 uuid; s2 uuid; r jsonb;
+begin
+  select v into s1 from pg_temp.p7 where k = 's1';
+  select v into s2 from pg_temp.p7 where k = 's2';
+  select id into item from public.transfer_items
+    where transfer_id = (select v from pg_temp.p7 where k = 'tr');
+
+  r := public.receive_transfer((select v from pg_temp.p7 where k = 'tr'),
+        jsonb_build_array(jsonb_build_object(
+          'item_id', item,
+          'serials_ok', jsonb_build_array(s1),
+          'serials_damaged', jsonb_build_array(s2),
+          'note', 'Second one had a cracked lid')),
+        'Checked against the slip');
+  if (r->>'status') <> 'received' then raise exception 'SHOULD BE RECEIVED IN FULL: %', r; end if;
+  raise notice 'ok: Branch B took one sound laptop and one damaged one';
+end $$;
+
+select pg_temp.check(
+  (select status from public.serials where id = (select v from pg_temp.p7 where k='s1')) = 'in_stock'
+  and (select location_id from public.serials where id = (select v from pg_temp.p7 where k='s1')) = :'LOC_B',
+  'the sound laptop is on Branch B''s shelf, with its serial moved there');
+select pg_temp.check(
+  (select status from public.serials where id = (select v from pg_temp.p7 where k='s2')) = 'rma',
+  'and the damaged one is in RMA, not on sale');
+select pg_temp.check(
+  (select coalesce(sum(qty), 0) from public.branch_stock
+   where product_id = :'LAPTOP' and location_id = :'LOC_B') = 1,
+  'so Branch B has exactly one sellable laptop');
+select pg_temp.check(
+  (select jsonb_array_length(x->'serials') from jsonb_array_elements(public.branch_products(:'BRANCH_B')) x
+   where x->>'id' = :'LAPTOP') = 1,
+  'and the counter at Branch B offers that one serial');
+select pg_temp.check(
+  (select count(*) from public.audit_log where action = 'transfer_received') = 1,
+  'the receipt is logged');
+select pg_temp.check(
+  (select count(*) from public.stock_movements
+   where reason = 'adjust_out' and reason_detail = 'damaged'
+     and note like 'TRA-MB-%arrived damaged') = 1,
+  'and the damage is recorded where it was found');
+select pg_temp.check(
+  (select count(*) from public.in_transit()) = 0
+  or jsonb_array_length(public.in_transit()) = 0,
+  'nothing is on the road any more');
+
+-- ---- A shortage leaves the transfer disputed until a manager decides ----
+do $$
+declare r jsonb; item uuid;
+begin
+  r := public.send_transfer('00000000-0000-4000-8000-0000000000b1',
+        '00000000-0000-4000-8000-0000000000b2',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":4}]',
+        'Keyboards');
+  insert into pg_temp.p7 values ('tr2', (r->>'id')::uuid);
+
+  select id into item from public.transfer_items where transfer_id = (r->>'id')::uuid;
+  insert into pg_temp.p7 values ('tr2item', item);
+
+  -- Only 3 of the 4 arrived.
+  r := public.receive_transfer((select v from pg_temp.p7 where k='tr2'),
+        jsonb_build_array(jsonb_build_object('item_id', item, 'ok_qty', 3)));
+  if (r->>'status') <> 'disputed' then raise exception 'SHORTAGE NOT DISPUTED: %', r; end if;
+  raise notice 'ok: one keyboard short, so the transfer is disputed';
+end $$;
+select pg_temp.check(
+  (select count(*) from public.audit_log where action = 'transfer_disputed') = 1,
+  'and the dispute is logged, not quietly absorbed');
+select pg_temp.check(
+  (select (x->>'short')::int from jsonb_array_elements(
+     (select details->'lines' from public.audit_log where action = 'transfer_disputed')) x) = 1,
+  'with how many went missing');
+-- The missing one belongs to nobody until it is settled.
+select pg_temp.check(
+  (select coalesce(sum(qty), 0) from public.branch_stock
+   where product_id = :'KEYBOARD' and location_id = :'LOC_B') = 3,
+  'Branch B only has the three that turned up');
+select pg_temp.expect_error($q$select public.resolve_transfer((select v from pg_temp.p7 where k='tr2'), 'returned', '')$q$, 'RESOLUTION_NOTE_REQUIRED');
+select pg_temp.expect_error($q$select public.resolve_transfer((select v from pg_temp.p7 where k='tr2'), 'eaten', 'by a dog')$q$, 'BAD_RESOLUTION');
+select pg_temp.check(
+  (public.resolve_transfer((select v from pg_temp.p7 where k='tr2'), 'written_off',
+                           'Never found. Driver questioned.')->>'cost_of_shortage')::numeric >= 0,
+  'a manager writes the missing keyboard off, at cost');
+select pg_temp.check(
+  (select count(*) from public.stock_movements
+   where reason_detail = 'lost' and note like 'TRA-MB-%lost in transit') = 1,
+  'and the loss is recorded against the branch it left');
+select pg_temp.check(
+  (select status from public.transfers where id = (select v from pg_temp.p7 where k='tr2')) = 'received',
+  'the transfer is settled');
+select pg_temp.expect_error($q$select public.resolve_transfer((select v from pg_temp.p7 where k='tr2'), 'returned', 'again')$q$, 'TRANSFER_NOT_DISPUTED');
+
+-- ---- A transfer that never left can be called off ----
+do $$
+declare r jsonb; before_qty integer;
+begin
+  select coalesce(sum(qty), 0) into before_qty from public.branch_stock
+    where product_id = '00000000-0000-4000-8000-0000000000a5'
+      and location_id = '00000000-0000-4000-8000-0000000000e1';
+  r := public.send_transfer('00000000-0000-4000-8000-0000000000b1',
+        '00000000-0000-4000-8000-0000000000b2',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":2}]');
+  perform public.cancel_transfer((r->>'id')::uuid, 'Van broke down, goods never left');
+  if (select coalesce(sum(qty), 0) from public.branch_stock
+      where product_id = '00000000-0000-4000-8000-0000000000a5'
+        and location_id = '00000000-0000-4000-8000-0000000000e1') <> before_qty then
+    raise exception 'CANCELLING DID NOT PUT THE STOCK BACK';
+  end if;
+  raise notice 'ok: calling a transfer off puts every unit back on the sender''s shelf';
+end $$;
+select pg_temp.expect_error(format($q$select public.cancel_transfer((select id from public.transfers where status = 'cancelled' limit 1), 'again')$q$), 'TRANSFER_NOT_IN_TRANSIT');
+
+-- ---- Moving between locations inside one branch ----
+-- stock_locations has no insert policy, so it goes through the one saver.
+create table pg_temp.p7loc (k text primary key, v uuid);
+insert into pg_temp.p7loc
+  select 'warehouse', (public.save_stock_location(:'BRANCH_A', 'Warehouse')->>'id')::uuid;
+do $$
+declare before_floor integer; wh uuid;
+begin
+  select v into wh from pg_temp.p7loc where k = 'warehouse';
+  select coalesce(qty, 0) into before_floor from public.branch_stock
+    where product_id = '00000000-0000-4000-8000-0000000000a5'
+      and location_id = '00000000-0000-4000-8000-0000000000e1';
+  perform public.move_within_branch('00000000-0000-4000-8000-0000000000b1',
+    '00000000-0000-4000-8000-0000000000e1', wh,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":3}]');
+  if (select qty from public.branch_stock
+      where product_id = '00000000-0000-4000-8000-0000000000a5'
+        and location_id = wh) <> 3 then
+    raise exception 'STOCK DID NOT REACH THE WAREHOUSE';
+  end if;
+  if (select qty from public.branch_stock
+      where product_id = '00000000-0000-4000-8000-0000000000a5'
+        and location_id = '00000000-0000-4000-8000-0000000000e1') <> before_floor - 3 then
+    raise exception 'STOCK DID NOT LEAVE THE SHOP FLOOR';
+  end if;
+  raise notice 'ok: 3 keyboards moved from the shop floor to the warehouse';
+end $$;
+-- The branch total is unchanged: the goods have not left the building.
+select pg_temp.check(
+  (select (x->>'stock')::int from jsonb_array_elements(public.branch_products(:'BRANCH_A')) x
+   where x->>'id' = :'KEYBOARD')
+  = (select sum(qty)::int from public.branch_stock
+     where product_id = :'KEYBOARD' and branch_id = :'BRANCH_A'),
+  'and the branch still has the same number in total');
+select pg_temp.expect_error(format($q$select public.move_within_branch('%s', '%s', '%s', '[{"product_id":"%s","qty":1}]')$q$, :'BRANCH_A', :'LOC_A', :'LOC_A', :'KEYBOARD'), 'SAME_LOCATION');
+select pg_temp.expect_error(format($q$select public.move_within_branch('%s', '%s', '%s', '[{"product_id":"%s","qty":1}]')$q$, :'BRANCH_A', :'LOC_A', :'LOC_B', :'KEYBOARD'), 'LOCATION_NOT_FOUND');
+
+-- ---- One branch asks another ----
+select set_config('request.jwt.claim.sub', '44444444-4444-4444-8444-444444444444', false);
+do $$
+declare r jsonb;
+begin
+  -- Rafi works at Branch B, so he asks Branch A for stock FOR Branch B.
+  r := public.save_transfer_request('00000000-0000-4000-8000-0000000000b1',
+        '00000000-0000-4000-8000-0000000000b2',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":5}]',
+        'We are out of keyboards');
+  if (r->>'req_no') not like 'TRQ-SB-%' then raise exception 'WRONG REQUEST NUMBER: %', r->>'req_no'; end if;
+  insert into pg_temp.p7 values ('req', (r->>'id')::uuid);
+  raise notice 'ok: Branch B asked Branch A for 5 keyboards as %', r->>'req_no';
+end $$;
+-- The branch that has to hand the goods over is the one that decides, and Rafi
+-- cannot work at Branch A.
+select pg_temp.expect_error($q$select public.decide_transfer_request((select v from pg_temp.p7 where k='req'), true)$q$, 'BRANCH_NOT_ALLOWED');
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+select pg_temp.check(
+  (public.decide_transfer_request((select v from pg_temp.p7 where k='req'), true, 'Sending today')->>'status') = 'approved',
+  'Branch A agrees to send them');
+select pg_temp.expect_error($q$select public.decide_transfer_request((select v from pg_temp.p7 where k='req'), true)$q$, 'REQUEST_ALREADY_DECIDED');
+do $$
+declare r jsonb;
+begin
+  r := public.send_transfer('00000000-0000-4000-8000-0000000000b1',
+        '00000000-0000-4000-8000-0000000000b2',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":5}]',
+        null, null, null, (select v from pg_temp.p7 where k='req'));
+  if (select status from public.transfer_requests where id = (select v from pg_temp.p7 where k='req')) <> 'sent' then
+    raise exception 'REQUEST NOT MARKED SENT';
+  end if;
+  insert into pg_temp.p7 values ('tr3', (r->>'id')::uuid);
+  raise notice 'ok: sending against the request closes the ask';
+end $$;
+
+-- ---- Who may do what ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.expect_error(format($q$select public.send_transfer('%s', '%s', '[{"product_id":"%s","qty":1}]')$q$, :'BRANCH_A', :'BRANCH_B', :'KEYBOARD'), 'NOT_ALLOWED:transfer_stock');
+select pg_temp.expect_error(format($q$select public.move_within_branch('%s', '%s', '%s', '[{"product_id":"%s","qty":1}]')$q$, :'BRANCH_A', :'LOC_A', (select v from pg_temp.p7loc where k='warehouse'), :'KEYBOARD'), 'NOT_ALLOWED:transfer_stock');
+select pg_temp.expect_error($q$select public.in_transit()$q$, 'NOT_ALLOWED:view_reports');
+select pg_temp.expect_error(format($q$select public.save_transfer_route('%s', '%s', false)$q$, :'BRANCH_A', :'BRANCH_B'), 'NOT_OWNER');
+-- A cashier at Branch A sees Branch A's transfers, and nothing from branches they
+-- do not work at.
+select pg_temp.check(
+  (select count(*) from public.transfers
+   where from_branch_id <> :'BRANCH_A' and to_branch_id <> :'BRANCH_A') = 0,
+  'a cashier sees only the transfers their own branch sent or was sent');
+
 reset role;
 \echo ALL DATABASE CHECKS PASSED
