@@ -74,6 +74,13 @@ select pg_temp.check((select public.has_pin()) = false, 'cashier has no PIN');
 -- From here on we are Ovi, the cashier at Branch A.
 select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
 
+-- A cashier cannot sell without an open drawer (P8), so the first thing Ovi does is the
+-- first thing a real cashier does: open the till.
+select pg_temp.expect_error(format($q$select public.complete_sale('%s', '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]', 'cash', 0, null, null, 1000)$q$, :'BRANCH_A'), 'NO_OPEN_SHIFT');
+select pg_temp.check(
+  (public.open_shift(:'BRANCH_A', 2000)->>'opening_cash')::numeric = 2000,
+  'the cashier opens the drawer with 2,000');
+
 -- 1. The filmed sale: 2 splitters, cash 1,000, at Branch A.
 select pg_temp.check(
   (public.complete_sale(:'BRANCH_A', '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":2}]', 'cash', 0, null, null, 1000)->>'invoice_no') = 'DEMO-MB-2026000001',
@@ -395,6 +402,9 @@ select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222
 select pg_temp.check(
   (select array_length(public.current_branch_ids(), 1)) = 2,
   'the cashier now has both branches');
+-- A drawer belongs to one branch, so working at a second branch means opening its till.
+select pg_temp.expect_error(format($q$select public.complete_sale('%s', '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]', 'cash', 0, null, null, 550)$q$, :'BRANCH_B'), 'NO_OPEN_SHIFT');
+select public.open_shift(:'BRANCH_B', 500);
 select pg_temp.check(
   (public.complete_sale(:'BRANCH_B', '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]', 'cash', 0, null, null, 550)->>'invoice_no') = 'DEMO-SB-2026000002',
   'Branch B''s numbering carries on from its own last invoice');
@@ -2014,6 +2024,174 @@ select pg_temp.check(
   (select count(*) from public.transfers
    where from_branch_id <> :'BRANCH_A' and to_branch_id <> :'BRANCH_A') = 0,
   'a cashier sees only the transfers their own branch sent or was sent');
+
+-- ===========================================================================
+-- 19. SHIFTS AND THE CASH CHECK (P8)
+-- ===========================================================================
+-- The done-when: open with 2,000, sell 1,000 cash, take 200 out for tea, close
+-- with 2,700 counted, and the owner sees "short 100" for that branch.
+--
+-- A fresh branch is used so the arithmetic is exactly the figures above and does
+-- not depend on everything the earlier sections sold.
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+create table pg_temp.p8 (k text primary key, v uuid);
+insert into pg_temp.p8
+  select 'branch', (public.save_branch(null, 'Cash check branch', 'CC')->>'id')::uuid;
+insert into pg_temp.p8
+  select 'cashier', (select id from public.staff where name = 'Ovi');
+-- Put some splitters on that branch's shelf: at 500 each, two of them is exactly the
+-- 1,000 cash sale the done-when describes.
+do $$
+declare b uuid; loc uuid;
+begin
+  select v into b from pg_temp.p8 where k = 'branch';
+  select public.default_location(b) into loc;
+  insert into pg_temp.p8 values ('loc', loc);
+  perform public.receive_goods(b,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":10,"unit_cost":300}]');
+end $$;
+select public.set_staff_branches(
+  (select v from pg_temp.p8 where k = 'cashier'),
+  array[:'BRANCH_A', :'BRANCH_B', (select v from pg_temp.p8 where k = 'branch')]::uuid[]);
+-- The bulk-price section earlier put the splitter at 520. Put it back to 500 so the
+-- drawer arithmetic below is the done-when's figures and not an accident of test order.
+select public.set_prices('00000000-0000-4000-8000-0000000000a1',
+  (select id from public.price_lists where shop_id = :'SHOP' and is_default), 500);
+
+-- ---- The cashier opens the drawer with 2,000 ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.check(
+  (public.current_shift((select v from pg_temp.p8 where k='branch'))->>'open')::boolean = false,
+  'no drawer is open at the new branch yet');
+select pg_temp.check(
+  (public.current_shift((select v from pg_temp.p8 where k='branch'))->>'may_sell_without_shift')::boolean = false,
+  'and a cashier may not sell without one');
+do $$
+declare r jsonb;
+begin
+  r := public.open_shift((select v from pg_temp.p8 where k='branch'), 2000);
+  insert into pg_temp.p8 values ('shift', (r->>'shift_id')::uuid);
+  raise notice 'ok: the drawer is open with 2,000';
+end $$;
+select pg_temp.expect_error($q$select public.open_shift((select v from pg_temp.p8 where k='branch'), 500)$q$, 'SHIFT_ALREADY_OPEN');
+select pg_temp.expect_error($q$select public.open_shift((select v from pg_temp.p8 where k='branch'), -5)$q$, 'BAD_CASH_AMOUNT');
+select pg_temp.check(
+  (public.current_shift((select v from pg_temp.p8 where k='branch'))->>'opening_cash')::numeric = 2000,
+  'and the till can see what it was opened with');
+
+-- ---- Sell 1,000 in cash ----
+-- 2 splitters at the price the owner set, 500 each. The customer hands over 1,000.
+do $$
+declare r jsonb; b uuid;
+begin
+  select v into b from pg_temp.p8 where k = 'branch';
+  r := public.complete_sale(b,
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":2}]',
+        'cash', 0, null, null, 1000);
+  if (r->>'total')::numeric <> 1000 then raise exception 'WRONG TOTAL: %', r; end if;
+  raise notice 'ok: sold 1,000 in cash on the open drawer';
+end $$;
+select pg_temp.check(
+  (select shift_id from public.sales where id = (
+     select id from public.sales where branch_id = (select v from pg_temp.p8 where k='branch')
+     order by created_at desc limit 1))
+  = (select v from pg_temp.p8 where k='shift'),
+  'and the sale is tied to the drawer it was rung up on');
+
+-- ---- 200 out for tea ----
+select pg_temp.expect_error($q$select public.cash_movement((select v from pg_temp.p8 where k='branch'), 'out', 200, 'expense')$q$, 'EXPENSE_CATEGORY_REQUIRED');
+select pg_temp.expect_error($q$select public.cash_movement((select v from pg_temp.p8 where k='branch'), 'out', 0, 'other', null, 'nothing')$q$, 'BAD_CASH_AMOUNT');
+select pg_temp.expect_error($q$select public.cash_movement((select v from pg_temp.p8 where k='branch'), 'sideways', 200, 'other', null, 'x')$q$, 'BAD_CASH_DIRECTION');
+select pg_temp.expect_error($q$select public.cash_movement((select v from pg_temp.p8 where k='branch'), 'out', 200, 'other')$q$, 'REASON_NOTE_REQUIRED');
+select pg_temp.check(
+  (public.cash_movement((select v from pg_temp.p8 where k='branch'), 'out', 200, 'expense',
+                        (select id from public.transaction_categories
+                         where name = 'Tea and snacks' and shop_id = :'SHOP'),
+                        'Tea for the shop')->>'amount')::numeric = 200,
+  'the cashier takes 200 out for tea, against an expense category');
+-- Whether it was logged is checked further down, as the owner: a cashier cannot read
+-- the audit log at all, which is itself one of the rules.
+
+-- A cashier must not be able to work out what the drawer should hold.
+select pg_temp.expect_error($q$select public.expected_cash((select v from pg_temp.p8 where k='shift'))$q$, 'permission denied');
+select pg_temp.expect_error($q$select public.shift_list((select v from pg_temp.p8 where k='branch'))$q$, 'NOT_ALLOWED:view_reports');
+
+-- ---- Close with 2,700 counted ----
+-- Expected: 2,000 opening + 1,000 cash sale − 200 tea = 2,800. Counted 2,700, so 100
+-- is missing.
+do $$
+declare r jsonb;
+begin
+  r := public.close_shift((select v from pg_temp.p8 where k='shift'), 2700,
+        'Counted twice', '{"1000": 2, "500": 1, "100": 2}');
+  -- The cashier is told it is closed and nothing else: showing the expected figure
+  -- would turn counting into copying.
+  if (r ? 'expected') then raise exception 'CASHIER WAS SHOWN THE EXPECTED CASH: %', r; end if;
+  if (r ? 'difference') then raise exception 'CASHIER WAS SHOWN THE DIFFERENCE: %', r; end if;
+  if not (r->>'closed')::boolean then raise exception 'NOT CLOSED: %', r; end if;
+  raise notice 'ok: the cashier closes the drawer and is told only that it is closed';
+end $$;
+select pg_temp.expect_error($q$select public.close_shift((select v from pg_temp.p8 where k='shift'), 100)$q$, 'SHIFT_ALREADY_CLOSED');
+
+-- ---- What the owner sees ----
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+do $$
+declare s jsonb;
+begin
+  select x into s from jsonb_array_elements(
+    public.shift_list((select v from pg_temp.p8 where k='branch'))) x
+    where (x->>'id')::uuid = (select v from pg_temp.p8 where k='shift');
+  if s is null then raise exception 'SHIFT NOT IN THE LIST'; end if;
+  if (s->>'expected_cash')::numeric <> 2800 then raise exception 'WRONG EXPECTED: %', s; end if;
+  if (s->>'counted_cash')::numeric <> 2700 then raise exception 'WRONG COUNTED: %', s; end if;
+  if (s->>'difference')::numeric <> -100 then raise exception 'WRONG DIFFERENCE: %', s; end if;
+  if not (s->>'over_limit')::boolean then raise exception 'SHORT BY 100 NOT FLAGGED: %', s; end if;
+  if (s->'by_method'->>'cash')::numeric <> 1000 then raise exception 'WRONG CASH TOTAL: %', s->'by_method'; end if;
+  if (s->>'cash_out')::numeric <> 200 then raise exception 'TEA MONEY MISSING: %', s; end if;
+  if (s->'note_counts'->>'1000')::int <> 2 then raise exception 'NOTE COUNTS LOST: %', s; end if;
+  raise notice 'ok: the owner sees expected 2,800, counted 2,700, short 100, flagged';
+end $$;
+select pg_temp.check(
+  (select count(*) from public.audit_log where action = 'cash_out') = 1,
+  'the cash-out was logged, which only the owner can see');
+-- The cash-out shows with its reason and who took it, because "200 missing" and
+-- "Ovi took 200 for tea" are different facts.
+select pg_temp.check(
+  (select (m->>'category') from jsonb_array_elements(
+     (select x->'movements' from jsonb_array_elements(
+        public.shift_list((select v from pg_temp.p8 where k='branch'))) x
+      where (x->>'id')::uuid = (select v from pg_temp.p8 where k='shift'))) m) = 'Tea and snacks',
+  'and the tea money is there with its category and who took it');
+
+-- ---- The shop decides how far out is too far ----
+select public.save_shop_details('{"cash_short_limit": 500}');
+select pg_temp.check(
+  (select (x->>'over_limit')::boolean from jsonb_array_elements(
+     public.shift_list((select v from pg_temp.p8 where k='branch'))) x
+   where (x->>'id')::uuid = (select v from pg_temp.p8 where k='shift')) = false,
+  'with the limit raised to 500, being 100 out is no longer flagged');
+select public.save_shop_details('{"cash_short_limit": 50}');
+
+-- ---- An owner may sell without opening a drawer ----
+select pg_temp.check(
+  (public.current_shift((select v from pg_temp.p8 where k='branch'))->>'may_sell_without_shift')::boolean,
+  'an owner may sell without a drawer');
+select pg_temp.check(
+  (public.complete_sale((select v from pg_temp.p8 where k='branch'),
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]',
+    'cash', 0, null, null, 500) ? 'invoice_no'),
+  'and really can, because locking the owner out of their own till at 9pm is worse');
+select pg_temp.check(
+  (select shift_id from public.sales
+   where branch_id = (select v from pg_temp.p8 where k='branch')
+   order by created_at desc limit 1) is null,
+  'that sale belongs to no drawer, which is why the owner is warned on screen');
+
+-- ---- Opening is one tap next time ----
+select pg_temp.check(
+  (public.current_shift((select v from pg_temp.p8 where k='branch'))->>'last_close')::numeric = 2700,
+  'the next person to open sees what the last close counted');
 
 reset role;
 \echo ALL DATABASE CHECKS PASSED

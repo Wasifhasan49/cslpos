@@ -152,6 +152,21 @@ chains with many branches; CSL's single-branch store is only the first customer.
   loss, and either answer is logged. Writing off does NOT deduct stock again, because
   it already left the shelf when it was sent. Transfer routes default to "anywhere";
   the first route an owner adds makes the list the rule.
+- **The drawer has two ends, and a cashier only sees one of them** (P8). This is the
+  whole reason the shift exists: BMS never records cash received, so the bill prints
+  "PAID" and nobody can tell a good day from one with money missing. `open_shift()`
+  takes what is in the drawer now, `cash_movement()` records every taka that leaves for
+  tea or the bank (an expense must name a category, or it cannot be added up later), and
+  `close_shift()` works out expected = opening + cash taken in − change given + cash in
+  − cash out, stores the difference, and returns **only "closed" to a cashier**. If the
+  till showed the expected figure, counting would stop being a count: anyone short would
+  type the expected number in. `expected_cash()` has no grant to `authenticated` at all.
+  The owner sees expected, counted, difference and the totals per payment method, so
+  bKash and card can be matched against statements. A cashier cannot sell without an
+  open drawer — enforced by the `sales_require_open_shift` trigger rather than a sixth
+  copy of `complete_sale()`, because the rule belongs to the sale row wherever it is
+  inserted from. Owners are let through with a warning on screen: an owner locked out of
+  their own till at 9pm stops using the app.
 - **Imports upsert by code and never delete** (P4). A shop's export may be partial or
   last week's, so importing one must never remove anything, and re-running the same file
   must change nothing — that is what makes it safe to retry after a timeout. Opening
@@ -212,9 +227,8 @@ The list below is the original short version; BUILD_PROMPTS.md wins where they d
    supplier ledger and aging.
    ~~**Branch transfers**~~ — done (P7): send and receive with in-transit stock,
    disputed shortages, moves inside a branch, and transfer routes.
-5. **Shifts + cash check** (P8): open with opening cash, close with counted cash; flag
-   shortfalls. Tables exist (`shifts`); `complete_sale()` already links sales to the
-   open shift.
+5. ~~**Shifts and the cash check**~~ — done (P8): open and close the drawer, cash in and
+   out with reasons, and the owner's drawer check per branch at `/cash`.
 6. **Sales history, reprint, void and returns** (P9), then **credit sales and customers**
    (P10) and the **full counter** (P10a).
 7. **Warranty lookup** by serial or phone; simple claim log (P11).

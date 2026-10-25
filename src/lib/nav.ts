@@ -21,7 +21,7 @@ export interface NavItem {
 
 export type IconName =
   | "counter" | "sales" | "warranty" | "stock" | "purchases" | "transfers"
-  | "products" | "customers" | "suppliers" | "dashboard" | "accounts" | "settings";
+  | "products" | "customers" | "suppliers" | "cash" | "dashboard" | "accounts" | "settings";
 
 const EVERYONE: readonly Role[] = ["owner", "manager", "cashier"];
 const MANAGERS: readonly Role[] = ["owner", "manager"];
@@ -39,6 +39,9 @@ export const NAV: readonly NavItem[] = [
   { href: "/products",  label: "Products",  short: "Items",    icon: "products",  roles: MANAGERS },
   { href: "/customers", label: "Customers", short: "People",   icon: "customers", roles: MANAGERS },
   { href: "/suppliers", label: "Suppliers", short: "Supply",   icon: "suppliers", roles: MANAGERS },
+  // The drawer check. Cashiers open and close their own till on the counter screen;
+  // what it SHOULD have held is deliberately not theirs to see.
+  { href: "/cash",      label: "Cash drawer", short: "Cash",   icon: "cash",      roles: MANAGERS },
   // Owners, and managers only if the owner turns the flag on.
   { href: "/dashboard", label: "Dashboard", short: "Today",    icon: "dashboard", roles: OWNERS },
   { href: "/accounts",  label: "Accounts",  short: "Books",    icon: "accounts",  roles: OWNERS, feature: "accounts" },

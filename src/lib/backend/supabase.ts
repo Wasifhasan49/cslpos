@@ -10,6 +10,7 @@ import type {
   RequisitionRow, RequisitionStatus, SupplierAging, SupplierPaymentResult,
   InTransitRow, TransferReceived, TransferRequestRow, TransferRequestStatus, TransferRoute,
   TransferRow, TransferSent, TransferStatus,
+  CashReason, ShiftClosed, ShiftRow, ShiftState,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
@@ -297,7 +298,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         "transaction_categories",
       ];
       const [shopRes, featRes, keysRes, roleRes, staffPermRes, docRes, ...listRes] = await Promise.all([
-        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct, po_approval_limit").limit(1).maybeSingle(),
+        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct, po_approval_limit, cash_short_limit").limit(1).maybeSingle(),
         sb.from("shop_features").select("feature, enabled"),
         sb.from("permission_keys").select("key, label, area, has_limit").order("sort"),
         sb.from("role_permissions").select("role, perm, allowed, num_limit"),
@@ -319,6 +320,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
           logoUrl: shop.logo_url, binVat: shop.bin_vat, receiptFooter: shop.receipt_footer,
           invoicePrefix: shop.invoice_prefix, currency: shop.currency, aitPct: num(shop.ait_pct),
           poApprovalLimit: num(shop.po_approval_limit),
+          cashShortLimit: num(shop.cash_short_limit),
         },
         features: Object.fromEntries((featRes.data ?? []).map((r) => [r.feature, r.enabled])),
         lists,
@@ -891,6 +893,98 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         supplier: String(r.supplier), amount: num(r.amount), balance: num(r.balance),
         aging: readAging(r.aging),
       };
+    },
+
+    // --- Shifts and the cash check (P8) ---
+
+    async currentShift(branchId: string): Promise<ShiftState> {
+      const { data, error } = await sb.rpc("current_shift", { p_branch_id: branchId });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return {
+        open: Boolean(r.open),
+        shiftId: (r.shift_id as string | null) ?? null,
+        openedAt: (r.opened_at as string | null) ?? null,
+        openingCash: numOrNull(r.opening_cash),
+        lastClose: numOrNull(r.last_close),
+        maySellWithoutShift: Boolean(r.may_sell_without_shift),
+      };
+    },
+
+    async openShift(branchId: string, openingCash: number) {
+      const { data, error } = await sb.rpc("open_shift", {
+        p_branch_id: branchId, p_opening_cash: openingCash,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return { shiftId: String(r.shift_id), openingCash: num(r.opening_cash) };
+    },
+
+    async cashMovement(input): Promise<void> {
+      const { error } = await sb.rpc("cash_movement", {
+        p_branch_id: input.branchId,
+        p_direction: input.direction,
+        p_amount: input.amount,
+        p_reason: input.reason,
+        p_category_id: input.categoryId ?? null,
+        p_note: input.note ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async closeShift(input): Promise<ShiftClosed> {
+      const { data, error } = await sb.rpc("close_shift", {
+        p_shift_id: input.shiftId,
+        p_counted_cash: input.countedCash,
+        p_note: input.note ?? null,
+        p_note_counts: input.noteCounts ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      // A cashier gets only `closed`. Anything absent stays absent rather than
+      // becoming 0, or the till would be showing a figure the database withheld.
+      return {
+        closed: Boolean(r.closed),
+        ...(r.expected != null ? { expected: num(r.expected) } : {}),
+        ...(r.counted != null ? { counted: num(r.counted) } : {}),
+        ...(r.difference != null ? { difference: num(r.difference) } : {}),
+        ...(r.over_limit != null ? { overLimit: Boolean(r.over_limit) } : {}),
+      };
+    },
+
+    async listShifts(branchId: string, limit = 30): Promise<ShiftRow[]> {
+      const { data, error } = await sb.rpc("shift_list", {
+        p_branch_id: branchId, p_limit: limit,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((s) => ({
+        id: String(s.id), staff: String(s.staff), openedAt: String(s.opened_at),
+        closedAt: (s.closed_at as string | null) ?? null,
+        openingCash: num(s.opening_cash), expectedCash: num(s.expected_cash),
+        countedCash: numOrNull(s.counted_cash), difference: numOrNull(s.difference),
+        overLimit: Boolean(s.over_limit), note: (s.note as string | null) ?? null,
+        noteCounts: (s.note_counts as Record<string, number> | null) ?? null,
+        salesCount: num(s.sales_count),
+        byMethod: (s.by_method as Record<string, number> | null) ?? {},
+        cashIn: num(s.cash_in), cashOut: num(s.cash_out),
+        movements: ((s.movements as Record<string, unknown>[] | null) ?? []).map((m) => ({
+          at: String(m.at), direction: m.direction as "in" | "out", amount: num(m.amount),
+          reason: m.reason as CashReason, category: (m.category as string | null) ?? null,
+          note: (m.note as string | null) ?? null, who: (m.who as string | null) ?? null,
+        })),
+      }));
+    },
+
+    async listExpenseCategories() {
+      const { data, error } = await sb
+        .from("transaction_categories")
+        .select("id, name, applies_to, active")
+        .order("name");
+      if (error) throw loadError("the expense categories", error);
+      type Row = { id: string; name: string; applies_to: string[]; active: boolean };
+      return ((data ?? []) as Row[])
+        .filter((c) => c.active && (c.applies_to ?? []).includes("expense"))
+        .map((c) => ({ id: c.id, name: c.name }));
     },
 
     // --- Branch transfers (P7) ---

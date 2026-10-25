@@ -149,6 +149,7 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
     bin_vat: s.binVat ?? "", receipt_footer: s.receiptFooter ?? "",
     invoice_prefix: s.invoicePrefix, ait_pct: String(s.aitPct),
     po_approval_limit: String(s.poApprovalLimit),
+    cash_short_limit: String(s.cashShortLimit),
   });
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm({ ...form, [k]: e.target.value });
@@ -162,6 +163,7 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
           ...form,
           ait_pct: Number(form.ait_pct) || 0,
           po_approval_limit: Number(form.po_approval_limit) || 0,
+          cash_short_limit: Number(form.cash_short_limit) || 0,
         }), true);
       }}
     >
@@ -207,6 +209,15 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
         <Input
           inputMode="numeric" value={form.po_approval_limit}
           onChange={set("po_approval_limit")} disabled={readOnly} className="num"
+        />
+      </Field>
+      <Field
+        label="Flag a till that is out by more than"
+        hint="A 5-taka coin is not theft. Anything further out than this is marked in red on the Cash drawer screen."
+      >
+        <Input
+          inputMode="numeric" value={form.cash_short_limit}
+          onChange={set("cash_short_limit")} disabled={readOnly} className="num"
         />
       </Field>
       <Field label="Receipt footer" hint="The last line on every receipt.">

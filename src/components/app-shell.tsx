@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 import {
   ArrowLeftRight, BookOpenCheck, Boxes, ChevronDown, Check, KeyRound, LayoutDashboard,
   LogOut, MoreHorizontal, Package, Receipt, Settings, ShieldCheck, ShoppingCart, Store,
-  Truck, Users,
+  Truck, Users, Wallet,
 } from "lucide-react";
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,7 @@ const ICONS: Record<IconName, React.ComponentType<{ className?: string }>> = {
   products: Package,
   customers: Users,
   suppliers: Store,
+  cash: Wallet,
   dashboard: LayoutDashboard,
   accounts: BookOpenCheck,
   settings: Settings,

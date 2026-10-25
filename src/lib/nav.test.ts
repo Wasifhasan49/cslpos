@@ -8,7 +8,7 @@ describe("who sees which section", () => {
 
   it("a cashier is kept out of every manager and owner section", () => {
     for (const path of ["/stock", "/purchases", "/transfers", "/products", "/customers",
-                        "/suppliers", "/dashboard", "/accounts", "/settings"]) {
+                        "/suppliers", "/cash", "/dashboard", "/accounts", "/settings"]) {
       expect(canSee(path, "cashier")).toBe(false);
     }
   });
@@ -16,13 +16,15 @@ describe("who sees which section", () => {
   it("a manager gets the shop floor but not the books", () => {
     expect(canSee("/stock", "manager")).toBe(true);
     expect(canSee("/products", "manager")).toBe(true);
+    // A cashier opens and closes their own till; what it should have held is not theirs.
+    expect(canSee("/cash", "manager")).toBe(true);
     expect(canSee("/dashboard", "manager")).toBe(false);
     expect(canSee("/accounts", "manager")).toBe(false);
     expect(canSee("/settings", "manager")).toBe(false);
   });
 
   it("an owner sees everything", () => {
-    expect(navFor("owner")).toHaveLength(12);
+    expect(navFor("owner")).toHaveLength(13);
   });
 
   it("the owner can share owner-only sections with managers, one at a time", () => {
@@ -112,6 +114,6 @@ describe("feature switches hide sections", () => {
   });
 
   it("with no feature map at all, nothing is hidden (so the menu never goes blank)", () => {
-    expect(navFor("owner")).toHaveLength(12);
+    expect(navFor("owner")).toHaveLength(13);
   });
 });

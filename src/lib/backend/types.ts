@@ -9,6 +9,7 @@ import type {
   RequisitionStatus, SupplierAging, SupplierPaymentResult,
   InTransitRow, TransferRequestRow, TransferRequestStatus, TransferReceived, TransferRoute,
   TransferRow, TransferSent,
+  CashReason, ShiftClosed, ShiftRow, ShiftState,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 
@@ -244,4 +245,23 @@ export interface Backend {
   listTransferRoutes(): Promise<TransferRoute[]>;
   /** Owner only. The first route a shop adds turns the list into the rule. */
   saveTransferRoute(fromBranchId: string, toBranchId: string, allowed: boolean): Promise<void>;
+
+  // --- Shifts and the cash check (P8) ---
+  /** Is a drawer open here, what was it opened with, and what did the last close count. */
+  currentShift(branchId: string): Promise<ShiftState>;
+  openShift(branchId: string, openingCash: number): Promise<{ shiftId: string; openingCash: number }>;
+  /** Cash leaving or entering the drawer for something other than a sale. */
+  cashMovement(input: {
+    branchId: string; direction: "in" | "out"; amount: number;
+    reason: CashReason; categoryId?: string | null; note?: string | null;
+  }): Promise<void>;
+  /** `noteCounts` is the note-by-note helper, kept with the shift. */
+  closeShift(input: {
+    shiftId: string; countedCash: number; note?: string | null;
+    noteCounts?: Record<string, number> | null;
+  }): Promise<ShiftClosed>;
+  /** Manager and owner only: the drawer check per shift, per branch. */
+  listShifts(branchId: string, limit?: number): Promise<ShiftRow[]>;
+  /** The shop's expense categories, for a cash-out. */
+  listExpenseCategories(): Promise<{ id: string; name: string }[]>;
 }

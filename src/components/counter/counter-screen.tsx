@@ -7,8 +7,11 @@ import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { computeTotals, isSessionExpired, parseDiscount, saleBlocker, searchProducts } from "@/lib/sale";
 import { useSale } from "@/lib/store/sale-store";
-import type { Approver, Category, CustomerLookup, Product, Receipt } from "@/lib/types";
+import type {
+  Approver, Category, CustomerLookup, Product, Receipt, ShiftState,
+} from "@/lib/types";
 import { ProductPicker } from "./product-picker";
+import { TillStrip } from "./till-strip";
 import { ReceiptDialog } from "./receipt-dialog";
 import { SalePanel } from "./sale-panel";
 
@@ -36,6 +39,8 @@ export function CounterScreen() {
   const [approvedBy, setApprovedBy] = React.useState<string | null>(null);
   const [customer, setCustomer] = React.useState<CustomerLookup | null>(null);
   const [receipt, setReceipt] = React.useState<Receipt | null>(null);
+  const [shift, setShift] = React.useState<ShiftState | null>(null);
+  const [shiftNonce, setShiftNonce] = React.useState(0);
 
   const say = React.useCallback((msg: string) => {
     clearTimeout(flashTimer.current);
@@ -71,6 +76,16 @@ export function CounterScreen() {
     })();
     return () => { cancelled = true; };
   }, [backend, branch.id]);
+
+  // The drawer is per branch and per person, so it is re-read when the branch changes,
+  // after a sale, and whenever the strip changes it.
+  React.useEffect(() => {
+    let cancelled = false;
+    backend.currentShift(branch.id)
+      .then((s) => { if (!cancelled) setShift(s); })
+      .catch(() => { if (!cancelled) setShift(null); });
+    return () => { cancelled = true; };
+  }, [backend, branch.id, shiftNonce, receipt]);
 
   // A part-built sale belongs to the branch it was started in, so switching clears it
   // rather than quietly moving the lines to another branch's stock.
@@ -219,6 +234,10 @@ export function CounterScreen() {
         <div role="alert" className="border-b border-warn-line bg-warn-bg px-4 py-2.5 text-sm font-semibold text-warn-ink sm:px-6">
           {denied}
         </div>
+      )}
+
+      {shift && (
+        <TillStrip state={shift} onChanged={() => setShiftNonce((n) => n + 1)} />
       )}
 
       {/* Which branch is selling. Only worth saying when there is more than one, but

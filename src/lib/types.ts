@@ -274,6 +274,8 @@ export interface ShopDetails {
   aitPct: number;
   /** Purchase orders over this need the owner's sign-off. 0 means never. */
   poApprovalLimit: number;
+  /** How far out the cash drawer can be before it is flagged. */
+  cashShortLimit: number;
 }
 
 /** Which setup list a row belongs to. Matches the tables save_setting_row() allows. */
@@ -611,4 +613,62 @@ export interface InTransitRow {
 export interface TransferRoute {
   fromBranchId: string;
   toBranchId: string;
+}
+
+// --- P8: shifts and the cash check -----------------------------------------
+
+/** What the till needs to know before it can sell. */
+export interface ShiftState {
+  open: boolean;
+  shiftId: string | null;
+  openedAt: string | null;
+  openingCash: number | null;
+  /** What the last person to close this branch's drawer counted. */
+  lastClose: number | null;
+  /** Owners may sell without a drawer; the till warns them instead of blocking. */
+  maySellWithoutShift: boolean;
+}
+
+export type CashReason =
+  | "expense" | "owner_took" | "owner_put_in" | "bought_change" | "bank_deposit" | "other";
+
+export interface CashMovementRow {
+  at: string;
+  direction: "in" | "out";
+  amount: number;
+  reason: CashReason;
+  category: string | null;
+  note: string | null;
+  who: string | null;
+}
+
+/** One shift as the owner sees it. A cashier never receives this. */
+export interface ShiftRow {
+  id: string;
+  staff: string;
+  openedAt: string;
+  closedAt: string | null;
+  openingCash: number;
+  expectedCash: number;
+  countedCash: number | null;
+  difference: number | null;
+  /** Out by more than the shop's limit, so worth asking about. */
+  overLimit: boolean;
+  note: string | null;
+  noteCounts: Record<string, number> | null;
+  salesCount: number;
+  /** Totals per payment method, for matching bKash and card against statements. */
+  byMethod: Record<string, number>;
+  cashIn: number;
+  cashOut: number;
+  movements: CashMovementRow[];
+}
+
+/** Closing tells a cashier only that it is closed; a manager also gets the figures. */
+export interface ShiftClosed {
+  closed: boolean;
+  expected?: number;
+  counted?: number;
+  difference?: number;
+  overLimit?: boolean;
 }

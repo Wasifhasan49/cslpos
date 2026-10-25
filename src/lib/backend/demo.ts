@@ -13,6 +13,7 @@ import type {
   LedgerEntry, PoReceiveResult, PurchaseOrderRow, PurchaseOrderStatus, RequisitionRow,
   SupplierAging, TransferLine, TransferReceived, TransferRequestRow, TransferRoute,
   TransferRow, TransferSent,
+  CashMovementRow, ShiftRow,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import type { Backend } from "./types";
@@ -72,6 +73,7 @@ export function createDemoBackend(): Backend {
     email: null as string | null, logoUrl: null as string | null, binVat: null as string | null,
     receiptFooter: "Thank you. Keep this receipt for warranty claims.",
     invoicePrefix: "DEMO", currency: "BDT", aitPct: 0, poApprovalLimit: 0,
+    cashShortLimit: 50,
   };
   // `active` defaults to true in every setup table, so the demo rows have to say so
   // too or the whole list reads as switched off.
@@ -122,7 +124,14 @@ export function createDemoBackend(): Backend {
       row({ name: "3 years service", months: 36, receipt_text: "Service within 3 years. Replacement is not included." }),
     ],
     transaction_categories: [
-      row({ name: "Walk-in" }), row({ name: "Corporate" }), row({ name: "Online" }), row({ name: "Service" }),
+      row({ name: "Walk-in", applies_to: "sale" }), row({ name: "Corporate", applies_to: "sale" }),
+      row({ name: "Online", applies_to: "sale" }), row({ name: "Service", applies_to: "sale" }),
+      // Expense categories, so a cash-out has something to be filed under (P8).
+      row({ name: "Tea and snacks", applies_to: "expense" }),
+      row({ name: "Transport", applies_to: "expense" }),
+      row({ name: "Electricity", applies_to: "expense" }),
+      row({ name: "Shop rent", applies_to: "expense" }),
+      row({ name: "Staff advance", applies_to: "expense" }),
     ],
   };
   const PERMISSION_KEYS = [
@@ -216,6 +225,8 @@ export function createDemoBackend(): Backend {
   const routes: TransferRoute[] = [];
   let trCounter = 1;
   let trqCounter = 1;
+  // The cash drawer (P8). Nothing open to start: the demo opens its own till.
+  const shifts: (ShiftRow & { branchId: string; staffId: string })[] = [];
   const costs: Record<string, number> = { a1: 250 };
 
   const noteMovement = (m: StockMovementRow) => movements.unshift(m);
@@ -315,6 +326,11 @@ export function createDemoBackend(): Backend {
     async completeSale(input: SaleInput): Promise<Receipt> {
       const branch = branchOr404(input.branchId);
       if (input.lines.length === 0) fail("EMPTY_SALE");
+      // No drawer, no selling — unless you are the owner, who gets a warning on screen
+      // instead. Same rule as the sales_require_open_shift trigger.
+      const openShift = shifts.find(
+        (sh) => sh.branchId === input.branchId && sh.staffId === staff.id && !sh.closedAt);
+      if (!openShift && staff.role !== "owner") fail("NO_OPEN_SHIFT");
       const today = dhakaToday();
       const items: ReceiptLine[] = [];
 
@@ -406,6 +422,15 @@ export function createDemoBackend(): Backend {
       for (const s of serials) if (soldSerialIds.includes(s.id)) s.sold = true;
       for (const [productId, qty] of Object.entries(stockTaken)) {
         stock[input.branchId][productId] = (stock[input.branchId][productId] ?? 0) - qty;
+      }
+
+      // The drawer this was rung up on gains what the customer handed over, less the
+      // change: for a cash sale that is the total, which is what the till can be
+      // checked against at closing time.
+      if (openShift) {
+        openShift.salesCount += 1;
+        openShift.byMethod[input.paymentMethod] =
+          (openShift.byMethod[input.paymentMethod] ?? 0) + totals.total;
       }
 
       // Numbering is per branch, with the branch's code in it.
@@ -541,6 +566,8 @@ export function createDemoBackend(): Backend {
         aitPct: values.ait_pct !== undefined ? Number(values.ait_pct) || 0 : shopDetails.aitPct,
         poApprovalLimit: values.po_approval_limit !== undefined
           ? Number(values.po_approval_limit) || 0 : shopDetails.poApprovalLimit,
+        cashShortLimit: values.cash_short_limit !== undefined
+          ? Number(values.cash_short_limit) || 0 : shopDetails.cashShortLimit,
       });
       staff.shopName = shopDetails.name;
     },
@@ -1239,6 +1266,121 @@ export function createDemoBackend(): Backend {
       }
       fail("CUSTOMER_NOT_FOUND");
       return { name: "", amount: 0, asOf };
+    },
+
+    // --- Shifts and the cash check (P8) ---
+
+    async currentShift(branchId) {
+      branchOr404(branchId);
+      const mine = shifts.find(
+        (s) => s.branchId === branchId && s.staffId === staff.id && !s.closedAt);
+      const lastClosed = shifts
+        .filter((s) => s.branchId === branchId && s.closedAt)
+        .sort((a, b) => (b.closedAt ?? "").localeCompare(a.closedAt ?? ""))[0];
+      return {
+        open: Boolean(mine),
+        shiftId: mine?.id ?? null,
+        openedAt: mine?.openedAt ?? null,
+        openingCash: mine?.openingCash ?? null,
+        lastClose: lastClosed?.countedCash ?? null,
+        maySellWithoutShift: staff.role === "owner",
+      };
+    },
+
+    async openShift(branchId, openingCash) {
+      branchOr404(branchId);
+      if (openingCash < 0) fail("BAD_CASH_AMOUNT");
+      if (shifts.some((s) => s.branchId === branchId && s.staffId === staff.id && !s.closedAt)) {
+        fail("SHIFT_ALREADY_OPEN");
+      }
+      const row = {
+        id: crypto.randomUUID(), branchId, staffId: staff.id, staff: staff.name,
+        openedAt: new Date().toISOString(), closedAt: null,
+        openingCash, expectedCash: openingCash, countedCash: null, difference: null,
+        overLimit: false, note: null, noteCounts: null, salesCount: 0,
+        byMethod: {} as Record<string, number>, cashIn: 0, cashOut: 0,
+        movements: [] as CashMovementRow[],
+      };
+      shifts.unshift(row);
+      return { shiftId: row.id, openingCash };
+    },
+
+    async cashMovement(input) {
+      branchOr404(input.branchId);
+      if (!["in", "out"].includes(input.direction)) fail(`BAD_CASH_DIRECTION:${input.direction}`);
+      if (!(input.amount > 0)) fail("BAD_CASH_AMOUNT");
+      const reasons = ["expense", "owner_took", "owner_put_in", "bought_change", "bank_deposit", "other"];
+      if (!reasons.includes(input.reason)) fail(`BAD_CASH_REASON:${input.reason}`);
+      if (input.reason === "expense" && !input.categoryId) fail("EXPENSE_CATEGORY_REQUIRED");
+      if (input.reason === "other" && !input.note?.trim()) fail("REASON_NOTE_REQUIRED");
+      const category = input.categoryId
+        ? (lists.transaction_categories.find((c) => c.id === input.categoryId)?.name as string | undefined) ?? null
+        : null;
+      if (input.categoryId && !category) fail("CATEGORY_NOT_FOUND");
+
+      const open = shifts.find(
+        (s) => s.branchId === input.branchId && s.staffId === staff.id && !s.closedAt);
+      // A movement with no drawer open still happened; it just belongs to no shift,
+      // the same way the database records it.
+      if (!open) return;
+      open.movements.push({
+        at: new Date().toISOString(), direction: input.direction, amount: input.amount,
+        reason: input.reason, category, note: input.note ?? null, who: staff.name,
+      });
+      if (input.direction === "in") open.cashIn += input.amount;
+      else open.cashOut += input.amount;
+    },
+
+    async closeShift(input) {
+      const sh = shifts.find((s) => s.id === input.shiftId);
+      if (!sh) fail("SHIFT_NOT_FOUND");
+      if (sh!.closedAt) fail("SHIFT_ALREADY_CLOSED");
+      if (input.countedCash < 0) fail("BAD_CASH_AMOUNT");
+
+      const expected = sh!.openingCash + (sh!.byMethod.cash ?? 0) + sh!.cashIn - sh!.cashOut;
+      const difference = input.countedCash - expected;
+      sh!.closedAt = new Date().toISOString();
+      sh!.expectedCash = expected;
+      sh!.countedCash = input.countedCash;
+      sh!.difference = difference;
+      sh!.overLimit = Math.abs(difference) > shopDetails.cashShortLimit;
+      sh!.noteCounts = input.noteCounts ?? null;
+      sh!.note = [sh!.note, input.note].filter(Boolean).join(" · ") || null;
+
+      // A cashier is told it is closed and no more: see the note at the top of the P8
+      // migration for why the expected figure is withheld.
+      if (staff.role === "cashier") return { closed: true };
+      return {
+        closed: true, expected, counted: input.countedCash, difference,
+        overLimit: sh!.overLimit,
+      };
+    },
+
+    async listShifts(branchId, limit = 30) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:view_reports");
+      branchOr404(branchId);
+      // branchId and staffId are the demo's own bookkeeping; ShiftRow does not carry
+      // them, and the real backend's shift_list() does not return them either.
+      return shifts
+        .filter((s) => s.branchId === branchId)
+        .slice(0, limit)
+        .map((s) => structuredClone({
+          id: s.id, staff: s.staff, openedAt: s.openedAt, closedAt: s.closedAt,
+          openingCash: s.openingCash, expectedCash: s.expectedCash,
+          countedCash: s.countedCash, difference: s.difference, overLimit: s.overLimit,
+          note: s.note, noteCounts: s.noteCounts, salesCount: s.salesCount,
+          byMethod: s.byMethod, cashIn: s.cashIn, cashOut: s.cashOut,
+          movements: s.movements,
+        }));
+    },
+
+    async listExpenseCategories() {
+      // The real column is text[]; a SettingRow holds scalars, so the demo keeps the
+      // same list as comma-separated text and splits it here.
+      return lists.transaction_categories
+        .filter((c) => c.active !== false
+          && String(c.applies_to ?? "").split(",").map((x) => x.trim()).includes("expense"))
+        .map((c) => ({ id: c.id, name: String(c.name) }));
     },
 
     // --- Branch transfers (P7) ---

@@ -190,6 +190,8 @@ export const SALE_ERROR_CODES = [
   "NOTHING_TO_SEND", "TRANSFER_NOT_FOUND", "TRANSFER_NOT_IN_TRANSIT",
   "TRANSFER_LINE_NOT_FOUND", "MORE_THAN_SENT", "SERIAL_NOT_ON_THIS_TRANSFER",
   "BAD_RESOLUTION", "RESOLUTION_NOTE_REQUIRED", "TRANSFER_NOT_DISPUTED", "SAME_LOCATION",
+  "BAD_CASH_AMOUNT", "SHIFT_ALREADY_OPEN", "BAD_CASH_DIRECTION", "BAD_CASH_REASON",
+  "EXPENSE_CATEGORY_REQUIRED", "SHIFT_NOT_FOUND", "SHIFT_ALREADY_CLOSED", "NO_OPEN_SHIFT",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -370,6 +372,16 @@ export function friendlyError(raw: string): string {
     case "TRANSFER_NOT_DISPUTED":
       return `There is nothing to settle: this transfer is ${detail ?? "already closed"}.`;
     case "SAME_LOCATION": return "Pick two different places to move between.";
+    case "BAD_CASH_AMOUNT": return "Enter how much cash, as a number.";
+    case "SHIFT_ALREADY_OPEN": return "Your drawer is already open at this branch.";
+    case "BAD_CASH_DIRECTION": return "Say whether the cash went in or out.";
+    case "BAD_CASH_REASON": return "Pick why the cash moved.";
+    case "EXPENSE_CATEGORY_REQUIRED":
+      return "Pick what the money was spent on, so it can be added up later.";
+    case "SHIFT_NOT_FOUND": return "That drawer no longer exists. Reload and try again.";
+    case "SHIFT_ALREADY_CLOSED": return "This drawer has already been closed.";
+    case "NO_OPEN_SHIFT":
+      return "Open the drawer before selling. Counter → Open the till, with what is in it now.";
     case "SERIAL_CHANGE_HAS_STOCK":
       return `${detail ?? "This product"} already has stock, so it can't switch between serial-tracked and not. Sell or write off the stock first.`;
     // Keep the raw text so a code we have not seen can still be reported and fixed,
