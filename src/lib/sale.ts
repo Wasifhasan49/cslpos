@@ -86,6 +86,13 @@ export interface CheckoutState {
   method: PaymentMethod;
   cashReceived: string;
   paymentRef: string;
+  /** How much is going on the customer's slate instead of being paid now (P10). */
+  dueAmount?: string;
+  /** What the counter knows about the buyer, for the credit rules. */
+  customer?: {
+    name: string | null; creditAllowed?: boolean; creditLimit?: number;
+    owed?: number; creditLeft?: number | null;
+  } | null;
 }
 
 /** The first thing stopping the sale, in plain words, or null if it can go through. */
@@ -113,14 +120,32 @@ export function saleBlocker(s: CheckoutState): string | null {
   if (s.discountPct > s.discountLimitPct && !s.pinApproved)
     return `A discount over ${s.discountLimitPct}% needs the manager PIN`;
   if (s.phone !== "" && !isValidPhone(s.phone)) return "Check the mobile number: 11 digits, starting with 01";
-  if (s.method === "cash") {
-    const received = parseFloat(s.cashReceived);
-    if (Number.isNaN(received) || received < totals.total)
-      return `Enter the cash received (at least ${formatTaka(totals.total)})`;
-  } else if (s.paymentRef.trim().length < 4) {
-    return s.method === "card"
-      ? "Enter the last 4 digits of the card"
-      : `Enter the ${s.method === "bkash" ? "bKash" : "Nagad"} transaction ID`;
+
+  // What goes on the slate, and what is therefore being handed over now (P10). The
+  // database checks all of this again; this is so the counter says it first.
+  const onDue = Math.min(Math.max(Number(s.dueAmount ?? 0) || 0, 0), totals.total);
+  if (onDue > 0) {
+    if (!s.customer) return "Selling on due needs the customer's mobile number";
+    if (s.customer.creditAllowed === false) {
+      return `${s.customer.name ?? "This customer"} isn't allowed to buy on due`;
+    }
+    const left = s.customer.creditLeft;
+    if (left != null && onDue > left && !s.pinApproved) {
+      return `Only ${formatTaka(left)} of their credit limit is left — a manager has to approve the rest`;
+    }
+  }
+  const payingNow = totals.total - onDue;
+
+  if (payingNow > 0) {
+    if (s.method === "cash") {
+      const received = parseFloat(s.cashReceived);
+      if (Number.isNaN(received) || received < payingNow)
+        return `Enter the cash received (at least ${formatTaka(payingNow)})`;
+    } else if (s.paymentRef.trim().length < 4) {
+      return s.method === "card"
+        ? "Enter the last 4 digits of the card"
+        : `Enter the ${s.method === "bkash" ? "bKash" : "Nagad"} transaction ID`;
+    }
   }
   return null;
 }
@@ -223,6 +248,8 @@ export const SALE_ERROR_CODES = [
   "RETURN_TOO_LATE", "SALE_LINE_NOT_FOUND", "MORE_THAN_SOLD", "SERIAL_NOT_ON_THIS_SALE",
   "CREDIT_NEEDS_CUSTOMER", "BAD_APPROVAL_ACTION", "BAD_APPROVAL_KIND",
   "NOT_AWAITING_APPROVAL",
+  "GROUP_NAME_REQUIRED", "GROUP_NOT_FOUND", "DUE_MORE_THAN_TOTAL", "DUE_NEEDS_CUSTOMER",
+  "CUSTOMER_HAS_NO_CREDIT", "OVER_CREDIT_LIMIT",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -437,6 +464,18 @@ export function friendlyError(raw: string): string {
     case "BAD_APPROVAL_KIND": return "That isn't something that can be approved.";
     case "NOT_AWAITING_APPROVAL":
       return `This isn't waiting for approval. It is ${detail ?? "already decided"}.`;
+    case "GROUP_NAME_REQUIRED": return "Give the group a name.";
+    case "GROUP_NOT_FOUND": return "That group no longer exists. Reload and try again.";
+    case "DUE_MORE_THAN_TOTAL":
+      return "More is being left on due than the sale comes to. Check the figures.";
+    case "DUE_NEEDS_CUSTOMER":
+      return "Selling on due needs a customer. Take their phone number first — it is how the shop will chase it.";
+    case "CUSTOMER_HAS_NO_CREDIT":
+      return `${detail ?? "This customer"} isn't allowed to buy on due. A manager can allow it on the Customers screen.`;
+    case "OVER_CREDIT_LIMIT":
+      return detail != null && detail !== ""
+        ? `That would take them over their credit limit — only ${detail} of it is left. A manager can approve it.`
+        : "That would take them over their credit limit. A manager can approve it.";
     case "SERIAL_CHANGE_HAS_STOCK":
       return `${detail ?? "This product"} already has stock, so it can't switch between serial-tracked and not. Sell or write off the stock first.`;
     // Keep the raw text so a code we have not seen can still be reported and fixed,

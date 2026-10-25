@@ -12,12 +12,45 @@ import type {
   TransferRow, TransferSent, TransferStatus,
   CashReason, ShiftClosed, ShiftRow, ShiftState,
   ApprovalStatus, RefundMethod, ReturnResult, SaleDetail, SaleRow, SaleStatus,
+  CustomerAging, CustomerGroup, CustomerRow, CustomerStatement, DueRow, PaymentReceipt,
+  StatementEntry,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
 import type { Backend } from "./types";
 
 const num = (v: unknown) => (v == null ? 0 : Number(v));
+
+/** Both customer functions return the same aging shape, snake_cased. */
+function readCustomerAging(v: unknown): CustomerAging {
+  const a = (v ?? {}) as Record<string, unknown>;
+  return {
+    days0to30: num(a.days_0_30), days31to60: num(a.days_31_60),
+    days60plus: num(a.days_60_plus), total: num(a.total),
+    paymentDays: num(a.payment_days), overdue: num(a.overdue),
+    inCredit: num(a.in_credit),
+  };
+}
+
+function readCustomer(r: Record<string, unknown>): CustomerRow {
+  return {
+    id: String(r.id), phone: String(r.phone), name: String(r.name),
+    company: (r.company as string | null) ?? null,
+    address: (r.address as string | null) ?? null,
+    groupId: (r.group_id as string | null) ?? null,
+    group: (r.group as string | null) ?? null,
+    priceListId: (r.price_list_id as string | null) ?? null,
+    priceList: (r.price_list as string | null) ?? null,
+    discountPct: num(r.discount_pct),
+    binVat: (r.bin_vat as string | null) ?? null,
+    nid: (r.nid as string | null) ?? null,
+    note: (r.note as string | null) ?? null,
+    active: r.active !== false,
+    districtId: numOrNull(r.district_id), upazilaId: numOrNull(r.upazila_id),
+    creditAllowed: Boolean(r.credit_allowed), creditLimit: num(r.credit_limit),
+    paymentDays: num(r.payment_days), owed: num(r.owed), totalSpent: num(r.total_spent),
+  };
+}
 
 /** The aging buckets come back snake_cased from two different functions. */
 function readAging(v: unknown): SupplierAging {
@@ -108,6 +141,12 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         priceListId: (r.price_list_id as string | null) ?? null,
         priceListName: (r.price_list_name as string | null) ?? null,
         discountPct: num(r.discount_pct),
+        group: (r.group as string | null) ?? null,
+        creditAllowed: Boolean(r.credit_allowed),
+        creditLimit: num(r.credit_limit),
+        paymentDays: num(r.payment_days),
+        owed: num(r.owed),
+        creditLeft: numOrNull(r.credit_left),
       };
     },
 
@@ -161,6 +200,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         p_charges: input.chargeIds?.length ? input.chargeIds.map((id) => ({ charge_id: id })) : null,
         p_discount_type_id: input.discountTypeId ?? null,
         p_category_id: input.categoryId ?? null,
+        p_due_amount: input.dueAmount ?? 0,
       });
       if (error) throw new Error(friendlyError(error.message));
       const r = data as Record<string, unknown>;
@@ -189,6 +229,8 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         paymentMethod: r.payment_method as PaymentMethod,
         cashReceived: numOrNull(r.cash_received), changeGiven: numOrNull(r.change_given),
         paymentRef: (r.payment_ref as string | null) ?? null, customerPhone: (r.customer_phone as string | null) ?? null,
+        paidAmount: num(r.paid_amount), dueAmount: num(r.due_amount),
+        customerOwes: numOrNull(r.customer_owes),
         items,
       };
     },
@@ -899,6 +941,134 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
       };
     },
 
+    // --- Credit sales and customers (P10) ---
+
+    async listCustomers(query, limit = 100): Promise<CustomerRow[]> {
+      const { data, error } = await sb.rpc("customer_list", {
+        p_query: query ?? null, p_limit: limit,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map(readCustomer);
+    },
+
+    async saveCustomer(id, values): Promise<CustomerRow> {
+      const { data, error } = await sb.rpc("save_customer", { p_id: id, p_values: values });
+      if (error) throw new Error(friendlyError(error.message));
+      // The saver returns the row itself, not the list shape, so the figures that are
+      // worked out (what they owe, what they have spent) come back as zero here.
+      const r = (data ?? {}) as Record<string, unknown>;
+      return {
+        id: String(r.id), phone: String(r.phone),
+        name: (r.name_text as string | null) ?? String(r.phone),
+        company: (r.company as string | null) ?? null,
+        address: (r.address as string | null) ?? null,
+        groupId: (r.group_id as string | null) ?? null, group: null,
+        priceListId: (r.price_list_id as string | null) ?? null, priceList: null,
+        discountPct: num(r.discount_pct),
+        binVat: (r.bin_vat as string | null) ?? null,
+        nid: (r.nid as string | null) ?? null,
+        note: (r.note as string | null) ?? null,
+        active: r.active !== false,
+        districtId: numOrNull(r.district_id), upazilaId: numOrNull(r.upazila_id),
+        creditAllowed: Boolean(r.credit_allowed), creditLimit: num(r.credit_limit),
+        paymentDays: num(r.payment_days), owed: 0, totalSpent: 0,
+      };
+    },
+
+    async listCustomerGroups(): Promise<CustomerGroup[]> {
+      const { data, error } = await sb
+        .from("customer_groups")
+        .select("id, name, price_list_id, discount_pct, credit_allowed, credit_limit, payment_days, active")
+        .order("name");
+      if (error) throw loadError("the customer groups", error);
+      type Row = {
+        id: string; name: string; price_list_id: string | null;
+        discount_pct: number | string; credit_allowed: boolean;
+        credit_limit: number | string; payment_days: number; active: boolean;
+      };
+      return ((data ?? []) as Row[]).map((g) => ({
+        id: g.id, name: g.name, priceListId: g.price_list_id,
+        discountPct: num(g.discount_pct), creditAllowed: g.credit_allowed,
+        creditLimit: num(g.credit_limit), paymentDays: g.payment_days, active: g.active,
+      }));
+    },
+
+    async saveCustomerGroup(id, values): Promise<void> {
+      const { error } = await sb.rpc("save_customer_group", { p_id: id, p_values: values });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async dueList(branchId): Promise<DueRow[]> {
+      const { data, error } = await sb.rpc("due_list", { p_branch_id: branchId ?? null });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((r) => ({
+        customerId: String(r.customer_id), name: String(r.name), phone: String(r.phone),
+        company: (r.company as string | null) ?? null,
+        group: (r.group as string | null) ?? null,
+        creditLimit: num(r.credit_limit), paymentDays: num(r.payment_days),
+        owed: num(r.owed), aging: readCustomerAging(r.aging), overdue: num(r.overdue),
+        lastPaid: (r.last_paid as string | null) ?? null,
+        oldestDue: (r.oldest_due as string | null) ?? null,
+      }));
+    },
+
+    async customerStatement(customerId): Promise<CustomerStatement> {
+      const { data, error } = await sb.rpc("customer_statement", { p_customer_id: customerId });
+      if (error) throw new Error(friendlyError(error.message));
+      const d = (data ?? {}) as Record<string, unknown>;
+      return {
+        customerId: String(d.customer_id), name: String(d.name), phone: String(d.phone),
+        company: (d.company as string | null) ?? null,
+        address: (d.address as string | null) ?? null,
+        binVat: (d.bin_vat as string | null) ?? null,
+        nid: (d.nid as string | null) ?? null,
+        note: (d.note as string | null) ?? null,
+        group: (d.group as string | null) ?? null,
+        priceList: (d.price_list as string | null) ?? null,
+        discountPct: num(d.discount_pct), creditAllowed: Boolean(d.credit_allowed),
+        creditLimit: num(d.credit_limit), paymentDays: num(d.payment_days),
+        owed: num(d.owed), aging: readCustomerAging(d.aging),
+        totalSpent: num(d.total_spent), saleCount: num(d.sale_count),
+        entries: ((d.entries as Record<string, unknown>[] | null) ?? []).map((e) => ({
+          at: String(e.at), kind: e.kind as StatementEntry["kind"],
+          document: String(e.document), change: num(e.change),
+          note: (e.note as string | null) ?? null,
+        })),
+        purchases: ((d.purchases as Record<string, unknown>[] | null) ?? []).map((s) => ({
+          id: String(s.id), invoiceNo: String(s.invoice_no), at: String(s.at),
+          branch: String(s.branch), total: num(s.total), due: num(s.due),
+          status: String(s.status), items: (s.items as string | null) ?? null,
+        })),
+        owns: ((d.owns as Record<string, unknown>[] | null) ?? []).map((o) => ({
+          serial: String(o.serial), product: String(o.product), bought: String(o.bought),
+          invoiceNo: String(o.invoice_no),
+          warrantyUntil: (o.warranty_until as string | null) ?? null,
+          inWarranty: Boolean(o.in_warranty), status: String(o.status),
+        })),
+      };
+    },
+
+    async collectPayment(input): Promise<PaymentReceipt> {
+      const { data, error } = await sb.rpc("collect_payment", {
+        p_branch_id: input.branchId,
+        p_customer_id: input.customerId,
+        p_amount: input.amount,
+        p_method: input.method,
+        p_reference: input.reference ?? null,
+        p_note: input.note ?? null,
+        p_account_id: input.accountId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return {
+        receiptNo: String(r.receipt_no), paymentId: String(r.payment_id),
+        customer: String(r.customer), amount: num(r.amount),
+        wasOwed: num(r.was_owed), owed: num(r.owed),
+        shopName: String(r.shop_name), branch: String(r.branch),
+        takenBy: String(r.taken_by),
+      };
+    },
+
     // --- Sales history, void and returns (P9) ---
 
     async saleHistory(input): Promise<SaleRow[]> {
@@ -949,6 +1119,8 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         approvalStatus: d.approval_status as ApprovalStatus,
         voidReason: (d.void_reason as string | null) ?? null,
         refundMethod: (d.refund_method as string | null) ?? null,
+        customerId: (d.customer_id as string | null) ?? null,
+        paidAmount: num(d.paid_amount), dueAmount: num(d.due_amount),
         customerPhone: (d.customer_phone as string | null) ?? null,
         customerName: (d.customer_name as string | null) ?? null,
         sameDay: Boolean(d.same_day), daysOld: num(d.days_old),

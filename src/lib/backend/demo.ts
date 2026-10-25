@@ -17,6 +17,8 @@ import type {
   TransferRow, TransferSent,
   CashMovementRow, ShiftRow,
   ReturnResult, SaleDetail, SaleDetailLine, SaleRow,
+  CustomerAging, CustomerGroup, CustomerRow, CustomerStatement, DueRow, PaymentReceipt,
+  StatementEntry,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import type { Backend } from "./types";
@@ -186,10 +188,113 @@ export function createDemoBackend(): Backend {
   prices["pl-dealer"]["a1"] = { price: 420, mrp: null, min: 400, max: null };
   prices["pl-dealer"]["a4"] = { price: 400, mrp: null, min: 380, max: null };
 
-  const customers: CustomerLookup[] = [
-    { id: "c-dealer", phone: "01811000000", name: "Karim Traders", priceListId: "pl-dealer", priceListName: "Dealer", discountPct: 0 },
-    { id: "c-regular", phone: "01911000000", name: "Regular Rahim", priceListId: "pl-retail", priceListName: "Retail", discountPct: 8 },
+  const customerGroups: CustomerGroup[] = [
+    { id: "cg-retail", name: "Retail", priceListId: "pl-retail", discountPct: 0,
+      creditAllowed: false, creditLimit: 0, paymentDays: 0, active: true },
+    { id: "cg-dealer", name: "Dealer", priceListId: "pl-dealer", discountPct: 0,
+      creditAllowed: true, creditLimit: 25000, paymentDays: 15, active: true },
+    { id: "cg-corporate", name: "Corporate", priceListId: "pl-retail", discountPct: 0,
+      creditAllowed: true, creditLimit: 50000, paymentDays: 30, active: true },
   ];
+  // The customer list, with the credit terms a shop actually sets (P10).
+  const customers: (CustomerRow & { openingBalance: number; openingAt: string | null })[] = [
+    { id: "c-dealer", phone: "01811000000", name: "Karim Traders",
+      company: "Karim Traders", address: "Elephant Road, Dhaka",
+      groupId: "cg-dealer", group: "Dealer",
+      priceListId: "pl-dealer", priceList: "Dealer", discountPct: 0,
+      binVat: null, nid: null, note: null, active: true,
+      districtId: null, upazilaId: null,
+      creditAllowed: true, creditLimit: 25000, paymentDays: 15,
+      owed: 0, totalSpent: 0, openingBalance: 0, openingAt: null },
+    { id: "c-regular", phone: "01911000000", name: "Regular Rahim",
+      company: null, address: null, groupId: "cg-retail", group: "Retail",
+      priceListId: "pl-retail", priceList: "Retail", discountPct: 8,
+      binVat: null, nid: null, note: null, active: true,
+      districtId: null, upazilaId: null,
+      creditAllowed: false, creditLimit: 0, paymentDays: 0,
+      owed: 0, totalSpent: 0, openingBalance: 0, openingAt: null },
+    { id: "c-corp", phone: "01611000000", name: "Shopno Enterprise",
+      company: "Shopno Enterprise Ltd", address: "Motijheel, Dhaka",
+      groupId: "cg-corporate", group: "Corporate",
+      priceListId: "pl-retail", priceList: "Retail", discountPct: 0,
+      binVat: "004123456-0101", nid: null,
+      note: "Pays by cheque at month end.", active: true,
+      districtId: null, upazilaId: null,
+      creditAllowed: true, creditLimit: 50000, paymentDays: 30,
+      owed: 0, totalSpent: 0, openingBalance: 0, openingAt: null },
+  ];
+  const customerPayments: {
+    id: string; customerId: string; receiptNo: string; amount: number; method: string;
+    reference: string | null; branchId: string; shiftId: string | null; at: string;
+  }[] = [];
+  let receiptCounter = 1;
+
+  /**
+   * Mirrors customer_aging(): what is owed, by age, with collections applied OLDEST
+   * FIRST. `overdue` is measured against the days THIS customer was given, which is a
+   * different question from "older than 60 days".
+   */
+  const agingForCustomer = (customerId: string): CustomerAging => {
+    const c = customers.find((x) => x.id === customerId);
+    const days = c?.paymentDays ?? 0;
+    const today = Date.now();
+    const rows: { amount: number; age: number }[] = [];
+    if (c && c.openingBalance > 0) {
+      rows.push({
+        amount: c.openingBalance,
+        age: c.openingAt
+          ? Math.floor((today - new Date(c.openingAt).getTime()) / 86_400_000) : 0,
+      });
+    }
+    for (const s of sales) {
+      if (s.customerId !== customerId || s.status !== "completed" || s.dueAmount <= 0) continue;
+      rows.push({
+        amount: s.dueAmount,
+        age: Math.floor((today - new Date(s.createdAt).getTime()) / 86_400_000),
+      });
+    }
+    let paid = customerPayments
+      .filter((p) => p.customerId === customerId)
+      .reduce((n, p) => n + p.amount, 0)
+      + sales.flatMap((s) => s.customerId === customerId ? s.returns : [])
+        .filter((r) => ["reduce_due", "store_credit"].includes(r.refundMethod))
+        .reduce((n, r) => n + r.total, 0);
+
+    const buckets = [0, 0, 0];
+    for (const r of rows) buckets[r.age <= 30 ? 0 : r.age <= 60 ? 1 : 2] += r.amount;
+    for (let i = 2; i >= 0; i -= 1) {
+      const take = Math.min(paid, buckets[i]);
+      paid -= take;
+      buckets[i] -= take;
+    }
+    const owed = dueFor(customerId);
+    const overdue = rows.filter((r) => r.age > days).reduce((n, r) => n + r.amount, 0);
+    return {
+      days0to30: Math.max(buckets[0], 0), days31to60: Math.max(buckets[1], 0),
+      days60plus: Math.max(buckets[2], 0), total: owed, paymentDays: days,
+      overdue: Math.max(Math.min(overdue, Math.max(owed, 0)), 0),
+      inCredit: Math.max(paid, 0),
+    };
+  };
+
+  /** Mirrors customer_due(): worked out from the documents, never stored. */
+  const dueFor = (customerId: string): number => {
+    const c = customers.find((x) => x.id === customerId);
+    if (!c) return 0;
+    const onSales = sales
+      .filter((s) => s.customerId === customerId && s.status === "completed")
+      .reduce((n, s) => n + s.dueAmount, 0);
+    const paid = customerPayments
+      .filter((p) => p.customerId === customerId)
+      .reduce((n, p) => n + p.amount, 0);
+    const offDue = sales
+      .flatMap((s) => s.returns.map((r) => ({ r, s })))
+      .filter(({ r, s }) => s.customerId === customerId
+        && ["reduce_due", "store_credit"].includes(r.refundMethod)
+        && r.approvalStatus !== "cancelled")
+      .reduce((n, { r }) => n + r.total, 0);
+    return c.openingBalance + onSales - paid - offDue;
+  };
 
   /** Mirrors resolve_price(): the list price, with the list price as the floor when the
    *  owner set no minimum. */
@@ -233,7 +338,8 @@ export function createDemoBackend(): Backend {
   // Past sales (P9). The demo keeps them so they can be found, reprinted and returned,
   // with the serial ids on each line: a return has to name the actual unit.
   type DemoSale = SaleDetail & {
-    staffId: string; shiftId: string | null;
+    staffId: string; shiftId: string | null; customerId: string | null;
+    paidAmount: number; dueAmount: number;
     lineSerialIds: Record<string, string[]>;
   };
   const sales: DemoSale[] = [];
@@ -304,7 +410,26 @@ export function createDemoBackend(): Backend {
       branchOr404(branchId);
       return productsAt(branchId, priceListId ?? "pl-retail");
     },
-    async findCustomer(phone: string) { return customers.find((c) => c.phone === phone) ?? null; },
+    async findCustomer(phone: string): Promise<CustomerLookup | null> {
+      const c = customers.find((x) => x.phone === phone);
+      if (!c) return null;
+      const group = customerGroups.find((g) => g.id === c.groupId);
+      // The customer's own list wins; failing that the group's, as in customer_by_phone().
+      const listId = c.priceListId ?? group?.priceListId ?? null;
+      const owed = dueFor(c.id);
+      return {
+        id: c.id, phone: c.phone, name: c.name,
+        priceListId: listId,
+        priceListName: priceLists.find((l) => l.id === listId)?.name ?? null,
+        discountPct: Math.max(c.discountPct, group?.discountPct ?? 0),
+        group: group?.name ?? null,
+        creditAllowed: c.creditAllowed,
+        creditLimit: c.creditLimit,
+        paymentDays: c.paymentDays,
+        owed,
+        creditLeft: c.creditLimit > 0 ? Math.max(c.creditLimit - owed, 0) : null,
+      };
+    },
     async listApprovers(): Promise<Approver[]> {
       return team.filter((m) => m.hasPin && m.active && m.role !== "cashier")
         .map(({ id, name, role }) => ({ id, name, role }));
@@ -421,10 +546,31 @@ export function createDemoBackend(): Backend {
       };
 
       let change: number | null = null;
+      // Paying now, paying later, or some of each (P10). 'due' is the whole total on the
+      // slate; dueAmount splits it. Same rules as complete_sale().
+      let onDue = Math.max(input.dueAmount ?? 0, 0);
+      if (input.paymentMethod === "due") onDue = totals.total;
+      if (onDue > totals.total) fail("DUE_MORE_THAN_TOTAL");
+      const paidNow = roundTaka(totals.total - onDue);
+
+      if (onDue > 0) {
+        if (!features.credit_sales) fail("FEATURE_OFF:credit_sales");
+        if (!customer) fail("DUE_NEEDS_CUSTOMER");
+        const buyer = customer!;
+        if (!buyer.creditAllowed) fail(`CUSTOMER_HAS_NO_CREDIT:${buyer.name ?? buyer.phone}`);
+        // The limit is on what they will owe AFTER this sale, not on this sale alone.
+        const owed = dueFor(buyer.id);
+        const limit = buyer.creditLimit ?? 0;
+        if (limit > 0 && owed + onDue > limit && !input.approvalId) {
+          fail(`OVER_CREDIT_LIMIT:${Math.max(limit - owed, 0)}`);
+        }
+      }
+
+      // What is handed over now is checked against the PAID part, not the total.
       if (input.paymentMethod === "cash") {
-        if (input.cashReceived == null || input.cashReceived < totals.total) fail("CASH_SHORT");
-        change = roundTaka((input.cashReceived ?? 0) - totals.total);
-      } else if (!input.paymentRef || input.paymentRef.trim().length < 4) {
+        if (input.cashReceived == null || input.cashReceived < paidNow) fail("CASH_SHORT");
+        change = roundTaka((input.cashReceived ?? 0) - paidNow);
+      } else if (paidNow > 0 && (!input.paymentRef || input.paymentRef.trim().length < 4)) {
         fail("PAYMENT_REF_REQUIRED");
       }
       if (input.customerPhone && !isValidPhone(input.customerPhone)) fail("BAD_PHONE");
@@ -484,6 +630,8 @@ export function createDemoBackend(): Backend {
         approvalStatus: overLimit ? "awaiting_approval" : "approved",
         voidReason: null, refundMethod: null,
         customerPhone: input.customerPhone ?? null, customerName: customer?.name ?? null,
+        customerId: customer?.id ?? null,
+        paidAmount: paidNow, dueAmount: onDue,
         sameDay: true, daysOld: 0, returnDays: shopDetails.returnDays,
         items: detailLines, returns: [],
         lineSerialIds: Object.fromEntries(
@@ -498,6 +646,8 @@ export function createDemoBackend(): Backend {
         paymentMethod: input.paymentMethod,
         cashReceived: input.paymentMethod === "cash" ? input.cashReceived : null,
         changeGiven: change, paymentRef: input.paymentRef, customerPhone: input.customerPhone,
+        paidAmount: paidNow, dueAmount: onDue,
+        customerOwes: customer ? dueFor(customer.id) : null,
         vatAmount: 0, chargesAmount: 0, charges: [],
         receiptFooter: shopDetails.receiptFooter, binVat: shopDetails.binVat,
         priceListName: priceLists.find((l) => l.id === listId)?.name ?? null,
@@ -1327,6 +1477,233 @@ export function createDemoBackend(): Backend {
       }
       fail("CUSTOMER_NOT_FOUND");
       return { name: "", amount: 0, asOf };
+    },
+
+    // --- Credit sales and customers (P10) ---
+
+    async listCustomers(query, limit = 100): Promise<CustomerRow[]> {
+      const q = (query ?? "").trim().toLowerCase();
+      return customers
+        .filter((c) => !q
+          || c.phone.includes(q)
+          || c.name.toLowerCase().includes(q)
+          || (c.company ?? "").toLowerCase().includes(q))
+        .slice(0, limit)
+        .map((c) => ({
+          ...structuredClone({
+            id: c.id, phone: c.phone, name: c.name, company: c.company,
+            address: c.address, groupId: c.groupId, group: c.group,
+            priceListId: c.priceListId, priceList: c.priceList,
+            discountPct: c.discountPct, binVat: c.binVat, nid: c.nid, note: c.note,
+            active: c.active, districtId: c.districtId, upazilaId: c.upazilaId,
+            creditAllowed: c.creditAllowed, creditLimit: c.creditLimit,
+            paymentDays: c.paymentDays,
+          }),
+          owed: dueFor(c.id),
+          totalSpent: sales
+            .filter((x) => x.customerId === c.id && x.status === "completed")
+            .reduce((n, x) => n + x.total, 0),
+        }));
+    },
+
+    async saveCustomer(id, values): Promise<CustomerRow> {
+      // Credit, prices and discounts are the owner's levers, not the counter's.
+      const creditKeys = ["credit_allowed", "credit_limit", "payment_days",
+                          "price_list_id", "discount_pct", "group_id"];
+      if (creditKeys.some((k) => k in values) && staff.role === "cashier") fail("NOT_MANAGER");
+
+      const group = values.group_id
+        ? customerGroups.find((g) => g.id === values.group_id) ?? null
+        : null;
+      const listId = (values.price_list_id as string | undefined) ?? null;
+
+      if (id) {
+        const c = customers.find((x) => x.id === id);
+        if (!c) fail("CUSTOMER_NOT_FOUND");
+        Object.assign(c!, {
+          phone: (values.phone as string)?.trim() || c!.phone,
+          name: "name" in values ? String(values.name ?? "").trim() || c!.phone : c!.name,
+          company: "company" in values ? (values.company as string | null) : c!.company,
+          address: "address" in values ? (values.address as string | null) : c!.address,
+          binVat: "bin_vat" in values ? (values.bin_vat as string | null) : c!.binVat,
+          nid: "nid" in values ? (values.nid as string | null) : c!.nid,
+          note: "note" in values ? (values.note as string | null) : c!.note,
+          groupId: "group_id" in values ? (values.group_id as string | null) : c!.groupId,
+          group: "group_id" in values ? group?.name ?? null : c!.group,
+          priceListId: "price_list_id" in values ? listId : c!.priceListId,
+          priceList: "price_list_id" in values
+            ? priceLists.find((l) => l.id === listId)?.name ?? null : c!.priceList,
+          discountPct: "discount_pct" in values ? Number(values.discount_pct) || 0 : c!.discountPct,
+          creditAllowed: "credit_allowed" in values ? Boolean(values.credit_allowed) : c!.creditAllowed,
+          creditLimit: "credit_limit" in values ? Number(values.credit_limit) || 0 : c!.creditLimit,
+          paymentDays: "payment_days" in values ? Number(values.payment_days) || 0 : c!.paymentDays,
+          active: "active" in values ? Boolean(values.active) : c!.active,
+        });
+        return { ...c!, owed: dueFor(c!.id) };
+      }
+
+      const phone = String(values.phone ?? "").trim();
+      if (!phone) fail("BAD_PHONE");
+      const already = customers.find((x) => x.phone === phone);
+      if (already) {
+        if (values.name) already.name = String(values.name).trim();
+        return { ...already, owed: dueFor(already.id) };
+      }
+      const row = {
+        id: crypto.randomUUID(), phone,
+        name: String(values.name ?? "").trim() || phone,
+        company: (values.company as string | null) ?? null,
+        address: (values.address as string | null) ?? null,
+        groupId: (values.group_id as string | null) ?? null,
+        group: group?.name ?? null,
+        priceListId: listId,
+        priceList: priceLists.find((l) => l.id === listId)?.name ?? null,
+        discountPct: Number(values.discount_pct) || 0,
+        binVat: (values.bin_vat as string | null) ?? null,
+        nid: (values.nid as string | null) ?? null,
+        note: (values.note as string | null) ?? null,
+        active: true, districtId: null, upazilaId: null,
+        creditAllowed: Boolean(values.credit_allowed),
+        creditLimit: Number(values.credit_limit) || 0,
+        paymentDays: Number(values.payment_days) || 0,
+        owed: 0, totalSpent: 0, openingBalance: 0, openingAt: null,
+      };
+      customers.push(row);
+      return { ...row };
+    },
+
+    async listCustomerGroups() { return structuredClone(customerGroups); },
+
+    async saveCustomerGroup(id, values) {
+      if (staff.role === "cashier") fail("NOT_MANAGER");
+      if (!id && !String(values.name ?? "").trim()) fail("GROUP_NAME_REQUIRED");
+      if (id) {
+        const g = customerGroups.find((x) => x.id === id);
+        if (!g) fail("GROUP_NOT_FOUND");
+        Object.assign(g!, {
+          name: String(values.name ?? "").trim() || g!.name,
+          priceListId: "price_list_id" in values ? (values.price_list_id as string | null) : g!.priceListId,
+          discountPct: Number(values.discount_pct) || g!.discountPct,
+          creditAllowed: "credit_allowed" in values ? Boolean(values.credit_allowed) : g!.creditAllowed,
+          creditLimit: Number(values.credit_limit) || g!.creditLimit,
+          paymentDays: Number(values.payment_days) || g!.paymentDays,
+          active: "active" in values ? Boolean(values.active) : g!.active,
+        });
+        return;
+      }
+      customerGroups.push({
+        id: crypto.randomUUID(), name: String(values.name).trim(),
+        priceListId: (values.price_list_id as string | null) ?? null,
+        discountPct: Number(values.discount_pct) || 0,
+        creditAllowed: Boolean(values.credit_allowed),
+        creditLimit: Number(values.credit_limit) || 0,
+        paymentDays: Number(values.payment_days) || 0,
+        active: true,
+      });
+    },
+
+    async dueList(branchId): Promise<DueRow[]> {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:view_reports");
+      return customers
+        .filter((c) => dueFor(c.id) > 0)
+        .filter((c) => !branchId
+          || sales.some((s) => s.customerId === c.id && s.branchId === branchId && s.dueAmount > 0))
+        .map((c) => {
+          const aging = agingForCustomer(c.id);
+          return {
+            customerId: c.id, name: c.name, phone: c.phone, company: c.company,
+            group: c.group, creditLimit: c.creditLimit, paymentDays: c.paymentDays,
+            owed: dueFor(c.id), aging, overdue: aging.overdue,
+            lastPaid: customerPayments
+              .filter((p) => p.customerId === c.id)
+              .map((p) => p.at).sort().pop() ?? null,
+            oldestDue: sales
+              .filter((s) => s.customerId === c.id && s.dueAmount > 0)
+              .map((s) => s.createdAt.slice(0, 10)).sort()[0] ?? null,
+          };
+        })
+        .sort((a, b) => b.overdue - a.overdue || b.owed - a.owed);
+    },
+
+    async customerStatement(customerId): Promise<CustomerStatement> {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:view_reports");
+      const c = customers.find((x) => x.id === customerId);
+      if (!c) fail("CUSTOMER_NOT_FOUND");
+      const mine = sales.filter((s) => s.customerId === customerId);
+      const entries: StatementEntry[] = [
+        ...(c!.openingBalance > 0
+          ? [{ at: c!.openingAt ?? dhakaToday(), kind: "opening" as const,
+               document: "Opening balance", change: c!.openingBalance, note: null }]
+          : []),
+        ...mine.filter((s) => s.dueAmount > 0).map((s) => ({
+          at: s.createdAt, kind: "sale" as const, document: s.invoiceNo,
+          change: s.dueAmount,
+          note: `Total ${s.total}, paid ${s.paidAmount}`,
+        })),
+        ...customerPayments.filter((p) => p.customerId === customerId).map((p) => ({
+          at: p.at, kind: "payment" as const, document: p.receiptNo,
+          change: -p.amount, note: p.method,
+        })),
+        ...mine.flatMap((s) => s.returns
+          .filter((r) => ["reduce_due", "store_credit"].includes(r.refundMethod))
+          .map((r) => ({
+            at: r.createdAt, kind: "return" as const, document: r.returnNo,
+            change: -r.total, note: r.refundMethod,
+          }))),
+      ].sort((a, b) => a.at.localeCompare(b.at));
+
+      return {
+        customerId: c!.id, name: c!.name, phone: c!.phone, company: c!.company,
+        address: c!.address, binVat: c!.binVat, nid: c!.nid, note: c!.note,
+        group: c!.group, priceList: c!.priceList, discountPct: c!.discountPct,
+        creditAllowed: c!.creditAllowed, creditLimit: c!.creditLimit,
+        paymentDays: c!.paymentDays,
+        owed: dueFor(c!.id), aging: agingForCustomer(c!.id),
+        totalSpent: mine.filter((s) => s.status === "completed")
+          .reduce((n, s) => n + s.total, 0),
+        saleCount: mine.filter((s) => s.status === "completed").length,
+        entries,
+        purchases: mine.map((s) => ({
+          id: s.id, invoiceNo: s.invoiceNo, at: s.createdAt, branch: s.branch,
+          total: s.total, due: s.dueAmount, status: s.status,
+          items: s.items.map((i) => i.name).join(", "),
+        })).reverse(),
+        owns: mine
+          .filter((s) => s.status === "completed")
+          .flatMap((s) => s.items.flatMap((i) => i.serials.map((x) => ({
+            serial: x.serial, product: i.name, bought: s.createdAt.slice(0, 10),
+            invoiceNo: s.invoiceNo, warrantyUntil: i.warrantyUntil,
+            inWarranty: i.warrantyUntil != null && i.warrantyUntil >= dhakaToday(),
+            status: x.status,
+          })))),
+      };
+    },
+
+    async collectPayment(input): Promise<PaymentReceipt> {
+      const branch = branchOr404(input.branchId);
+      if (!(input.amount > 0)) fail("BAD_PAYMENT_AMOUNT");
+      const methods = ["cash", "bkash", "nagad", "card", "rocket", "bank", "cheque"];
+      if (!methods.includes(input.method)) fail("BAD_PAYMENT_METHOD");
+      const c = customers.find((x) => x.id === input.customerId);
+      if (!c) fail("CUSTOMER_NOT_FOUND");
+
+      const wasOwed = dueFor(c!.id);
+      const open = shifts.find(
+        (sh) => sh.branchId === branch.id && sh.staffId === staff.id && !sh.closedAt);
+      const receiptNo = `REC-${branch.code}-${new Date().getFullYear()}${String(receiptCounter++).padStart(6, "0")}`;
+      customerPayments.push({
+        id: crypto.randomUUID(), customerId: c!.id, receiptNo, amount: input.amount,
+        method: input.method, reference: input.reference ?? null,
+        branchId: branch.id, shiftId: open?.id ?? null, at: new Date().toISOString(),
+      });
+      // Cash collected during a shift is cash in the drawer at closing time.
+      if (input.method === "cash" && open) open.cashIn += input.amount;
+
+      return {
+        receiptNo, paymentId: customerPayments[customerPayments.length - 1].id,
+        customer: c!.name, amount: input.amount, wasOwed, owed: dueFor(c!.id),
+        shopName: staff.shopName, branch: branch.name, takenBy: staff.name,
+      };
     },
 
     // --- Sales history, void and returns (P9) ---

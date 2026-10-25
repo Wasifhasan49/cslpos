@@ -1,5 +1,8 @@
 export type Role = "owner" | "manager" | "cashier";
-export type PaymentMethod = "cash" | "bkash" | "nagad" | "card";
+/** What the till can take. "due" puts the sale on the customer's slate (P10); the
+ *  shop has to switch credit sales on before it appears. */
+export type PaymentMethod =
+  | "cash" | "bkash" | "nagad" | "card" | "rocket" | "bank" | "cheque" | "due";
 
 /** A stock location inside a branch — BMS calls these "stores". */
 export interface StockLocation {
@@ -154,6 +157,16 @@ export interface CustomerLookup {
   priceListName: string | null;
   /** A standing discount the owner granted. It applies on its own, with no approval. */
   discountPct: number;
+  /** The group they belong to (Retail, Dealer, Corporate…), which can carry the list. */
+  group?: string | null;
+  /** Whether they may buy on due at all (P10). */
+  creditAllowed?: boolean;
+  creditLimit?: number;
+  paymentDays?: number;
+  /** What they owe right now. */
+  owed?: number;
+  /** How much more they may put on the slate. Null when no limit is set. */
+  creditLeft?: number | null;
 }
 
 export interface BulkPriceChange {
@@ -195,6 +208,9 @@ export interface SaleInput {
   customerPhone: string | null;
   cashReceived: number | null;
   paymentRef: string | null;
+  /** How much of the total is going on the customer's slate instead of being paid now
+   *  (P10). A payment method of "due" puts the whole lot on it. */
+  dueAmount?: number;
 }
 
 export interface ReceiptLine {
@@ -237,6 +253,11 @@ export interface Receipt {
   changeGiven: number | null;
   paymentRef: string | null;
   customerPhone: string | null;
+  /** What was handed over now, and what went on the customer's slate (P10). */
+  paidAmount?: number;
+  dueAmount?: number;
+  /** What the customer owes in total after this sale. Null for a walk-in. */
+  customerOwes?: number | null;
   /** The VAT on this sale. Inclusive VAT is already inside `total`; exclusive VAT was
    *  added to it. Either way the receipt has to say how much tax there was. */
   vatAmount: number;
@@ -753,8 +774,12 @@ export interface SaleDetail {
   approvalStatus: ApprovalStatus;
   voidReason: string | null;
   refundMethod: string | null;
+  customerId?: string | null;
   customerPhone: string | null;
   customerName: string | null;
+  /** What was paid at the time, and what went on the slate (P10). */
+  paidAmount?: number;
+  dueAmount?: number;
   /** Same day means it can still be voided rather than returned. */
   sameDay: boolean;
   daysOld: number;
@@ -783,4 +808,120 @@ export interface ReturnResult {
   lines: { name: string; qty: number; refund: number; faulty: boolean }[];
   /** True when the last unit came back, which is when charges are refunded too. */
   wholeSaleReturned: boolean;
+}
+
+// --- P10: credit sales and customers ---------------------------------------
+
+export interface CustomerGroup {
+  id: string;
+  name: string;
+  priceListId: string | null;
+  discountPct: number;
+  creditAllowed: boolean;
+  creditLimit: number;
+  paymentDays: number;
+  active: boolean;
+}
+
+export interface CustomerRow {
+  id: string;
+  phone: string;
+  name: string;
+  company: string | null;
+  address: string | null;
+  groupId: string | null;
+  group: string | null;
+  priceListId: string | null;
+  priceList: string | null;
+  discountPct: number;
+  binVat: string | null;
+  nid: string | null;
+  note: string | null;
+  active: boolean;
+  districtId: number | null;
+  upazilaId: number | null;
+  creditAllowed: boolean;
+  creditLimit: number;
+  paymentDays: number;
+  /** What they owe right now, worked out from the documents. */
+  owed: number;
+  totalSpent: number;
+}
+
+export interface CustomerAging {
+  days0to30: number;
+  days31to60: number;
+  days60plus: number;
+  total: number;
+  paymentDays: number;
+  /** Older than the days THIS customer was given, which is not the same as 60+. */
+  overdue: number;
+  /** They have paid more than they owe. */
+  inCredit: number;
+}
+
+export interface DueRow {
+  customerId: string;
+  name: string;
+  phone: string;
+  company: string | null;
+  group: string | null;
+  creditLimit: number;
+  paymentDays: number;
+  owed: number;
+  aging: CustomerAging;
+  overdue: number;
+  lastPaid: string | null;
+  oldestDue: string | null;
+}
+
+export interface StatementEntry {
+  at: string;
+  kind: "opening" | "sale" | "payment" | "return";
+  document: string;
+  change: number;
+  note: string | null;
+}
+
+export interface CustomerStatement {
+  customerId: string;
+  name: string;
+  phone: string;
+  company: string | null;
+  address: string | null;
+  binVat: string | null;
+  nid: string | null;
+  note: string | null;
+  group: string | null;
+  priceList: string | null;
+  discountPct: number;
+  creditAllowed: boolean;
+  creditLimit: number;
+  paymentDays: number;
+  owed: number;
+  aging: CustomerAging;
+  totalSpent: number;
+  saleCount: number;
+  entries: StatementEntry[];
+  purchases: {
+    id: string; invoiceNo: string; at: string; branch: string;
+    total: number; due: number; status: string; items: string | null;
+  }[];
+  /** Serial-tracked items this customer owns, with the warranty end date. */
+  owns: {
+    serial: string; product: string; bought: string; invoiceNo: string;
+    warrantyUntil: string | null; inWarranty: boolean; status: string;
+  }[];
+}
+
+export interface PaymentReceipt {
+  receiptNo: string;
+  paymentId: string;
+  customer: string;
+  amount: number;
+  wasOwed: number;
+  owed: number;
+  shopName: string;
+  branch: string;
+  takenBy: string;
 }

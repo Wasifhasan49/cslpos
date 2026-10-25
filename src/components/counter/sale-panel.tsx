@@ -27,6 +27,8 @@ interface Props {
   /** What verify_manager_pin() said last, in plain words. */
   pinMessage: string;
   approvedBy: string | null;
+  /** Whether the shop sells on due at all (the "Credit sales" feature switch, P10). */
+  creditOn: boolean;
   onCheckPin: () => void;
   onComplete: () => void;
 }
@@ -101,12 +103,18 @@ function LinePrice({ product, line }: { product: Product; line: { productId: str
   );
 }
 
-export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, submitting, error, customer, approvers, checkingPin, pinMessage, approvedBy, onCheckPin, onComplete }: Props) {
+export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, submitting, error, customer, approvers, checkingPin, pinMessage, approvedBy, creditOn, onCheckPin, onComplete }: Props) {
   const s = useSale();
   const overLimit = totals.discountPct > staff.discountLimitPct;
+  // On due, what is left to pay now, and therefore what the cash box is checked against.
+  const onDue = Math.min(Math.max(Number(s.dueAmount) || 0, 0), totals.total);
+  const payingNow = Math.max(totals.total - onDue, 0);
   const received = parseFloat(s.cashReceived);
-  const showChange = s.method === "cash" && !Number.isNaN(received) && received >= totals.total && totals.total > 0;
+  const showChange = s.method === "cash" && !Number.isNaN(received) && received >= payingNow && payingNow > 0;
   const methodLabel = PAYMENT_METHODS.find((m) => m.id === s.method)?.label ?? "";
+  // Only offered when the shop sells on due AND this customer is allowed it: a box that
+  // is always there and always refused teaches people to ignore the screen.
+  const canSellOnDue = creditOn && customer?.creditAllowed === true;
 
   return (
     <aside aria-label="Current sale" className="flex min-w-0 max-w-[460px] flex-[1_1_380px] flex-col rounded-xl border border-line bg-surface">
@@ -286,6 +294,51 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
             </div>
           </div>
 
+          {canSellOnDue && (
+            <div className="flex flex-col gap-2 rounded-lg border border-line bg-subtle p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <Label htmlFor="ondue">Leave on due</Label>
+                <span className="text-[13px] text-muted">
+                  {customer?.creditLeft == null
+                    ? "No limit set"
+                    : <>
+                        <span className="num">{formatTaka(customer.creditLeft)}</span> of their
+                        limit left
+                      </>}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  id="ondue" inputMode="numeric" placeholder="0" value={s.dueAmount}
+                  onChange={(e) => s.setDueAmount(e.target.value)}
+                  className="num h-12 max-w-[160px] text-lg"
+                />
+                <Button
+                  variant="outline" size="sm" className="h-10"
+                  onClick={() => s.setDueAmount(String(Math.round(totals.total)))}
+                >
+                  All of it
+                </Button>
+                {onDue > 0 && (
+                  <Button variant="ghost" size="sm" className="h-10" onClick={() => s.setDueAmount("")}>
+                    None
+                  </Button>
+                )}
+              </div>
+              {onDue > 0 && (
+                <div className="flex justify-between text-[15px] font-semibold">
+                  <span>Paying now</span><span className="num">{formatTaka(payingNow)}</span>
+                </div>
+              )}
+              {customer?.owed != null && customer.owed > 0 && (
+                <span className="text-[13px] text-muted">
+                  They already owe <span className="num">{formatTaka(customer.owed)}</span>.
+                </span>
+              )}
+            </div>
+          )}
+
+          {payingNow > 0 && (
           <div className="flex flex-col gap-2">
             <span id="paylabel" className="text-sm font-semibold">Payment</span>
             <div role="group" aria-labelledby="paylabel" className="grid grid-cols-4 gap-1.5">
@@ -308,13 +361,14 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
               })}
             </div>
           </div>
+          )}
 
-          {s.method === "cash" ? (
+          {payingNow > 0 && (s.method === "cash" ? (
             <div className="flex flex-col gap-2">
               <Label htmlFor="recv">Cash received</Label>
               <Input id="recv" inputMode="numeric" placeholder="0" value={s.cashReceived} onChange={(e) => s.setCashReceived(e.target.value)} className="num h-12 text-lg" />
               <div className="flex flex-wrap gap-1.5">
-                {quickCashAmounts(totals.total).map((v, i) => (
+                {quickCashAmounts(payingNow).map((v, i) => (
                   <Button key={v} variant="outline" size="sm" className="num h-10" onClick={() => s.setCashReceived(String(v))}>
                     {i === 0 ? `Exact ${formatTaka(v)}` : formatTaka(v)}
                   </Button>
@@ -323,7 +377,7 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
               {showChange && (
                 <div className="flex items-baseline justify-between rounded-lg bg-ok-bg px-3 py-2.5">
                   <span className="text-[15px] font-semibold text-ok-ink">Give change</span>
-                  <span className="num text-xl font-bold text-ok-ink">{formatTaka(received - totals.total)}</span>
+                  <span className="num text-xl font-bold text-ok-ink">{formatTaka(received - payingNow)}</span>
                 </div>
               )}
             </div>
@@ -332,11 +386,15 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
               <Label htmlFor="txn">{s.method === "card" ? "Card last 4 digits" : `${methodLabel} transaction ID`}</Label>
               <Input id="txn" value={s.paymentRef} onChange={(e) => s.setPaymentRef(e.target.value)} placeholder={s.method === "card" ? "1234" : "e.g. 9JK4L2M8QX"} className="num" />
             </div>
-          )}
+          ))}
 
           <div className="flex flex-col gap-2">
             <Button size="lg" className="h-[58px]" disabled={!!blocker || submitting} onClick={onComplete}>
-              {submitting ? "Saving…" : `Complete sale · ${formatTaka(totals.total)}`}
+              {submitting
+                ? "Saving…"
+                : onDue > 0
+                  ? `Complete · ${formatTaka(payingNow)} now, ${formatTaka(onDue)} on due`
+                  : `Complete sale · ${formatTaka(totals.total)}`}
             </Button>
             {error ? (
               <span role="alert" className="text-center text-[13px] font-semibold text-bad-ink">{error}</span>

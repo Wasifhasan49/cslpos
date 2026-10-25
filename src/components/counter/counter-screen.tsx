@@ -18,7 +18,7 @@ import { SalePanel } from "./sale-panel";
 export function CounterScreen() {
   // Who and where comes from the shell, so switching branch re-renders the counter
   // with that branch's stock rather than reloading the whole app.
-  const { backend, staff, branch, branches } = useStaff();
+  const { backend, staff, branch, branches, features } = useStaff();
   const sale = useSale();
   const denied = useSearchParams().get("denied");
   const searchRef = React.useRef<HTMLInputElement>(null);
@@ -109,11 +109,12 @@ export function CounterScreen() {
         lines: sale.lines, products: byId, discountPct, discountLimitPct: staff.discountLimitPct,
         pinApproved: sale.approvalId !== null, phone: sale.phone, method: sale.method,
         cashReceived: sale.cashReceived, paymentRef: sale.paymentRef,
+        dueAmount: sale.dueAmount, customer,
       })
     : "Loading";
 
   // Any change to the sale clears the last error.
-  React.useEffect(() => { setSaleError(""); }, [sale.lines, sale.discount, sale.phone, sale.method, sale.cashReceived, sale.paymentRef]);
+  React.useEffect(() => { setSaleError(""); }, [sale.lines, sale.discount, sale.phone, sale.method, sale.cashReceived, sale.paymentRef, sale.dueAmount]);
   React.useEffect(() => { setPinMessage(""); }, [sale.pin, sale.approverId]);
 
   // A customer's price list decides the prices on screen, so the catalogue is re-read
@@ -179,16 +180,23 @@ export function CounterScreen() {
     setSubmitting(true);
     setSaleError("");
     try {
+      // What goes on the slate, and therefore what is being handed over now (P10).
+      const onDue = Math.min(Math.max(Number(sale.dueAmount) || 0, 0), totals.total);
+      const payingNow = totals.total - onDue;
       const r = await backend.completeSale({
         lines: sale.lines,
         branchId: branch.id,
         priceListId: customer?.priceListId ?? null,
-        paymentMethod: sale.method,
+        // Nothing paid now means the whole sale is on due, and the till should say so
+        // rather than recording a cash sale where no cash moved.
+        paymentMethod: payingNow === 0 && onDue > 0 ? "due" : sale.method,
         discountPct,
-        approvalId: discountPct > (staff?.discountLimitPct ?? 0) ? sale.approvalId : null,
+        dueAmount: onDue,
+        // One approval covers whichever of the two needed it; the database checks both.
+        approvalId: sale.approvalId,
         customerPhone: sale.phone || null,
-        cashReceived: sale.method === "cash" ? Number(sale.cashReceived) : null,
-        paymentRef: sale.method === "cash" ? null : sale.paymentRef,
+        cashReceived: sale.method === "cash" && payingNow > 0 ? Number(sale.cashReceived) : null,
+        paymentRef: sale.method === "cash" || payingNow === 0 ? null : sale.paymentRef,
       });
       setReceipt(r);
       loadProducts().catch(() => say("Sale saved, but stock didn't refresh. Reload the page."));
@@ -295,6 +303,7 @@ export function CounterScreen() {
           checkingPin={checkingPin}
           pinMessage={pinMessage}
           approvedBy={approvedBy}
+          creditOn={Boolean(features.credit_sales)}
           onCheckPin={onCheckPin}
           onComplete={onComplete}
         />

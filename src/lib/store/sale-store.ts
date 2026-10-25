@@ -15,6 +15,8 @@ interface SaleState {
   phone: string;
   method: PaymentMethod;
   cashReceived: string;
+  /** How much of the total goes on the customer's slate (P10). Empty means none. */
+  dueAmount: string;
   paymentRef: string;
 
   /** Returns a short message for the screen. */
@@ -32,6 +34,7 @@ interface SaleState {
   setPhone: (v: string) => void;
   setMethod: (m: PaymentMethod) => void;
   setCashReceived: (v: string) => void;
+  setDueAmount: (v: string) => void;
   setPaymentRef: (v: string) => void;
   reset: () => void;
 }
@@ -45,6 +48,7 @@ const empty = {
   phone: "",
   method: "cash" as PaymentMethod,
   cashReceived: "",
+  dueAmount: "",
   paymentRef: "",
 };
 
@@ -98,6 +102,9 @@ export const useSale = create<SaleState>((set, get) => ({
   setPhone: (v) => set({ phone: v.replace(/\D/g, "").slice(0, 11) }),
   setMethod: (m) => set({ method: m, paymentRef: "" }),
   setCashReceived: (v) => set({ cashReceived: v.replace(/\D/g, "").slice(0, 9) }),
+  // Changing what goes on the slate drops any approval: it was approved for a
+  // different amount, exactly as a changed discount does.
+  setDueAmount: (v) => set({ dueAmount: v.replace(/\D/g, "").slice(0, 9), pin: "", approvalId: null }),
   setPaymentRef: (v) => set({ paymentRef: v.trim().slice(0, 24) }),
   reset: () => set({ ...empty }),
 }));

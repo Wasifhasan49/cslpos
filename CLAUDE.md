@@ -184,6 +184,20 @@ chains with many branches; CSL's single-branch store is only the first customer.
   because a sequence with holes needs explaining to an auditor. A return is a real event
   with its own document (`RET-<branch>-<year><6 digits>`), and a sale that has been
   partly returned can no longer be voided or the goods would come back twice.
+- **A debt has to have somebody's name on it** (P10). This is the thing most likely to
+  lose a shop money quietly, and BMS records every walk-in as "Cash Customer" with a
+  mobile of 2026-01-01, so the debt belongs to nobody. Anything on due therefore needs a
+  real customer, and the **credit limit is checked against what they will owe AFTER this
+  sale** — three sales of 20,000 to a customer with a 50,000 limit is 60,000 of exposure,
+  and checking each in isolation lets it through. Over the limit needs a manager's PIN
+  and is logged with the limit, what was already owed and the new due. Collections come
+  off the **oldest invoice first**, like supplier payments, and `overdue` is measured
+  against the days THAT customer was given — a corporate buyer on 45-day terms is not
+  late at 40, which is a different question from "older than 60 days". Cash collected
+  goes through the open drawer (P8). Turning the credit-sales feature on also enables the
+  "due" payment method, because a switch that changes nothing at the till is a bug.
+  `customers.name` and `customers.name_text` were two columns for one fact (P9's search
+  read the empty one); P10 merges them and drops `name`.
 - **Imports upsert by code and never delete** (P4). A shop's export may be partial or
   last week's, so importing one must never remove anything, and re-running the same file
   must change nothing — that is what makes it safe to retry after a timeout. Opening
@@ -248,8 +262,11 @@ The list below is the original short version; BUILD_PROMPTS.md wins where they d
    out with reasons, and the owner's drawer check per branch at `/cash`.
 6. ~~**Sales history, reprint, void and returns**~~ — done (P9): one search box for
    invoice, phone, serial or product; a COPY-marked reprint; void; and partial returns
-   with the discount and VAT shares worked out. Next: **credit sales and customers**
-   (P10) and the **full counter** (P10a).
+   with the discount and VAT shares worked out.
+   ~~**Credit sales and customers**~~ — done (P10): customer records with groups, credit
+   limits and terms, selling part or all of a sale on due, collecting against the oldest
+   invoice, a due list with aging, and a printable statement. Next: the **full counter**
+   (P10a).
 7. **Warranty lookup** by serial or phone; simple claim log (P11).
 8. **Owner dashboard** (phone-first), see product decisions above (P12).
 9. **Accounts** (P13 onwards), then SMS receipts and printing.

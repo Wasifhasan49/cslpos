@@ -11,6 +11,7 @@ import type {
   TransferRow, TransferSent,
   CashReason, ShiftClosed, ShiftRow, ShiftState,
   ApprovalStatus, RefundMethod, ReturnResult, SaleDetail, SaleRow, SaleStatus,
+  CustomerGroup, CustomerRow, CustomerStatement, DueRow, PaymentReceipt,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 
@@ -305,4 +306,20 @@ export interface Backend {
   setSaleApproval(
     kind: "sale" | "return", id: string, action: "approve" | "cancel", reason?: string | null,
   ): Promise<{ number: string; approvalStatus: ApprovalStatus }>;
+
+  // --- Credit sales and customers (P10) ---
+  listCustomers(query?: string | null, limit?: number): Promise<CustomerRow[]>;
+  /** Anyone who can sell may add a name and a phone; the credit fields need a manager. */
+  saveCustomer(id: string | null, values: Record<string, unknown>): Promise<CustomerRow>;
+  listCustomerGroups(): Promise<CustomerGroup[]>;
+  saveCustomerGroup(id: string | null, values: Record<string, unknown>): Promise<void>;
+  /** Everyone with money outstanding, worst first. Manager and owner only. */
+  dueList(branchId?: string | null): Promise<DueRow[]>;
+  /** One customer in full: ledger, purchases, and the serials they own. */
+  customerStatement(customerId: string): Promise<CustomerStatement>;
+  /** Take money off a due. Applied oldest first; cash goes through the drawer. */
+  collectPayment(input: {
+    branchId: string; customerId: string; amount: number; method: string;
+    reference?: string | null; note?: string | null; accountId?: string | null;
+  }): Promise<PaymentReceipt>;
 }

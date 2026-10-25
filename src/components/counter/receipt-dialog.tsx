@@ -9,8 +9,15 @@ export function ReceiptDialog({ receipt, onNewSale }: { receipt: Receipt; onNewS
   const [note, setNote] = React.useState("");
   const newSaleRef = React.useRef<HTMLButtonElement>(null);
   const method = PAYMENT_METHODS.find((m) => m.id === receipt.paymentMethod)?.label ?? receipt.paymentMethod;
-  const paidLine =
-    receipt.paymentMethod === "cash"
+  // Part of the sale may be on the customer's slate (P10), so the receipt says what was
+  // actually handed over rather than calling the whole total "paid".
+  const onDue = receipt.dueAmount ?? 0;
+  const paidNow = receipt.paidAmount ?? receipt.total;
+  const paidLine = onDue > 0
+    ? paidNow > 0
+      ? `${formatTaka(paidNow)} paid by ${method} · ${formatTaka(onDue)} on due`
+      : `${formatTaka(onDue)} on due · nothing paid now`
+    : receipt.paymentMethod === "cash"
       ? `Paid in cash · ${formatTaka(receipt.total)}`
       : `Paid by ${method} · ${formatTaka(receipt.total)} · Ref ${receipt.paymentRef}`;
   const when = new Date(receipt.createdAt).toLocaleString("en-GB", {
@@ -52,14 +59,27 @@ export function ReceiptDialog({ receipt, onNewSale }: { receipt: Receipt; onNewS
             <div className="flex justify-between"><span>Discount {receipt.discountPct}%</span><span className="num">− {formatTaka(receipt.discountAmount)}</span></div>
           )}
           <div className="flex justify-between text-[17px] font-bold"><span>Total</span><span className="num">{formatTaka(receipt.total)}</span></div>
-          {receipt.paymentMethod === "cash" ? (
+          {onDue > 0 && (
+            <>
+              <div className="flex justify-between"><span>Paid now</span><span className="num">{formatTaka(paidNow)}</span></div>
+              <div className="flex justify-between font-semibold text-warn-ink">
+                <span>On due</span><span className="num">{formatTaka(onDue)}</span>
+              </div>
+              {receipt.customerOwes != null && (
+                <span className="text-xs text-muted">
+                  Owed in total after this: <span className="num">{formatTaka(receipt.customerOwes)}</span>
+                </span>
+              )}
+            </>
+          )}
+          {paidNow > 0 && (receipt.paymentMethod === "cash" ? (
             <div className="flex justify-between text-ink-soft">
               <span>Cash received · change</span>
               <span className="num">{formatTaka(receipt.cashReceived ?? 0)} · {formatTaka(receipt.changeGiven ?? 0)}</span>
             </div>
           ) : (
             <div className="flex justify-between text-ink-soft"><span>{method}</span><span className="num">{receipt.paymentRef}</span></div>
-          )}
+          ))}
           {receipt.customerPhone && <div className="text-xs text-muted">Customer: <span className="num">{receipt.customerPhone}</span></div>}
           <p className="text-center text-xs text-muted">Keep this receipt for warranty claims.</p>
         </div>

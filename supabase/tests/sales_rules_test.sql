@@ -2544,5 +2544,280 @@ select pg_temp.expect_error($q$select public.set_sale_approval('sale', (select v
 select pg_temp.check((select count(*) from public.customer_credits) = 0,
   'and a cashier cannot see what any customer is owed');
 
+-- ===========================================================================
+-- 21. CREDIT SALES AND CUSTOMERS (P10)
+-- ===========================================================================
+-- The done-when: a corporate customer with a 50,000 limit buys a 72,000 laptop,
+-- pays 30,000 now and 42,000 on due (with a PIN for the limit), pays 20,000 next
+-- week, and the due list shows 22,000 aged correctly.
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+create table pg_temp.p10 (k text primary key, v uuid);
+create table pg_temp.p10n (k text primary key, v numeric);
+
+-- Selling on due is behind a feature switch, like everything else a small shop does
+-- not need.
+select public.set_feature('credit_sales', false);
+
+-- ---- A corporate group, and a customer in it ----
+do $$
+declare g jsonb; c jsonb;
+begin
+  g := public.save_customer_group(null, jsonb_build_object(
+        'name', 'Corporate', 'credit_allowed', true, 'credit_limit', 50000,
+        'payment_days', 30, 'discount_pct', 0));
+  insert into pg_temp.p10 values ('group', (g->>'id')::uuid);
+
+  c := public.save_customer(null, jsonb_build_object(
+        'phone', '01911000777', 'name', 'Shopno Enterprise',
+        'company', 'Shopno Enterprise Ltd', 'bin_vat', '004123456-0101',
+        'group_id', (g->>'id')::uuid,
+        'credit_allowed', true, 'credit_limit', 50000, 'payment_days', 30));
+  insert into pg_temp.p10 values ('cust', (c->>'id')::uuid);
+  raise notice 'ok: a corporate customer with a 50,000 limit and 30 days to pay';
+end $$;
+select pg_temp.check(
+  (public.customer_by_phone('01911000777')->>'credit_limit')::numeric = 50000,
+  'the counter learns the limit from the phone number');
+select pg_temp.check(
+  (public.customer_by_phone('01911000777')->>'credit_left')::numeric = 50000,
+  'and how much of it is still free');
+select pg_temp.check(
+  (public.customer_by_phone('01911000777')->>'owed')::numeric = 0,
+  'they owe nothing yet');
+
+-- ---- A laptop on the shelf to sell, priced at 72,000 ----
+select public.set_prices('00000000-0000-4000-8000-0000000000aa',
+  (select id from public.price_lists where shop_id = :'SHOP' and is_default), 72000);
+do $$
+begin
+  perform public.receive_goods('00000000-0000-4000-8000-0000000000b1'::uuid,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000aa","qty":1,"unit_cost":66000,
+       "serials":["P10LAPTOP0001"]}]');
+end $$;
+
+-- ---- Nothing goes on due until the shop turns credit on ----
+select pg_temp.expect_error(
+  format($q$select public.complete_sale('%s',
+    jsonb_build_array(jsonb_build_object('product_id','00000000-0000-4000-8000-0000000000aa','qty',1,
+      'serial_ids', jsonb_build_array((select id from public.serials where serial = 'P10LAPTOP0001')))),
+    'cash', 0, null, '01911000777', 30000, p_due_amount => 42000)$q$, :'BRANCH_A'),
+  'FEATURE_OFF:credit_sales');
+select public.set_feature('credit_sales', true);
+
+-- ---- A debt has to have somebody's name on it ----
+select pg_temp.expect_error(
+  format($q$select public.complete_sale('%s',
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1}]',
+    'due', 0, null, null, null)$q$, :'BRANCH_A'),
+  'DUE_NEEDS_CUSTOMER');
+-- And that somebody has to be allowed credit.
+select pg_temp.expect_error(
+  format($q$select public.complete_sale('%s',
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1}]',
+    'due', 0, null, '01799000111', null)$q$, :'BRANCH_A'),
+  'CUSTOMER_HAS_NO_CREDIT');
+
+-- ---- 30,000 now, 42,000 on due — which is over the 50,000 limit? No: it is under ----
+-- 42,000 of a 50,000 limit is fine. The PIN case is tested right after.
+do $$
+declare r jsonb; ser uuid;
+begin
+  select id into ser from public.serials where serial = 'P10LAPTOP0001';
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1'::uuid,
+        jsonb_build_array(jsonb_build_object(
+          'product_id', '00000000-0000-4000-8000-0000000000aa', 'qty', 1,
+          'serial_ids', jsonb_build_array(ser))),
+        'cash', 0, null, '01911000777', 30000, p_due_amount => 42000);
+  if (r->>'total')::numeric <> 72000 then raise exception 'WRONG TOTAL: %', r; end if;
+  if (r->>'paid_amount')::numeric <> 30000 then raise exception 'WRONG PAID: %', r; end if;
+  if (r->>'due_amount')::numeric <> 42000 then raise exception 'WRONG DUE: %', r; end if;
+  if (r->>'change_given')::numeric <> 0 then raise exception 'CHANGE FROM A SPLIT PAYMENT: %', r; end if;
+  insert into pg_temp.p10 values ('sale', (r->>'id')::uuid);
+  raise notice 'ok: 72,000 laptop, 30,000 handed over, 42,000 on the slate';
+end $$;
+select pg_temp.check(
+  public.customer_due((select v from pg_temp.p10 where k='cust')) = 42000,
+  'the customer owes 42,000');
+select pg_temp.check(
+  (public.customer_by_phone('01911000777')->>'credit_left')::numeric = 8000,
+  'and has 8,000 of their limit left');
+
+-- ---- The limit is checked on what they will owe AFTER the next sale ----
+-- They have 8,000 of headroom left. Ten keyboards at 850 is 8,500, which is over it —
+-- and only over it because of what they ALREADY owe, which is the whole point.
+select public.set_prices('00000000-0000-4000-8000-0000000000a5',
+  (select id from public.price_lists where shop_id = :'SHOP' and is_default), 850);
+do $$
+begin
+  perform public.receive_goods('00000000-0000-4000-8000-0000000000b1'::uuid,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":20,"unit_cost":500}]');
+end $$;
+select pg_temp.expect_error(
+  format($q$select public.complete_sale('%s',
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":10}]',
+    'due', 0, null, '01911000777', null)$q$, :'BRANCH_A'),
+  'OVER_CREDIT_LIMIT');
+-- One keyboard is well inside the headroom, so it goes through with no approval at all.
+select pg_temp.check(
+  (public.complete_sale(:'BRANCH_A',
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1}]',
+    'due', 0, null, '01911000777', null)->>'due_amount')::numeric = 850,
+  'and a small one inside the limit needs nobody''s permission');
+
+-- With a manager's PIN the big one goes through, and the override is logged.
+do $$
+declare appr uuid; r jsonb;
+begin
+  -- The owner approves with their own PIN, the same approval a big discount uses.
+  appr := (public.verify_manager_pin(
+            (select id from public.staff where name = 'Owner'), '4821')->>'approval_id')::uuid;
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1'::uuid,
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":10}]',
+        'due', 0, appr, '01911000777', null);
+  if (r->>'due_amount')::numeric <> 8500 then raise exception 'WRONG DUE: %', r; end if;
+  raise notice 'ok: over the limit, a manager''s PIN lets 8,500 through';
+end $$;
+select pg_temp.check(
+  (select count(*) from public.audit_log where action = 'credit_limit_overridden') = 1,
+  'and the override is logged with the limit, what was already owed and the new due');
+select pg_temp.check(
+  (select (details->>'already_owed')::numeric from public.audit_log
+   where action = 'credit_limit_overridden') = 42850,
+  'naming what they already owed, which is the figure that matters');
+
+-- ---- Pay 20,000 ----
+do $$
+declare r jsonb;
+begin
+  r := public.collect_payment('00000000-0000-4000-8000-0000000000b1'::uuid,
+        (select v from pg_temp.p10 where k='cust'), 20000, 'bank', 'CHQ-40021');
+  if (r->>'receipt_no') not like 'REC-MB-%' then raise exception 'WRONG RECEIPT NUMBER: %', r->>'receipt_no'; end if;
+  if (r->>'was_owed')::numeric <> 51350 then raise exception 'WRONG BALANCE BEFORE: %', r; end if;
+  if (r->>'owed')::numeric <> 31350 then raise exception 'WRONG BALANCE AFTER: %', r; end if;
+  raise notice 'ok: 20,000 collected on receipt %, leaving %', r->>'receipt_no', r->>'owed';
+end $$;
+select pg_temp.expect_error(
+  format($q$select public.collect_payment('%s', '%s', 0, 'cash')$q$,
+    :'BRANCH_A', (select v from pg_temp.p10 where k='cust')), 'BAD_PAYMENT_AMOUNT');
+select pg_temp.expect_error(
+  format($q$select public.collect_payment('%s', '%s', 100, 'barter')$q$,
+    :'BRANCH_A', (select v from pg_temp.p10 where k='cust')), 'BAD_PAYMENT_METHOD');
+select pg_temp.expect_error(
+  format($q$select public.collect_payment('%s', '%s', 100, 'cash', null, null, gen_random_uuid())$q$,
+    :'BRANCH_A', (select v from pg_temp.p10 where k='cust')), 'ACCOUNT_NOT_FOUND');
+
+-- ---- The due list, aged ----
+do $$
+declare row jsonb;
+begin
+  select x into row from jsonb_array_elements(public.due_list()) x
+    where (x->>'customer_id')::uuid = (select v from pg_temp.p10 where k='cust');
+  if row is null then raise exception 'CUSTOMER NOT IN THE DUE LIST'; end if;
+  if (row->>'owed')::numeric <> 31350 then raise exception 'WRONG OWED: %', row; end if;
+  -- Everything was sold today, so it is all in the newest bucket and none of it is
+  -- overdue: they have 30 days.
+  if (row->'aging'->>'days_0_30')::numeric <> 31350 then raise exception 'WRONG BUCKET: %', row->'aging'; end if;
+  if (row->'aging'->>'overdue')::numeric <> 0 then raise exception 'WRONGLY OVERDUE: %', row->'aging'; end if;
+  if (row->>'payment_days')::int <> 30 then raise exception 'WRONG TERMS: %', row; end if;
+  raise notice 'ok: the due list shows 31,350 owed, none of it overdue on 30-day terms';
+end $$;
+
+-- An older debt lands in the right bucket and counts as overdue past the terms.
+select pg_temp.check(
+  (public.set_opening_balance('customer', (select v from pg_temp.p10 where k='cust'),
+                              5000, public.dhaka_today() - 90, 'Owed when we moved across')
+   ->>'amount')::numeric = 5000,
+  'an owner can record what a customer already owed');
+do $$
+declare a jsonb;
+begin
+  a := public.customer_aging((select v from pg_temp.p10 where k='cust'));
+  -- 5,000 from 90 days ago, 51,350 from today, 20,000 paid. Oldest first clears the
+  -- 5,000 and takes 15,000 off today's, leaving 36,350.
+  if (a->>'days_60_plus')::numeric <> 0 then raise exception 'OLD DEBT NOT CLEARED FIRST: %', a; end if;
+  if (a->>'days_0_30')::numeric <> 36350 then raise exception 'WRONG RECENT BUCKET: %', a; end if;
+  raise notice 'ok: the 90-day debt is cleared first, as the customer would assume';
+end $$;
+
+-- ---- The statement ----
+do $$
+declare st jsonb; kinds text;
+begin
+  st := public.customer_statement((select v from pg_temp.p10 where k='cust'));
+  select string_agg(distinct e->>'kind', ',') into kinds
+    from jsonb_array_elements(st->'entries') e;
+  if kinds not like '%sale%' then raise exception 'NO SALES ON THE STATEMENT: %', kinds; end if;
+  if kinds not like '%payment%' then raise exception 'NO PAYMENTS ON THE STATEMENT: %', kinds; end if;
+  if kinds not like '%opening%' then raise exception 'NO OPENING BALANCE: %', kinds; end if;
+  if (st->>'total_spent')::numeric < 72000 then raise exception 'WRONG TOTAL SPENT: %', st->>'total_spent'; end if;
+  -- The laptop is serial tracked, so the customer owns a traceable machine.
+  if jsonb_array_length(st->'owns') < 1 then raise exception 'NO SERIALS OWNED: %', st->'owns'; end if;
+  if not (st->'owns'->0->>'in_warranty')::boolean then raise exception 'LAPTOP NOT IN WARRANTY: %', st->'owns'; end if;
+  raise notice 'ok: the statement shows the sale, the payment, the opening balance and the laptop they own';
+end $$;
+
+-- ---- A group can carry the price list, so a dealer is one field ----
+do $$
+declare g jsonb; c jsonb;
+begin
+  g := public.save_customer_group(null, jsonb_build_object(
+        'name', 'Dealer',
+        'price_list_id', (select id from public.price_lists where name = 'Dealer'),
+        'discount_pct', 2));
+  c := public.save_customer(null, jsonb_build_object(
+        'phone', '01911000888', 'name', 'Corner Shop', 'group_id', (g->>'id')::uuid));
+  raise notice 'ok: a dealer set up by picking the group, with no prices typed in';
+end $$;
+select pg_temp.check(
+  (public.customer_by_phone('01911000888')->>'price_list_name') = 'Dealer',
+  'and the counter picks up the dealer price list from the group');
+select pg_temp.check(
+  (public.customer_by_phone('01911000888')->>'discount_pct')::numeric = 2,
+  'and the group''s standing discount');
+
+-- ---- A cash collection goes through the drawer ----
+do $$
+declare sh uuid; drawer numeric; before numeric;
+  branch uuid := '00000000-0000-4000-8000-0000000000b1';
+begin
+  -- P9 left a drawer open at this branch, which is the realistic case anyway: money is
+  -- collected during the day, not on a fresh till.
+  sh := (public.current_shift(branch)->>'shift_id')::uuid;
+  if sh is null then sh := (public.open_shift(branch, 0)->>'shift_id')::uuid; end if;
+  select (x->>'expected_cash')::numeric into before
+    from jsonb_array_elements(public.shift_list(branch)) x where (x->>'id')::uuid = sh;
+  perform public.collect_payment(branch, (select v from pg_temp.p10 where k='cust'),
+    1000, 'cash');
+  select (x->>'expected_cash')::numeric into drawer
+    from jsonb_array_elements(public.shift_list(branch)) x where (x->>'id')::uuid = sh;
+  if drawer <> before + 1000 then
+    raise exception 'THE COLLECTION DID NOT REACH THE DRAWER: % then %', before, drawer;
+  end if;
+  raise notice 'ok: 1,000 collected in cash is 1,000 more in the drawer';
+end $$;
+
+-- ---- Who may do what ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+-- A cashier may add a walk-in's name and take a payment; they may not set credit.
+select pg_temp.check(
+  (public.save_customer(null, '{"phone": "01911000999", "name": "Walk-in Rahim"}')->>'phone') = '01911000999',
+  'a cashier can put a name to a walk-in, which is how the list gets built');
+select pg_temp.expect_error($q$select public.save_customer(null, '{"phone": "01911000100", "credit_limit": 500000}')$q$, 'NOT_MANAGER');
+select pg_temp.expect_error(
+  format($q$select public.save_customer('%s', '{"credit_allowed": true}')$q$,
+    (select v from pg_temp.p10 where k='cust')), 'NOT_MANAGER');
+select pg_temp.expect_error($q$select public.due_list()$q$, 'NOT_ALLOWED:view_reports');
+select pg_temp.expect_error(
+  format($q$select public.customer_statement('%s')$q$,
+    (select v from pg_temp.p10 where k='cust')), 'NOT_ALLOWED:view_reports');
+select pg_temp.expect_error(
+  format($q$select public.customer_aging('%s')$q$,
+    (select v from pg_temp.p10 where k='cust')), 'NOT_ALLOWED:view_reports');
+-- But a cashier CAN see what one customer owes, because they may be taking the money.
+select pg_temp.check(
+  public.customer_due((select v from pg_temp.p10 where k='cust')) > 0,
+  'a cashier can see what the customer in front of them owes');
+
 reset role;
 \echo ALL DATABASE CHECKS PASSED
