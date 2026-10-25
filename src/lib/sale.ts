@@ -180,6 +180,12 @@ export const SALE_ERROR_CODES = [
   "DUPLICATE_SERIAL_IN_LINE", "SERIAL_ALREADY_KNOWN", "SERIAL_WRONG_LENGTH",
   "SERIAL_WRONG_SHAPE", "SERIAL_COUNT_MISMATCH", "BAD_STOCK_REASON",
   "REASON_NOTE_REQUIRED", "WOULD_GO_NEGATIVE",
+  "FEATURE_OFF", "NOTHING_REQUESTED", "REQUISITION_NOT_FOUND", "REQUISITION_LOCKED",
+  "REQUISITION_NOT_SUBMITTED", "NO_SELF_APPROVAL", "NOTHING_ORDERED", "PO_NOT_FOUND",
+  "PO_LOCKED", "PO_NOT_AWAITING", "PO_NOT_DRAFT", "PO_ALREADY_FINISHED",
+  "PO_PARTLY_RECEIVED", "CANCEL_REASON_REQUIRED", "BAD_PO_ACTION", "PO_NOT_RECEIVABLE",
+  "PO_LINE_NOT_FOUND", "MORE_THAN_ORDERED", "BAD_PARTY_KIND", "BAD_PAYMENT_AMOUNT",
+  "OPENING_DATE_IN_FUTURE", "CUSTOMER_NOT_FOUND", "ACCOUNT_NOT_FOUND",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -307,6 +313,39 @@ export function friendlyError(raw: string): string {
     case "REASON_NOTE_REQUIRED": return 'Say what happened, since the reason is "Other".';
     case "WOULD_GO_NEGATIVE":
       return `That would leave less than nothing of ${detail ?? "this product"}. Check the figure.`;
+    case "FEATURE_OFF":
+      return "That part of the app is switched off. The owner can turn it on in Settings.";
+    case "NOTHING_REQUESTED": return "Add what the branch needs first.";
+    case "REQUISITION_NOT_FOUND": return "That request no longer exists. Reload and try again.";
+    case "REQUISITION_LOCKED":
+      return `This request has already been ${detail ?? "decided"}, so it can't be changed. Start a new one.`;
+    case "REQUISITION_NOT_SUBMITTED":
+      return `Only a submitted request can be approved or rejected. This one is ${detail ?? "not submitted"}.`;
+    case "NO_SELF_APPROVAL": return "Someone else has to approve your own request.";
+    case "NOTHING_ORDERED": return "Add what you are ordering first.";
+    case "PO_NOT_FOUND": return "That order no longer exists. Reload and try again.";
+    case "PO_LOCKED":
+      return `This order is ${detail ?? "finished"}, so it can't be changed. Start a new one.`;
+    case "PO_NOT_AWAITING":
+      return `This order isn't waiting for approval. It is ${detail ?? "already decided"}.`;
+    case "PO_NOT_DRAFT":
+      return `Only a draft order can be sent. This one is ${detail ?? "already sent"}.`;
+    case "PO_ALREADY_FINISHED":
+      return `This order is already ${detail ?? "finished"}.`;
+    case "PO_PARTLY_RECEIVED":
+      return "Some of this order has already arrived, so it can't be cancelled. Close it instead.";
+    case "CANCEL_REASON_REQUIRED": return "Say why the order is being cancelled.";
+    case "BAD_PO_ACTION": return "That isn't something you can do to an order.";
+    case "PO_NOT_RECEIVABLE":
+      return `Goods can only be received against a sent order. This one is ${detail ?? "not sent"}.`;
+    case "PO_LINE_NOT_FOUND": return "That order line no longer exists. Reload and try again.";
+    case "MORE_THAN_ORDERED":
+      return `More ${detail ?? "of this"} turned up than was ordered. Change the order first, or receive it as a separate delivery.`;
+    case "BAD_PARTY_KIND": return "An opening balance belongs to a customer or a supplier.";
+    case "BAD_PAYMENT_AMOUNT": return "Enter how much is being paid.";
+    case "OPENING_DATE_IN_FUTURE": return "An opening balance can't be dated in the future.";
+    case "CUSTOMER_NOT_FOUND": return "That customer isn't in this shop.";
+    case "ACCOUNT_NOT_FOUND": return "Pick which account the money came from.";
     case "SERIAL_CHANGE_HAS_STOCK":
       return `${detail ?? "This product"} already has stock, so it can't switch between serial-tracked and not. Sell or write off the stock first.`;
     // Keep the raw text so a code we have not seen can still be reported and fixed,

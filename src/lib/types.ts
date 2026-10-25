@@ -272,6 +272,8 @@ export interface ShopDetails {
   invoicePrefix: string;
   currency: string;
   aitPct: number;
+  /** Purchase orders over this need the owner's sign-off. 0 means never. */
+  poApprovalLimit: number;
 }
 
 /** Which setup list a row belongs to. Matches the tables save_setting_row() allows. */
@@ -400,4 +402,127 @@ export interface GoodsReceivedRow {
     unitCost: number | null;
     landedCost: number | null;
   }[];
+}
+
+// --- P6: purchase paperwork and supplier dues ------------------------------
+
+export type RequisitionStatus =
+  | "draft" | "submitted" | "approved" | "rejected" | "ordered" | "cancelled";
+
+export interface RequisitionRow {
+  id: string;
+  reqNo: string;
+  status: RequisitionStatus;
+  neededBy: string | null;
+  note: string | null;
+  askedBy: string | null;
+  decidedBy: string | null;
+  decisionNote: string | null;
+  createdAt: string;
+  lines: { id: string; productId: string; product: string; qty: number; note: string | null }[];
+}
+
+export type PurchaseOrderStatus =
+  | "draft" | "awaiting_approval" | "sent" | "partly_received"
+  | "received" | "closed" | "cancelled";
+
+export interface PurchaseOrderRow {
+  id: string;
+  poNo: string;
+  status: PurchaseOrderStatus;
+  /** The branch the goods are to be delivered to. */
+  branchId: string;
+  supplierId: string;
+  supplierName: string | null;
+  paymentTermsDays: number;
+  discount: number;
+  charges: number;
+  vat: number;
+  subtotal: number;
+  total: number;
+  note: string | null;
+  cancelReason: string | null;
+  createdAt: string;
+  lines: {
+    id: string;
+    productId: string;
+    product: string;
+    code: string;
+    qty: number;
+    unitPrice: number;
+    lineDiscount: number;
+    receivedQty: number;
+  }[];
+}
+
+export interface PurchaseOrderInput {
+  id?: string;
+  branchId: string;
+  supplierId: string;
+  lines: {
+    productId: string; qty: number; unitPrice: number;
+    lineDiscount?: number; reqItemId?: string | null;
+  }[];
+  termsDays?: number;
+  discount?: number;
+  charges?: number;
+  vat?: number;
+  note?: string | null;
+  reqIds?: string[] | null;
+}
+
+export interface PurchaseOrderSaved {
+  id: string;
+  poNo: string;
+  subtotal: number;
+  total: number;
+  status: PurchaseOrderStatus;
+  /** True when it went over the shop's limit and is waiting for the owner. */
+  needsApproval: boolean;
+}
+
+export type PoAction = "approve" | "send" | "cancel" | "close";
+
+export interface ReorderSuggestion {
+  productId: string;
+  name: string;
+  code: string;
+  stock: number;
+  reorderLevel: number;
+  soldInPeriod: number;
+  perDay: number;
+  /** Null when nothing has sold: "never runs out" is a different problem. */
+  daysLeft: number | null;
+  suggestQty: number;
+  lastCost: number | null;
+}
+
+export interface LedgerEntry {
+  at: string;
+  kind: "opening" | "purchase" | "payment" | "return";
+  document: string;
+  change: number;
+  note: string | null;
+}
+
+export interface SupplierAging {
+  days0to30: number;
+  days31to60: number;
+  days60plus: number;
+  total: number;
+  /** A return or overpayment not yet used up. */
+  unapplied: number;
+}
+
+export interface SupplierPaymentResult {
+  supplier: string;
+  amount: number;
+  balance: number;
+  aging: SupplierAging;
+}
+
+export interface PoReceiveResult extends ReceiveResult {
+  poNo: string;
+  poStatus: PurchaseOrderStatus;
+  pending: { product: string; ordered: number; received: number; pending: number }[];
 }

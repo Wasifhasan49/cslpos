@@ -4,6 +4,9 @@ import type {
   Receipt, ReceiveLine, ReceiveResult, Role, SaleInput, SettingRow, SettingTable,
   SettingsBundle, StaffLookup, StaffMember, StockMovementRow, StockReason, Supplier,
   SupplierGroup,
+  LedgerEntry, PoAction, PoReceiveResult, PurchaseOrderInput, PurchaseOrderRow,
+  PurchaseOrderSaved, PurchaseOrderStatus, ReorderSuggestion, RequisitionRow,
+  RequisitionStatus, SupplierAging, SupplierPaymentResult,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 
@@ -144,4 +147,49 @@ export interface Backend {
     dryRun: boolean;
   }): Promise<{ corrected: number; alreadyRight: number; differences: CountDifference[] }>;
   stockHistory(branchId: string, productId?: string | null, limit?: number): Promise<StockMovementRow[]>;
+
+  // --- Purchase paperwork and supplier dues (P6) ---
+  listRequisitions(branchId: string, limit?: number): Promise<RequisitionRow[]>;
+  /** `submit` sends it for a decision; without it the ask stays a draft. */
+  saveRequisition(input: {
+    id?: string;
+    branchId: string;
+    lines: { productId: string; qty: number; note?: string | null }[];
+    neededBy?: string | null;
+    note?: string | null;
+    submit?: boolean;
+  }): Promise<{ id: string; reqNo: string; status: RequisitionStatus }>;
+  decideRequisition(
+    reqId: string, approve: boolean, note?: string | null,
+  ): Promise<{ reqNo: string; status: RequisitionStatus }>;
+  listPurchaseOrders(branchId: string, limit?: number): Promise<PurchaseOrderRow[]>;
+  savePurchaseOrder(input: PurchaseOrderInput): Promise<PurchaseOrderSaved>;
+  /** Approve, send, cancel or close. A cancellation needs a reason. */
+  setPoStatus(
+    poId: string, action: PoAction, reason?: string | null,
+  ): Promise<{ poNo: string; status: PurchaseOrderStatus }>;
+  /** Receiving against an order: prices come from the order, partial is normal. */
+  receiveAgainstPo(input: {
+    poId: string;
+    lines: { poItemId: string; qty: number; serials?: string[]; unitCost?: number | null }[];
+    supplierInvoiceNo?: string | null;
+    invoiceDate?: string | null;
+    isCredit?: boolean;
+    note?: string | null;
+    payAmount?: number | null;
+    payMethod?: string | null;
+    payReference?: string | null;
+  }): Promise<PoReceiveResult>;
+  reorderSuggestions(branchId: string, days?: number): Promise<ReorderSuggestion[]>;
+  supplierLedger(supplierId: string): Promise<LedgerEntry[]>;
+  supplierAging(supplierId: string): Promise<SupplierAging>;
+  paySupplier(input: {
+    branchId: string; supplierId: string; amount: number; method: string;
+    reference?: string | null; note?: string | null; accountId?: string | null;
+  }): Promise<SupplierPaymentResult>;
+  /** What the shop already owed on the day it moved across. Owner only, logged. */
+  setOpeningBalance(input: {
+    partyKind: "customer" | "supplier"; partyId: string; amount: number;
+    asOf?: string | null; note?: string | null;
+  }): Promise<{ name: string; amount: number; asOf: string }>;
 }

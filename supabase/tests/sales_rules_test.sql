@@ -1427,5 +1427,284 @@ select pg_temp.check((select count(*) from public.grn_items) = 0, 'nor what anyt
 select pg_temp.check((select count(*) from public.supplier_payments) = 0, 'nor what has been paid out');
 select pg_temp.check((select count(*) from public.supplier_returns) = 0, 'nor what was sent back');
 
+
+-- ===========================================================================
+-- 17. PURCHASE PAPERWORK AND SUPPLIER DUES (P6)
+-- ===========================================================================
+-- The done-when: a branch requests 10 keyboards, the owner approves, a PO goes to
+-- the supplier, 6 arrive then 4 arrive, stock and the due update each time, and
+-- paying half leaves the rest aged correctly.
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+
+-- All of this is behind a feature switch; a small shop keeps receiving directly.
+select pg_temp.expect_error(format($q$select public.save_requisition('%s', '[{"product_id":"%s","qty":10}]')$q$, :'BRANCH_A', :'KEYBOARD'), 'FEATURE_OFF:purchase_orders');
+select public.set_feature('purchase_orders', true);
+
+insert into public.suppliers (id, shop_id, name, phone) values
+  ('00000000-0000-4000-8000-0000000000d3', :'SHOP', 'P6 Keyboard Wholesaler', '01811999021');
+\set SUP6 '00000000-0000-4000-8000-0000000000d3'
+
+-- ---- A branch asks for 10 keyboards ----
+-- Asked for by the CASHIER, so the owner approving it is a real second pair of eyes.
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+create table pg_temp.p6 (k text primary key, v uuid);
+do $$
+declare r jsonb;
+begin
+  r := public.save_requisition('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":10}]',
+        public.dhaka_today() + 7, 'Running low on keyboards', null, true);
+  if (r->>'status') <> 'submitted' then raise exception 'NOT SUBMITTED: %', r; end if;
+  if (r->>'req_no') not like 'REQ-MB-%' then raise exception 'WRONG REQ NUMBER: %', r->>'req_no'; end if;
+  insert into pg_temp.p6 values ('req', (r->>'id')::uuid);
+  raise notice 'ok: the branch asked for 10 keyboards';
+end $$;
+
+-- You cannot approve your own request.
+select pg_temp.expect_error($q$select public.decide_requisition((select v from pg_temp.p6 where k='req'), true)$q$, 'NOT_ALLOWED:approve');
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+select pg_temp.check(
+  (public.decide_requisition((select v from pg_temp.p6 where k='req'), true, 'Go ahead')->>'status') = 'approved',
+  'the owner approves it');
+select pg_temp.check((select count(*) from public.audit_log where action = 'requisition_approved') = 1, 'and the approval is logged');
+-- Deciding twice is not a thing.
+select pg_temp.expect_error($q$select public.decide_requisition((select v from pg_temp.p6 where k='req'), true)$q$, 'REQUISITION_NOT_SUBMITTED');
+
+-- ---- A purchase order goes to the supplier ----
+do $$
+declare r jsonb;
+begin
+  r := public.save_purchase_order('00000000-0000-4000-8000-0000000000b1',
+        '00000000-0000-4000-8000-0000000000d3',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":10,"unit_price":600}]',
+        30, 0, 0, 0, 'From the branch request',
+        null, array[(select v from pg_temp.p6 where k='req')]);
+  if (r->>'total')::numeric <> 6000 then raise exception 'WRONG PO TOTAL: %', r; end if;
+  if (r->>'po_no') not like 'PO-MB-%' then raise exception 'WRONG PO NUMBER: %', r->>'po_no'; end if;
+  insert into pg_temp.p6 values ('po', (r->>'id')::uuid);
+  raise notice 'ok: a 6,000 purchase order raised from the request';
+end $$;
+select pg_temp.check(
+  (select status from public.requisitions where id = (select v from pg_temp.p6 where k='req')) = 'ordered',
+  'and the request is marked ordered, so the branch can see what happened to it');
+
+-- Nothing can be received until it has actually been sent.
+select pg_temp.expect_error($q$select public.receive_against_po((select v from pg_temp.p6 where k='po'),
+  jsonb_build_array(jsonb_build_object('po_item_id',
+    (select id from public.purchase_order_items where po_id = (select v from pg_temp.p6 where k='po')), 'qty', 1)))$q$,
+  'PO_NOT_RECEIVABLE');
+select pg_temp.check((public.set_po_status((select v from pg_temp.p6 where k='po'), 'send')->>'status') = 'sent', 'the order is sent to the supplier');
+
+-- ---- 6 arrive ----
+do $$
+declare r jsonb; item uuid; before_stock int;
+begin
+  select id into item from public.purchase_order_items where po_id = (select v from pg_temp.p6 where k='po');
+  select qty into before_stock from public.branch_stock
+    where product_id = '00000000-0000-4000-8000-0000000000a5'
+      and location_id = '00000000-0000-4000-8000-0000000000e1';
+  r := public.receive_against_po((select v from pg_temp.p6 where k='po'),
+        jsonb_build_array(jsonb_build_object('po_item_id', item, 'qty', 6)),
+        'WS-5501', public.dhaka_today(), true);
+  if (r->>'po_status') <> 'partly_received' then raise exception 'NOT PARTLY RECEIVED: %', r->>'po_status'; end if;
+  if (r->>'total')::numeric <> 3600 then raise exception 'WRONG DELIVERY TOTAL: %', r->>'total'; end if;
+  if (r->>'supplier_due')::numeric <> 3600 then raise exception 'DUE DID NOT GO UP: %', r; end if;
+  if (select qty from public.branch_stock
+      where product_id = '00000000-0000-4000-8000-0000000000a5'
+        and location_id = '00000000-0000-4000-8000-0000000000e1') <> before_stock + 6 then
+    raise exception 'STOCK DID NOT GO UP BY 6';
+  end if;
+  raise notice 'ok: 6 of the 10 arrived — stock and the due both moved';
+end $$;
+select pg_temp.check(
+  (select qty - received_qty from public.purchase_order_items
+   where po_id = (select v from pg_temp.p6 where k='po')) = 4,
+  'and the order says 4 are still pending');
+
+-- More than was ordered is a conversation with the supplier, not a quiet accept.
+select pg_temp.expect_error($q$select public.receive_against_po((select v from pg_temp.p6 where k='po'),
+  jsonb_build_array(jsonb_build_object('po_item_id',
+    (select id from public.purchase_order_items where po_id = (select v from pg_temp.p6 where k='po')), 'qty', 99)))$q$,
+  'MORE_THAN_ORDERED');
+
+-- Once something has arrived, cancelling would hide a real delivery.
+select pg_temp.expect_error($q$select public.set_po_status((select v from pg_temp.p6 where k='po'), 'cancel', 'changed my mind')$q$, 'PO_PARTLY_RECEIVED');
+
+-- ---- The other 4 arrive ----
+do $$
+declare r jsonb; item uuid;
+begin
+  select id into item from public.purchase_order_items where po_id = (select v from pg_temp.p6 where k='po');
+  r := public.receive_against_po((select v from pg_temp.p6 where k='po'),
+        jsonb_build_array(jsonb_build_object('po_item_id', item, 'qty', 4)),
+        'WS-5502', public.dhaka_today(), true);
+  if (r->>'po_status') <> 'received' then raise exception 'ORDER NOT CLOSED OFF: %', r->>'po_status'; end if;
+  if (r->>'supplier_due')::numeric <> 6000 then raise exception 'WRONG DUE AFTER SECOND DELIVERY: %', r; end if;
+  raise notice 'ok: the last 4 arrived, the order is complete, 6,000 owed';
+end $$;
+-- And nothing more can come against it.
+select pg_temp.expect_error($q$select public.receive_against_po((select v from pg_temp.p6 where k='po'),
+  jsonb_build_array(jsonb_build_object('po_item_id',
+    (select id from public.purchase_order_items where po_id = (select v from pg_temp.p6 where k='po')), 'qty', 1)))$q$,
+  'PO_NOT_RECEIVABLE');
+
+-- The agreed price is the point of an order, so paying something else is logged.
+do $$
+declare r jsonb; po2 uuid; item uuid;
+begin
+  r := public.save_purchase_order('00000000-0000-4000-8000-0000000000b1',
+        '00000000-0000-4000-8000-0000000000d3',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":2,"unit_price":600}]', 30);
+  po2 := (r->>'id')::uuid;
+  perform public.set_po_status(po2, 'send');
+  select id into item from public.purchase_order_items where po_id = po2;
+  -- The invoice came in at 650, not the agreed 600.
+  r := public.receive_against_po(po2, jsonb_build_array(
+        jsonb_build_object('po_item_id', item, 'qty', 2, 'unit_cost', 650)), 'WS-5503');
+  raise notice 'ok: an invoice above the agreed price goes through for a manager';
+end $$;
+select pg_temp.check(
+  (select (details->>'agreed')::numeric from public.audit_log
+   where action = 'po_price_overridden' limit 1) = 600,
+  'and the override is logged with the agreed price and the invoiced one');
+
+-- ---- Orders over the shop's limit wait for the owner ----
+-- Set through the saver, because shops has no direct UPDATE policy — which is also
+-- what stops a manager raising their own approval limit.
+select public.save_shop_details('{"po_approval_limit": 5000}');
+select set_config('request.jwt.claim.sub', '44444444-4444-4444-8444-444444444444', false);
+do $$
+declare r jsonb;
+begin
+  r := public.save_purchase_order('00000000-0000-4000-8000-0000000000b2',
+        '00000000-0000-4000-8000-0000000000d3',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":20,"unit_price":600}]', 30);
+  if (r->>'status') <> 'awaiting_approval' then raise exception 'BIG ORDER NOT HELD: %', r; end if;
+  if not (r->>'needs_approval')::boolean then raise exception 'APPROVAL NOT FLAGGED: %', r; end if;
+  insert into pg_temp.p6 values ('bigpo', (r->>'id')::uuid);
+  raise notice 'ok: a 12,000 order from a manager waits for the owner';
+end $$;
+-- A manager cannot approve their own big order, and cannot send it either.
+select pg_temp.expect_error($q$select public.set_po_status((select v from pg_temp.p6 where k='bigpo'), 'approve')$q$, 'NOT_OWNER');
+select pg_temp.expect_error($q$select public.set_po_status((select v from pg_temp.p6 where k='bigpo'), 'send')$q$, 'PO_NOT_DRAFT');
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+select pg_temp.check((public.set_po_status((select v from pg_temp.p6 where k='bigpo'), 'approve')->>'status') = 'sent', 'the owner approves it and it goes out');
+select pg_temp.check((select count(*) from public.audit_log where action = 'po_approve') = 1, 'and the approval is logged');
+
+-- A small order from the same manager does not wait.
+select set_config('request.jwt.claim.sub', '44444444-4444-4444-8444-444444444444', false);
+do $$
+declare r jsonb;
+begin
+  r := public.save_purchase_order('00000000-0000-4000-8000-0000000000b2',
+        '00000000-0000-4000-8000-0000000000d3',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1,"unit_price":600}]', 30);
+  if (r->>'status') <> 'draft' then raise exception 'SMALL ORDER HELD UP: %', r; end if;
+  insert into pg_temp.p6 values ('smallpo', (r->>'id')::uuid);
+  raise notice 'ok: a 600 order from the same manager goes straight to draft';
+end $$;
+
+-- Cancelling needs a reason, and is logged.
+select pg_temp.expect_error($q$select public.set_po_status((select v from pg_temp.p6 where k='smallpo'), 'cancel')$q$, 'CANCEL_REASON_REQUIRED');
+select pg_temp.check(
+  (public.set_po_status((select v from pg_temp.p6 where k='smallpo'), 'cancel', 'Found them cheaper elsewhere')->>'status') = 'cancelled',
+  'a cancel with a reason works');
+select pg_temp.check(
+  (select details->>'reason' from public.audit_log where action = 'po_cancel' limit 1) = 'Found them cheaper elsewhere',
+  'and the reason is on the record');
+select pg_temp.expect_error($q$select public.set_po_status((select v from pg_temp.p6 where k='smallpo'), 'cancel', 'again')$q$, 'PO_ALREADY_FINISHED');
+select pg_temp.expect_error($q$select public.set_po_status((select v from pg_temp.p6 where k='bigpo'), 'juggle')$q$, 'BAD_PO_ACTION');
+
+-- ---- Pay half, and see the rest aged ----
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+select pg_temp.check(public.supplier_balance(:'SUP6') = 7300, 'the wholesaler is owed 7,300 (6,000 + 1,300)');
+do $$
+declare r jsonb;
+begin
+  r := public.pay_supplier('00000000-0000-4000-8000-0000000000b1',
+        '00000000-0000-4000-8000-0000000000d3', 3650, 'bank', 'CHQ-7781');
+  if (r->>'balance')::numeric <> 3650 then raise exception 'WRONG BALANCE AFTER HALF PAYMENT: %', r; end if;
+  -- Everything was bought today, so what is left sits in the newest bucket.
+  if (r->'aging'->>'days_0_30')::numeric <> 3650 then raise exception 'WRONG AGING: %', r->'aging'; end if;
+  if (r->'aging'->>'days_60_plus')::numeric <> 0 then raise exception 'SOMETHING AGED WRONGLY: %', r->'aging'; end if;
+  raise notice 'ok: paying half leaves 3,650, all of it under 30 days old';
+end $$;
+select pg_temp.expect_error(format($q$select public.pay_supplier('%s', '%s', 0, 'cash')$q$, :'BRANCH_A', :'SUP6'), 'BAD_PAYMENT_AMOUNT');
+select pg_temp.expect_error(format($q$select public.pay_supplier('%s', '%s', 100, 'cash', null, null, gen_random_uuid())$q$, :'BRANCH_A', :'SUP6'), 'ACCOUNT_NOT_FOUND');
+
+-- Older debt ages into the right bucket, and payments are applied oldest first.
+-- A shop that typed its catalogue in by hand still has to record what it already owed,
+-- and `opening_balances` has no write policy, so it can only come through the function.
+select pg_temp.check(
+  (public.set_opening_balance('supplier', :'SUP6', 2000, public.dhaka_today() - 90, 'Old debt')
+   ->>'amount')::numeric = 2000,
+  'an owner can record what the shop already owed a supplier');
+select pg_temp.check(
+  (public.set_opening_balance('supplier', :'SUP6', 2000, public.dhaka_today() - 90, 'Old debt')
+   ->>'amount')::numeric = 2000
+  and (select count(*) from public.opening_balances where supplier_id = :'SUP6') = 1,
+  'and recording it again changes the figure instead of adding a second one');
+select pg_temp.check(
+  (select count(*) from public.audit_log where action = 'opening_balance_set') >= 1,
+  'and the opening balance is logged');
+select pg_temp.expect_error(
+  format($q$select public.set_opening_balance('supplier', '%s', 100, public.dhaka_today() + 5)$q$, :'SUP6'),
+  'OPENING_DATE_IN_FUTURE');
+select pg_temp.expect_error(
+  format($q$select public.set_opening_balance('supplier', '%s', 100)$q$, gen_random_uuid()),
+  'SUPPLIER_NOT_FOUND');
+do $$
+declare a jsonb;
+begin
+  a := public.supplier_aging('00000000-0000-4000-8000-0000000000d3');
+  -- 2,000 from 90 days ago, 7,300 from today, 3,650 paid. Oldest first, so the whole
+  -- 2,000 is cleared and 1,650 comes off today's.
+  if (a->>'days_60_plus')::numeric <> 0 then raise exception 'OLD DEBT NOT CLEARED FIRST: %', a; end if;
+  if (a->>'days_0_30')::numeric <> 5650 then raise exception 'WRONG RECENT BUCKET: %', a; end if;
+  raise notice 'ok: the payment cleared the 90-day debt first, leaving 5,650 recent';
+end $$;
+
+-- The ledger shows everything that moved the balance.
+do $$
+declare l jsonb; kinds text;
+begin
+  l := public.supplier_ledger('00000000-0000-4000-8000-0000000000d3');
+  select string_agg(distinct x->>'kind', ',') into kinds from jsonb_array_elements(l) x;
+  if kinds not like '%purchase%' then raise exception 'NO PURCHASES IN LEDGER: %', kinds; end if;
+  if kinds not like '%payment%' then raise exception 'NO PAYMENTS IN LEDGER: %', kinds; end if;
+  if kinds not like '%opening%' then raise exception 'NO OPENING BALANCE IN LEDGER: %', kinds; end if;
+  raise notice 'ok: the ledger shows the opening balance, the purchases and the payment';
+end $$;
+
+-- ---- Reorder suggestions ----
+do $$
+declare r jsonb;
+begin
+  r := public.reorder_suggestions('00000000-0000-4000-8000-0000000000b1', 30);
+  if jsonb_typeof(r) <> 'array' then raise exception 'NO SUGGESTIONS: %', r; end if;
+  raise notice 'ok: reorder suggestions came back as a list';
+end $$;
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.reorder_suggestions(:'BRANCH_A', 30)) x
+   where (x->>'stock')::int > (x->>'reorder_level')::int) = 0,
+  'and only things at or below their re-order level are on it');
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.reorder_suggestions(:'BRANCH_A', 30)) x
+   where (x->>'suggest_qty')::int < 1) = 0,
+  'and every suggestion is for at least one');
+
+-- ---- Who may do what ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.expect_error(format($q$select public.save_purchase_order('%s', '%s', '[{"product_id":"%s","qty":1,"unit_price":1}]')$q$, :'BRANCH_A', :'SUP6', :'KEYBOARD'), 'NOT_ALLOWED');
+select pg_temp.expect_error(format($q$select public.pay_supplier('%s', '%s', 100, 'cash')$q$, :'BRANCH_A', :'SUP6'), 'NOT_ALLOWED');
+select pg_temp.expect_error(format($q$select public.supplier_ledger('%s')$q$, :'SUP6'), 'NOT_ALLOWED');
+select pg_temp.expect_error(format($q$select public.reorder_suggestions('%s')$q$, :'BRANCH_A'), 'NOT_ALLOWED');
+select pg_temp.expect_error(format($q$select public.set_opening_balance('supplier', '%s', 100)$q$, :'SUP6'), 'NOT_OWNER');
+-- A cashier sees requests (they may have made one) but not what anything costs.
+select pg_temp.check((select count(*) from public.requisitions) >= 1, 'a cashier can see the requests at their branch');
+select pg_temp.check((select count(*) from public.purchase_orders) = 0, 'but not the orders, because those carry prices');
+select pg_temp.check((select count(*) from public.purchase_order_items) = 0, 'nor the agreed prices on them');
+
 reset role;
 \echo ALL DATABASE CHECKS PASSED

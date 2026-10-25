@@ -10,6 +10,8 @@ import type {
   CountDifference, FeatureKey, GoodsReceivedRow, PriceList, Product, Receipt, ReceiptLine,
   ReceiveResult, Role, SaleInput, SerialUnit, SettingRow, SettingTable, SettingsBundle,
   Staff, StaffLookup, StaffMember, StockMovementRow, Supplier, SupplierGroup,
+  LedgerEntry, PoReceiveResult, PurchaseOrderRow, PurchaseOrderStatus, RequisitionRow,
+  SupplierAging,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import type { Backend } from "./types";
@@ -66,7 +68,7 @@ export function createDemoBackend(): Backend {
     name: DEMO_SHOP_NAME, address: "123 Example Road, Dhaka", phone: "01700-000000",
     email: null as string | null, logoUrl: null as string | null, binVat: null as string | null,
     receiptFooter: "Thank you. Keep this receipt for warranty claims.",
-    invoicePrefix: "DEMO", currency: "BDT", aitPct: 0,
+    invoicePrefix: "DEMO", currency: "BDT", aitPct: 0, poApprovalLimit: 0,
   };
   // `active` defaults to true in every setup table, so the demo rows have to say so
   // too or the whole list reads as switched off.
@@ -195,6 +197,16 @@ export function createDemoBackend(): Backend {
   const movements: StockMovementRow[] = [];
   const deliveries: GoodsReceivedRow[] = [];
   let grnCounter = 1;
+  // Purchase paperwork (P6). Empty to start: a new shop has asked for nothing yet.
+  const requisitions: RequisitionRow[] = [];
+  const purchaseOrders: PurchaseOrderRow[] = [];
+  const ledgers: Record<string, LedgerEntry[]> = {
+    sup1: [{ at: daysAgo(80), kind: "opening", document: "Opening balance", change: 45000, note: "Moved across from BMS" }],
+    sup2: [{ at: daysAgo(12), kind: "purchase", document: "GRN-MAIN-2026000001", change: 8750, note: "RC-2291" }],
+    sup3: [],
+  };
+  let reqCounter = 1;
+  let poCounter = 1;
   const costs: Record<string, number> = { a1: 250 };
 
   const noteMovement = (m: StockMovementRow) => movements.unshift(m);
@@ -246,7 +258,7 @@ export function createDemoBackend(): Backend {
       };
     });
 
-  return {
+  const api: Backend = {
     mode: "demo",
     async currentStaff(): Promise<StaffLookup> { return { kind: "ok", staff }; },
     async listCategories() { return DEMO_CATEGORIES; },
@@ -510,6 +522,9 @@ export function createDemoBackend(): Backend {
         binVat: values.bin_vat !== undefined ? (values.bin_vat as string) : shopDetails.binVat,
         receiptFooter: values.receipt_footer !== undefined ? (values.receipt_footer as string) : shopDetails.receiptFooter,
         invoicePrefix: (values.invoice_prefix as string)?.toUpperCase() || shopDetails.invoicePrefix,
+        aitPct: values.ait_pct !== undefined ? Number(values.ait_pct) || 0 : shopDetails.aitPct,
+        poApprovalLimit: values.po_approval_limit !== undefined
+          ? Number(values.po_approval_limit) || 0 : shopDetails.poApprovalLimit,
       });
       staff.shopName = shopDetails.name;
     },
@@ -951,5 +966,293 @@ export function createDemoBackend(): Backend {
         b!.nextInvoice = next;
       }
     },
+
+    // --- Purchase paperwork and supplier dues (P6) ---
+
+    async listRequisitions(_branchId, limit = 50) {
+      return structuredClone(requisitions.slice(0, limit));
+    },
+
+    async saveRequisition(input) {
+      if (!features.purchase_orders) fail("FEATURE_OFF:purchase_orders");
+      const branch = branchOr404(input.branchId);
+      if (input.lines.length === 0) fail("NOTHING_REQUESTED");
+
+      const lines = input.lines.map((l) => {
+        const p = catalogue.find((x) => x.id === l.productId);
+        if (!p) fail("PRODUCT_NOT_FOUND");
+        return { id: crypto.randomUUID(), productId: p!.id, product: p!.name, qty: l.qty, note: l.note ?? null };
+      });
+
+      if (input.id) {
+        const r = requisitions.find((x) => x.id === input.id);
+        if (!r) fail("REQUISITION_NOT_FOUND");
+        if (!["draft", "submitted"].includes(r!.status)) fail(`REQUISITION_LOCKED:${r!.status}`);
+        r!.lines = lines;
+        r!.neededBy = input.neededBy ?? r!.neededBy;
+        r!.note = input.note ?? r!.note;
+        if (input.submit) r!.status = "submitted";
+        return { id: r!.id, reqNo: r!.reqNo, status: r!.status };
+      }
+
+      const reqNo = `REQ-${branch.code}-${new Date().getFullYear()}${String(reqCounter++).padStart(6, "0")}`;
+      const row: RequisitionRow = {
+        id: crypto.randomUUID(), reqNo, status: input.submit ? "submitted" : "draft",
+        neededBy: input.neededBy ?? null, note: input.note ?? null,
+        askedBy: staff.name, decidedBy: null, decisionNote: null,
+        createdAt: new Date().toISOString(), lines,
+      };
+      requisitions.unshift(row);
+      return { id: row.id, reqNo, status: row.status };
+    },
+
+    async decideRequisition(reqId, approve, note) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:approve");
+      const r = requisitions.find((x) => x.id === reqId);
+      if (!r) fail("REQUISITION_NOT_FOUND");
+      if (r!.status !== "submitted") fail(`REQUISITION_NOT_SUBMITTED:${r!.status}`);
+      // In the demo the one signed-in owner asks and decides, so self-approval can't be
+      // blocked the way the database blocks it. The database is the rule that counts.
+      r!.status = approve ? "approved" : "rejected";
+      r!.decidedBy = staff.name;
+      r!.decisionNote = note ?? null;
+      return { reqNo: r!.reqNo, status: r!.status };
+    },
+
+    async listPurchaseOrders(_branchId, limit = 50) {
+      return structuredClone(purchaseOrders.slice(0, limit));
+    },
+
+    async savePurchaseOrder(input) {
+      if (!features.purchase_orders) fail("FEATURE_OFF:purchase_orders");
+      if (staff.role === "cashier") fail("NOT_ALLOWED:receive_stock");
+      const branch = branchOr404(input.branchId);
+      if (input.lines.length === 0) fail("NOTHING_ORDERED");
+      const supplier = suppliers.find((x) => x.id === input.supplierId);
+      if (!supplier) fail("SUPPLIER_NOT_FOUND");
+
+      let subtotal = 0;
+      const lines = input.lines.map((l) => {
+        const p = catalogue.find((x) => x.id === l.productId);
+        if (!p) fail("PRODUCT_NOT_FOUND");
+        if (l.qty <= 0) fail(`BAD_QTY:${p!.name}`);
+        subtotal += Math.max(l.unitPrice * l.qty - (l.lineDiscount ?? 0), 0);
+        return {
+          id: crypto.randomUUID(), productId: p!.id, product: p!.name, code: p!.code,
+          qty: l.qty, unitPrice: l.unitPrice, lineDiscount: l.lineDiscount ?? 0, receivedQty: 0,
+        };
+      });
+      const total = Math.max(subtotal - (input.discount ?? 0), 0)
+        + (input.charges ?? 0) + (input.vat ?? 0);
+
+      const existing = input.id ? purchaseOrders.find((x) => x.id === input.id) : null;
+      if (input.id && !existing) fail("PO_NOT_FOUND");
+      if (existing && ["sent", "partly_received", "received", "closed", "cancelled"].includes(existing.status)) {
+        fail(`PO_LOCKED:${existing.status}`);
+      }
+      const limit = shopDetails.poApprovalLimit;
+      const status: PurchaseOrderStatus =
+        limit > 0 && total > limit && staff.role !== "owner" ? "awaiting_approval" : "draft";
+
+      if (existing) {
+        Object.assign(existing, {
+          branchId: branch.id, supplierId: supplier!.id, supplierName: supplier!.name, lines,
+          paymentTermsDays: input.termsDays ?? 0, discount: input.discount ?? 0,
+          charges: input.charges ?? 0, vat: input.vat ?? 0, subtotal, total,
+          note: input.note ?? null, status,
+        });
+        return { id: existing.id, poNo: existing.poNo, subtotal, total, status, needsApproval: status === "awaiting_approval" };
+      }
+
+      const poNo = `PO-${branch.code}-${new Date().getFullYear()}${String(poCounter++).padStart(6, "0")}`;
+      const row: PurchaseOrderRow = {
+        id: crypto.randomUUID(), poNo, status, branchId: branch.id, supplierId: supplier!.id,
+        supplierName: supplier!.name, paymentTermsDays: input.termsDays ?? 0,
+        discount: input.discount ?? 0, charges: input.charges ?? 0, vat: input.vat ?? 0,
+        subtotal, total, note: input.note ?? null, cancelReason: null,
+        createdAt: new Date().toISOString(), lines,
+      };
+      purchaseOrders.unshift(row);
+      for (const id of input.reqIds ?? []) {
+        const r = requisitions.find((x) => x.id === id);
+        if (r && r.status === "approved") r.status = "ordered";
+      }
+      return { id: row.id, poNo, subtotal, total, status, needsApproval: status === "awaiting_approval" };
+    },
+
+    async setPoStatus(poId, action, reason) {
+      const po = purchaseOrders.find((x) => x.id === poId);
+      if (!po) fail("PO_NOT_FOUND");
+      if (action === "approve") {
+        if (staff.role !== "owner") fail("NOT_OWNER");
+        if (po!.status !== "awaiting_approval") fail(`PO_NOT_AWAITING:${po!.status}`);
+        po!.status = "sent";
+      } else if (action === "send") {
+        if (staff.role === "cashier") fail("NOT_ALLOWED:receive_stock");
+        if (po!.status !== "draft") fail(`PO_NOT_DRAFT:${po!.status}`);
+        po!.status = "sent";
+      } else if (action === "cancel") {
+        if (staff.role === "cashier") fail("NOT_ALLOWED:receive_stock");
+        if (["received", "closed", "cancelled"].includes(po!.status)) fail(`PO_ALREADY_FINISHED:${po!.status}`);
+        if (po!.lines.some((l) => l.receivedQty > 0)) fail("PO_PARTLY_RECEIVED");
+        if (!reason?.trim()) fail("CANCEL_REASON_REQUIRED");
+        po!.status = "cancelled";
+        po!.cancelReason = reason ?? null;
+      } else if (action === "close") {
+        if (staff.role === "cashier") fail("NOT_ALLOWED:receive_stock");
+        po!.status = "closed";
+      } else {
+        fail(`BAD_PO_ACTION:${action}`);
+      }
+      return { poNo: po!.poNo, status: po!.status };
+    },
+
+    async receiveAgainstPo(input): Promise<PoReceiveResult> {
+      const po = purchaseOrders.find((x) => x.id === input.poId);
+      if (!po) fail("PO_NOT_FOUND");
+      if (!["sent", "partly_received"].includes(po!.status)) fail(`PO_NOT_RECEIVABLE:${po!.status}`);
+      if (input.lines.length === 0) fail("NOTHING_RECEIVED");
+
+      const picked = input.lines.map((l) => {
+        const line = po!.lines.find((x) => x.id === l.poItemId);
+        if (!line) fail("PO_LINE_NOT_FOUND");
+        const qty = (l.serials ?? []).length > 0 ? l.serials!.length : l.qty;
+        if (line!.receivedQty + qty > line!.qty) fail(`MORE_THAN_ORDERED:${line!.product}`);
+        return { line: line!, qty, serials: l.serials ?? [], unitCost: l.unitCost ?? line!.unitPrice };
+      });
+
+      // The goods go in through the one receiving path, as receive_against_po() does.
+      const res = await api.receiveGoods({
+        branchId: po!.branchId,
+        lines: picked.map((x) => ({
+          productId: x.line.productId, qty: x.qty, unitCost: x.unitCost, serials: x.serials,
+        })),
+        supplierId: po!.supplierId,
+        supplierInvoiceNo: input.supplierInvoiceNo ?? null,
+        invoiceDate: input.invoiceDate ?? null,
+        isCredit: input.isCredit ?? true,
+        note: input.note ?? null,
+        payAmount: input.payAmount ?? null,
+        payMethod: input.payMethod ?? null,
+        payReference: input.payReference ?? null,
+      });
+
+      for (const x of picked) x.line.receivedQty += x.qty;
+      const anyLeft = po!.lines.some((l) => l.receivedQty < l.qty);
+      po!.status = anyLeft ? "partly_received" : "received";
+      (ledgers[po!.supplierId] ??= []).push({
+        at: new Date().toISOString(), kind: "purchase", document: res.grnNo,
+        change: res.total, note: input.supplierInvoiceNo ?? null,
+      });
+
+      return {
+        ...res, poNo: po!.poNo, poStatus: po!.status,
+        pending: po!.lines.map((l) => ({
+          product: l.product, ordered: l.qty, received: l.receivedQty,
+          pending: l.qty - l.receivedQty,
+        })),
+      };
+    },
+
+    async reorderSuggestions(branchId, days = 30) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:view_reports");
+      branchOr404(branchId);
+      return productsAt(branchId)
+        .filter((p) => p.stock <= p.reorderLevel)
+        .map((p) => {
+          // The demo has no sales history to measure, so the rate is zero and
+          // "days left" is blank rather than a made-up figure.
+          const sold = movements
+            .filter((m) => m.product === p.name && m.reason === "sale")
+            .reduce((n, m) => n - m.change, 0);
+          return {
+            productId: p.id, name: p.name, code: p.code, stock: p.stock,
+            reorderLevel: p.reorderLevel, soldInPeriod: sold,
+            perDay: Math.round((sold / Math.max(days, 1)) * 100) / 100,
+            daysLeft: sold > 0 ? Math.round((p.stock / (sold / Math.max(days, 1))) * 10) / 10 : null,
+            suggestQty: Math.max(p.reorderLevel * 2 - p.stock, 1),
+            lastCost: costs[p.id] ?? null,
+          };
+        });
+    },
+
+    async supplierLedger(supplierId) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:view_reports");
+      if (!suppliers.some((x) => x.id === supplierId)) fail("SUPPLIER_NOT_FOUND");
+      return structuredClone((ledgers[supplierId] ?? []).slice().sort((a, b) => a.at.localeCompare(b.at)));
+    },
+
+    async supplierAging(supplierId) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:view_reports");
+      const sup = suppliers.find((x) => x.id === supplierId);
+      if (!sup) fail("SUPPLIER_NOT_FOUND");
+      return agingFrom(ledgers[supplierId] ?? [], sup!.balance);
+    },
+
+    async paySupplier(input) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:receive_stock");
+      branchOr404(input.branchId);
+      const sup = suppliers.find((x) => x.id === input.supplierId);
+      if (!sup) fail("SUPPLIER_NOT_FOUND");
+      if (sup!.isCashOnly) fail("CASH_SUPPLIER_NO_CREDIT");
+      if (!input.amount || input.amount <= 0) fail("BAD_PAYMENT_AMOUNT");
+      if (!input.method) fail("PAYMENT_METHOD_REQUIRED");
+      sup!.balance -= input.amount;
+      (ledgers[sup!.id] ??= []).push({
+        at: new Date().toISOString(), kind: "payment", document: input.method,
+        change: -input.amount, note: input.reference ?? null,
+      });
+      return {
+        supplier: sup!.name, amount: input.amount, balance: sup!.balance,
+        aging: agingFrom(ledgers[sup!.id], sup!.balance),
+      };
+    },
+
+    async setOpeningBalance(input) {
+      if (staff.role !== "owner") fail("NOT_OWNER");
+      const asOf = input.asOf ?? new Date().toISOString().slice(0, 10);
+      if (asOf > new Date().toISOString().slice(0, 10)) fail("OPENING_DATE_IN_FUTURE");
+      if (input.partyKind === "supplier") {
+        const sup = suppliers.find((x) => x.id === input.partyId);
+        if (!sup) fail("SUPPLIER_NOT_FOUND");
+        const entries = (ledgers[sup!.id] ??= []);
+        const already = entries.find((e) => e.kind === "opening");
+        if (already) { already.change = input.amount; already.at = asOf; already.note = input.note ?? null; }
+        else entries.push({ at: asOf, kind: "opening", document: "Opening balance", change: input.amount, note: input.note ?? null });
+        return { name: sup!.name, amount: input.amount, asOf };
+      }
+      fail("CUSTOMER_NOT_FOUND");
+      return { name: "", amount: 0, asOf };
+    },
+  };
+
+  return api;
+}
+
+/** An ISO timestamp n days back, for the demo's pre-existing supplier history. */
+function daysAgo(n: number): string {
+  return new Date(Date.now() - n * 86_400_000).toISOString();
+}
+
+/**
+ * The aging buckets, worked out the way supplier_aging() does it: what was bought on
+ * credit goes into a bucket by age, and payments and returns come off the OLDEST first.
+ */
+function agingFrom(entries: LedgerEntry[], balance: number): SupplierAging {
+  let paid = 0;
+  const buckets = [0, 0, 0];
+  for (const e of entries) {
+    if (e.change < 0) { paid += -e.change; continue; }
+    const age = Math.floor((Date.now() - new Date(e.at).getTime()) / 86_400_000);
+    buckets[age <= 30 ? 0 : age <= 60 ? 1 : 2] += e.change;
+  }
+  for (let i = 2; i >= 0; i -= 1) {
+    const take = Math.min(paid, buckets[i]);
+    paid -= take;
+    buckets[i] -= take;
+  }
+  return {
+    days0to30: Math.max(buckets[0], 0), days31to60: Math.max(buckets[1], 0),
+    days60plus: Math.max(buckets[2], 0), total: balance, unapplied: Math.max(paid, 0),
   };
 }

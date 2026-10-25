@@ -6,12 +6,23 @@ import type {
   CountDifference, CustomerLookup, FeatureKey, GoodsReceivedRow, PaymentMethod, PriceList,
   Product, Receipt, ReceiveResult, Role, SaleInput, SettingRow, SettingTable,
   SettingsBundle, StaffLookup, StaffMember, StockMovementRow, Supplier, SupplierGroup,
+  LedgerEntry, PoReceiveResult, PurchaseOrderRow, PurchaseOrderStatus, ReorderSuggestion,
+  RequisitionRow, RequisitionStatus, SupplierAging, SupplierPaymentResult,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
 import type { Backend } from "./types";
 
 const num = (v: unknown) => (v == null ? 0 : Number(v));
+
+/** The aging buckets come back snake_cased from two different functions. */
+function readAging(v: unknown): SupplierAging {
+  const a = (v ?? {}) as Record<string, unknown>;
+  return {
+    days0to30: num(a.days_0_30), days31to60: num(a.days_31_60),
+    days60plus: num(a.days_60_plus), total: num(a.total), unapplied: num(a.unapplied),
+  };
+}
 const numOrNull = (v: unknown) => (v == null ? null : Number(v));
 
 /** During setup, almost every failure is a misconfiguration rather than a flat
@@ -284,7 +295,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         "transaction_categories",
       ];
       const [shopRes, featRes, keysRes, roleRes, staffPermRes, docRes, ...listRes] = await Promise.all([
-        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct").limit(1).maybeSingle(),
+        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct, po_approval_limit").limit(1).maybeSingle(),
         sb.from("shop_features").select("feature, enabled"),
         sb.from("permission_keys").select("key, label, area, has_limit").order("sort"),
         sb.from("role_permissions").select("role, perm, allowed, num_limit"),
@@ -305,6 +316,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
           name: shop.name, address: shop.address, phone: shop.phone, email: shop.email,
           logoUrl: shop.logo_url, binVat: shop.bin_vat, receiptFooter: shop.receipt_footer,
           invoicePrefix: shop.invoice_prefix, currency: shop.currency, aitPct: num(shop.ait_pct),
+          poApprovalLimit: num(shop.po_approval_limit),
         },
         features: Object.fromEntries((featRes.data ?? []).map((r) => [r.feature, r.enabled])),
         lists,
@@ -666,6 +678,230 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
           expected: num(d.expected), counted: num(d.counted), change: num(d.change),
         })) as CountDifference[],
       };
+    },
+
+    // --- Purchase paperwork and supplier dues (P6) ---
+
+    async listRequisitions(branchId: string, limit = 50): Promise<RequisitionRow[]> {
+      const { data, error } = await sb
+        .from("requisitions")
+        .select(`id, req_no, status, needed_by, note, decision_note, created_at,
+                 asked:staff!requisitions_staff_id_fkey(name),
+                 decided:staff!requisitions_decided_by_fkey(name),
+                 requisition_items(id, qty, note, product_id, products(name))`)
+        .eq("branch_id", branchId)
+        .order("created_at", { ascending: false })
+        .limit(limit);
+      if (error) throw loadError("the requests", error);
+      type Row = {
+        id: string; req_no: string; status: RequisitionStatus; needed_by: string | null;
+        note: string | null; decision_note: string | null; created_at: string;
+        asked: { name: string } | null; decided: { name: string } | null;
+        requisition_items: { id: string; qty: number; note: string | null;
+                             product_id: string; products: { name: string } | null }[];
+      };
+      return ((data ?? []) as unknown as Row[]).map((r) => ({
+        id: r.id, reqNo: r.req_no, status: r.status, neededBy: r.needed_by, note: r.note,
+        askedBy: r.asked?.name ?? null, decidedBy: r.decided?.name ?? null,
+        decisionNote: r.decision_note, createdAt: r.created_at,
+        lines: (r.requisition_items ?? []).map((i) => ({
+          id: i.id, productId: i.product_id, product: i.products?.name ?? "",
+          qty: i.qty, note: i.note,
+        })),
+      }));
+    },
+
+    async saveRequisition(input) {
+      const { data, error } = await sb.rpc("save_requisition", {
+        p_branch_id: input.branchId,
+        p_lines: input.lines.map((l) => ({
+          product_id: l.productId, qty: l.qty, note: l.note ?? null,
+        })),
+        p_needed_by: input.neededBy ?? null,
+        p_note: input.note ?? null,
+        p_req_id: input.id ?? null,
+        p_submit: input.submit ?? false,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return { id: String(r.id), reqNo: String(r.req_no), status: r.status as RequisitionStatus };
+    },
+
+    async decideRequisition(reqId, approve, note) {
+      const { data, error } = await sb.rpc("decide_requisition", {
+        p_req_id: reqId, p_approve: approve, p_note: note ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return { reqNo: String(r.req_no), status: r.status as RequisitionStatus };
+    },
+
+    async listPurchaseOrders(branchId: string, limit = 50): Promise<PurchaseOrderRow[]> {
+      const { data, error } = await sb
+        .from("purchase_orders")
+        .select(`id, po_no, status, branch_id, supplier_id, payment_terms_days, discount, charges, vat,
+                 subtotal, total, note, cancel_reason, created_at,
+                 suppliers(name),
+                 purchase_order_items(id, qty, unit_price, line_discount, received_qty,
+                                      product_id, products(name, code))`)
+        .eq("branch_id", branchId)
+        .order("created_at", { ascending: false })
+        .limit(limit);
+      if (error) throw loadError("the orders", error);
+      type Row = {
+        id: string; po_no: string; status: PurchaseOrderStatus; branch_id: string;
+        supplier_id: string;
+        payment_terms_days: number; discount: number | string; charges: number | string;
+        vat: number | string; subtotal: number | string; total: number | string;
+        note: string | null; cancel_reason: string | null; created_at: string;
+        suppliers: { name: string } | null;
+        purchase_order_items: {
+          id: string; qty: number; unit_price: number | string; line_discount: number | string;
+          received_qty: number; product_id: string;
+          products: { name: string; code: string } | null;
+        }[];
+      };
+      return ((data ?? []) as unknown as Row[]).map((o) => ({
+        id: o.id, poNo: o.po_no, status: o.status, branchId: o.branch_id,
+        supplierId: o.supplier_id,
+        supplierName: o.suppliers?.name ?? null, paymentTermsDays: o.payment_terms_days,
+        discount: num(o.discount), charges: num(o.charges), vat: num(o.vat),
+        subtotal: num(o.subtotal), total: num(o.total), note: o.note,
+        cancelReason: o.cancel_reason, createdAt: o.created_at,
+        lines: (o.purchase_order_items ?? []).map((i) => ({
+          id: i.id, productId: i.product_id, product: i.products?.name ?? "",
+          code: i.products?.code ?? "", qty: i.qty, unitPrice: num(i.unit_price),
+          lineDiscount: num(i.line_discount), receivedQty: i.received_qty,
+        })),
+      }));
+    },
+
+    async savePurchaseOrder(input) {
+      const { data, error } = await sb.rpc("save_purchase_order", {
+        p_branch_id: input.branchId,
+        p_supplier_id: input.supplierId,
+        p_lines: input.lines.map((l) => ({
+          product_id: l.productId, qty: l.qty, unit_price: l.unitPrice,
+          line_discount: l.lineDiscount ?? 0, req_item_id: l.reqItemId ?? null,
+        })),
+        p_terms_days: input.termsDays ?? 0,
+        p_discount: input.discount ?? 0,
+        p_charges: input.charges ?? 0,
+        p_vat: input.vat ?? 0,
+        p_note: input.note ?? null,
+        p_po_id: input.id ?? null,
+        p_req_ids: input.reqIds ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return {
+        id: String(r.id), poNo: String(r.po_no), subtotal: num(r.subtotal),
+        total: num(r.total), status: r.status as PurchaseOrderStatus,
+        needsApproval: Boolean(r.needs_approval),
+      };
+    },
+
+    async setPoStatus(poId, action, reason) {
+      const { data, error } = await sb.rpc("set_po_status", {
+        p_po_id: poId, p_action: action, p_reason: reason ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return { poNo: String(r.po_no), status: r.status as PurchaseOrderStatus };
+    },
+
+    async receiveAgainstPo(input): Promise<PoReceiveResult> {
+      const { data, error } = await sb.rpc("receive_against_po", {
+        p_po_id: input.poId,
+        p_lines: input.lines.map((l) => ({
+          po_item_id: l.poItemId, qty: l.qty,
+          serials: l.serials ?? [], unit_cost: l.unitCost ?? null,
+        })),
+        p_supplier_invoice_no: input.supplierInvoiceNo ?? null,
+        p_invoice_date: input.invoiceDate ?? null,
+        p_is_credit: input.isCredit ?? true,
+        p_note: input.note ?? null,
+        p_pay_amount: input.payAmount ?? null,
+        p_pay_method: input.payMethod ?? null,
+        p_pay_reference: input.payReference ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return {
+        grnNo: String(r.grn_no), subtotal: num(r.subtotal), total: num(r.total),
+        costMissing: Boolean(r.cost_missing), supplierDue: numOrNull(r.supplier_due),
+        lines: ((r.lines as Record<string, unknown>[] | null) ?? []).map((l) => ({
+          name: String(l.name), qty: num(l.qty),
+          unitCost: numOrNull(l.unit_cost), landedCost: numOrNull(l.landed_cost),
+          averageCost: numOrNull(l.average_cost),
+        })),
+        poNo: String(r.po_no), poStatus: r.po_status as PurchaseOrderStatus,
+        pending: ((r.pending as Record<string, unknown>[] | null) ?? []).map((p) => ({
+          product: String(p.product), ordered: num(p.ordered),
+          received: num(p.received), pending: num(p.pending),
+        })),
+      };
+    },
+
+    async reorderSuggestions(branchId: string, days = 30): Promise<ReorderSuggestion[]> {
+      const { data, error } = await sb.rpc("reorder_suggestions", {
+        p_branch_id: branchId, p_days: days,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((r) => ({
+        productId: String(r.product_id), name: String(r.name), code: String(r.code),
+        stock: num(r.stock), reorderLevel: num(r.reorder_level),
+        soldInPeriod: num(r.sold_in_period), perDay: num(r.per_day),
+        daysLeft: numOrNull(r.days_left), suggestQty: num(r.suggest_qty),
+        lastCost: numOrNull(r.last_cost),
+      }));
+    },
+
+    async supplierLedger(supplierId: string): Promise<LedgerEntry[]> {
+      const { data, error } = await sb.rpc("supplier_ledger", { p_supplier_id: supplierId });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((e) => ({
+        at: String(e.at), kind: e.kind as LedgerEntry["kind"],
+        document: String(e.document), change: num(e.change),
+        note: (e.note as string | null) ?? null,
+      }));
+    },
+
+    async supplierAging(supplierId: string): Promise<SupplierAging> {
+      const { data, error } = await sb.rpc("supplier_aging", { p_supplier_id: supplierId });
+      if (error) throw new Error(friendlyError(error.message));
+      return readAging(data);
+    },
+
+    async paySupplier(input): Promise<SupplierPaymentResult> {
+      const { data, error } = await sb.rpc("pay_supplier", {
+        p_branch_id: input.branchId,
+        p_supplier_id: input.supplierId,
+        p_amount: input.amount,
+        p_method: input.method,
+        p_reference: input.reference ?? null,
+        p_note: input.note ?? null,
+        p_account_id: input.accountId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return {
+        supplier: String(r.supplier), amount: num(r.amount), balance: num(r.balance),
+        aging: readAging(r.aging),
+      };
+    },
+
+    async setOpeningBalance(input) {
+      const { data, error } = await sb.rpc("set_opening_balance", {
+        p_party_kind: input.partyKind,
+        p_party_id: input.partyId,
+        p_amount: input.amount,
+        p_as_of: input.asOf ?? null,
+        p_note: input.note ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return { name: String(r.name), amount: num(r.amount), asOf: String(r.as_of) };
     },
 
     async stockHistory(branchId: string, productId?: string | null, limit = 100): Promise<StockMovementRow[]> {

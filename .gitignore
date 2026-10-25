@@ -50,3 +50,6 @@ reports_samples/
 bms-export/*
 !bms-export/README.md
 !bms-export/samples/
+
+# Claude Code's local dev-server config for the preview pane
+.claude/

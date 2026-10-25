@@ -148,6 +148,7 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
     name: s.name, address: s.address ?? "", phone: s.phone ?? "", email: s.email ?? "",
     bin_vat: s.binVat ?? "", receipt_footer: s.receiptFooter ?? "",
     invoice_prefix: s.invoicePrefix, ait_pct: String(s.aitPct),
+    po_approval_limit: String(s.poApprovalLimit),
   });
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm({ ...form, [k]: e.target.value });
@@ -157,7 +158,11 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
       className="flex flex-col gap-3"
       onSubmit={(e) => {
         e.preventDefault();
-        void run(() => backend.saveShopDetails({ ...form, ait_pct: Number(form.ait_pct) || 0 }), true);
+        void run(() => backend.saveShopDetails({
+          ...form,
+          ait_pct: Number(form.ait_pct) || 0,
+          po_approval_limit: Number(form.po_approval_limit) || 0,
+        }), true);
       }}
     >
       <Field label="Shop name" required>
@@ -195,6 +200,15 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
           </Field>
         </div>
       </div>
+      <Field
+        label="Purchase orders over this need your approval"
+        hint="0 means never. A manager's order above this figure waits for the owner instead of going to the supplier."
+      >
+        <Input
+          inputMode="numeric" value={form.po_approval_limit}
+          onChange={set("po_approval_limit")} disabled={readOnly} className="num"
+        />
+      </Field>
       <Field label="Receipt footer" hint="The last line on every receipt.">
         <Input value={form.receipt_footer} onChange={set("receipt_footer")} disabled={readOnly} />
       </Field>
