@@ -211,6 +211,9 @@ export interface SaleInput {
   /** How much of the total is going on the customer's slate instead of being paid now
    *  (P10). A payment method of "due" puts the whole lot on it. */
   dueAmount?: number;
+  /** Everything the advanced counter adds (P10a): card and EMI details, an exchange,
+   *  a split payment, the corporate fields, and the shop's own extra fields. */
+  extras?: SaleExtras;
 }
 
 export interface ReceiptLine {
@@ -258,6 +261,21 @@ export interface Receipt {
   dueAmount?: number;
   /** What the customer owes in total after this sale. Null for a walk-in. */
   customerOwes?: number | null;
+  /** P10a: what the card company and the bank added, and what the old item was worth. */
+  cardCharge?: number;
+  emiCharge?: number;
+  exchangeValue?: number;
+  emiMonths?: number | null;
+  emiBank?: string | null;
+  cardType?: string | null;
+  cardLast4?: string | null;
+  attention?: string | null;
+  customerBin?: string | null;
+  narration?: string | null;
+  soldBy?: string | null;
+  extraFields?: Record<string, string> | null;
+  exchange?: { description: string; serial: string | null; value: number } | null;
+  payments?: { method: string; amount: number; reference: string | null }[];
   /** The VAT on this sale. Inclusive VAT is already inside `total`; exclusive VAT was
    *  added to it. Either way the receipt has to say how much tax there was. */
   vatAmount: number;
@@ -303,13 +321,15 @@ export interface ShopDetails {
   saleApprovalLimit: number;
   /** Every sale waits for approval, whatever it is worth. */
   approveAllSales: boolean;
+  /** Who pays the card company's cut: the shop absorbs it, or it goes on the bill. */
+  cardChargeMode: "absorb" | "add";
 }
 
 /** Which setup list a row belongs to. Matches the tables save_setting_row() allows. */
 export type SettingTable =
   | "units" | "vat_rates" | "hs_codes" | "extra_charges" | "discount_types"
   | "payment_methods" | "card_types" | "bank_accounts" | "warranty_terms"
-  | "transaction_categories";
+  | "transaction_categories" | "sale_fields";
 
 /** A row in one of the setup lists. Deliberately loose: the lists differ, and the
  *  database validates the field names, so the UI does not need ten interfaces. */
@@ -924,4 +944,73 @@ export interface PaymentReceipt {
   shopName: string;
   branch: string;
   takenBy: string;
+}
+
+// --- P10a: the full counter ------------------------------------------------
+
+export interface EmiPlan {
+  id: string;
+  bank: string;
+  months: number;
+  chargePct: number;
+  /** Banks will not run EMI below this. */
+  minAmount: number;
+  active: boolean;
+}
+
+/** A shop-defined extra field on a sale (BMS "Additional Info"). */
+export interface SaleField {
+  id: string;
+  name: string;
+  showOnInvoice: boolean;
+  active: boolean;
+}
+
+/** What the counter is told before it argues about a price. Never cost or margin. */
+export interface PriceHelp {
+  productId: string;
+  lastPriceToCustomer: number | null;
+  lastPriceToCustomerOn: string | null;
+  lastPrice: number | null;
+  here: number;
+  elsewhere: { branch: string; qty: number }[];
+  emiAllowed: boolean;
+  emiPlans: EmiPlan[];
+}
+
+/** One part of a split payment. */
+export interface SplitPayment {
+  method: PaymentMethod | "exchange";
+  amount: number;
+  reference?: string | null;
+  accountId?: string | null;
+}
+
+/** Everything the advanced counter adds to a sale. One object, not twelve fields. */
+export interface SaleExtras {
+  attention?: string | null;
+  customerAddress?: string | null;
+  customerBin?: string | null;
+  customerNid?: string | null;
+  narration?: string | null;
+  /** Defaults to whoever is logged in. */
+  soldBy?: string | null;
+  /** The shop's own fields, by name. Only ones it has defined are accepted. */
+  extraFields?: Record<string, string>;
+  card?: {
+    typeId?: string | null;
+    bank?: string | null;
+    posAccountId?: string | null;
+    last4?: string | null;
+  };
+  emi?: { months: number; bank?: string | null };
+  exchange?: {
+    description: string;
+    serial?: string | null;
+    value: number;
+    /** Which product to book it in as, when it is going back on the shelf. */
+    productId?: string | null;
+    addToStock?: boolean;
+  };
+  payments?: SplitPayment[];
 }

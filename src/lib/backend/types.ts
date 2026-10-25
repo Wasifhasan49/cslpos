@@ -12,6 +12,7 @@ import type {
   CashReason, ShiftClosed, ShiftRow, ShiftState,
   ApprovalStatus, RefundMethod, ReturnResult, SaleDetail, SaleRow, SaleStatus,
   CustomerGroup, CustomerRow, CustomerStatement, DueRow, PaymentReceipt,
+  EmiPlan, PriceHelp, SaleField,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 
@@ -322,4 +323,16 @@ export interface Backend {
     branchId: string; customerId: string; amount: number; method: string;
     reference?: string | null; note?: string | null; accountId?: string | null;
   }): Promise<PaymentReceipt>;
+
+  // --- The full counter (P10a) ---
+  /** What this customer paid last time, what anyone paid last time, and where the
+   *  stock is. Deliberately not cost or margin. */
+  priceHelp(
+    productId: string, branchId: string, customerId?: string | null,
+  ): Promise<PriceHelp>;
+  /** The bank EMI plans the shop has set up. */
+  listEmiPlans(): Promise<EmiPlan[]>;
+  saveEmiPlan(id: string | null, values: Record<string, unknown>): Promise<void>;
+  /** The shop's own extra fields on a sale (BMS "Additional Info"). */
+  listSaleFields(): Promise<SaleField[]>;
 }

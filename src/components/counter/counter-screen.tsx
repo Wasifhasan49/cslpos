@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button";
 import { computeTotals, isSessionExpired, parseDiscount, saleBlocker, searchProducts } from "@/lib/sale";
 import { useSale } from "@/lib/store/sale-store";
 import type {
-  Approver, Category, CustomerLookup, Product, Receipt, ShiftState,
+  Approver, Category, CustomerLookup, EmiPlan, Product, Receipt, SaleField, SettingRow,
+  ShiftState, StaffMember,
 } from "@/lib/types";
 import { ProductPicker } from "./product-picker";
 import { TillStrip } from "./till-strip";
@@ -41,6 +42,16 @@ export function CounterScreen() {
   const [receipt, setReceipt] = React.useState<Receipt | null>(null);
   const [shift, setShift] = React.useState<ShiftState | null>(null);
   const [shiftNonce, setShiftNonce] = React.useState(0);
+  // What the advanced counter needs to offer (P10a). All optional: a shop that has set
+  // none of it up sees exactly the simple counter.
+  const [cardTypes, setCardTypes] = React.useState<SettingRow[]>([]);
+  const [posAccounts, setPosAccounts] = React.useState<SettingRow[]>([]);
+  const [saleFields, setSaleFields] = React.useState<SaleField[]>([]);
+  const [team, setTeam] = React.useState<StaffMember[]>([]);
+  const [emiPlans, setEmiPlans] = React.useState<EmiPlan[]>([]);
+  const [cardChargeMode, setCardChargeMode] = React.useState<"absorb" | "add">("absorb");
+  // Which products can go on EMI, asked once per product rather than per keystroke.
+  const [emiFor, setEmiFor] = React.useState<Map<string, boolean>>(new Map());
 
   const say = React.useCallback((msg: string) => {
     clearTimeout(flashTimer.current);
@@ -77,6 +88,57 @@ export function CounterScreen() {
     return () => { cancelled = true; };
   }, [backend, branch.id]);
 
+  // Loaded once: the card types, the POS accounts, the shop's extra fields, the team
+  // and the bank's EMI plans. A failure here must not stop anyone selling, so each one
+  // falls back to empty and the matching panel simply does not appear.
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [fields, plans, people, settings] = await Promise.all([
+        backend.listSaleFields().catch(() => [] as SaleField[]),
+        backend.listEmiPlans().catch(() => [] as EmiPlan[]),
+        backend.listStaff().catch(() => [] as StaffMember[]),
+        backend.loadSettings().catch(() => null),
+      ]);
+      if (cancelled) return;
+      setSaleFields(fields);
+      setEmiPlans(plans);
+      setTeam(people);
+      if (settings) {
+        setCardTypes(settings.lists.card_types ?? []);
+        setPosAccounts((settings.lists.bank_accounts ?? [])
+          .filter((a) => a.active !== false));
+        setCardChargeMode(settings.shop.cardChargeMode);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [backend]);
+
+  // Whether the things in the cart can go on EMI. Asked only for products that are
+  // actually in it, and only once each.
+  React.useEffect(() => {
+    let cancelled = false;
+    const missing = sale.lines.map((l) => l.productId).filter((id) => !emiFor.has(id));
+    if (missing.length === 0) return;
+    (async () => {
+      const answers = await Promise.all(missing.map(async (id) => {
+        try {
+          const h = await backend.priceHelp(id, branch.id, customer?.id ?? null);
+          return [id, h.emiAllowed] as const;
+        } catch {
+          return [id, false] as const;
+        }
+      }));
+      if (cancelled) return;
+      setEmiFor((was) => {
+        const next = new Map(was);
+        for (const [id, ok] of answers) next.set(id, ok);
+        return next;
+      });
+    })();
+    return () => { cancelled = true; };
+  }, [backend, branch.id, customer?.id, sale.lines, emiFor]);
+
   // The drawer is per branch and per person, so it is re-read when the branch changes,
   // after a sale, and whenever the strip changes it.
   React.useEffect(() => {
@@ -101,6 +163,25 @@ export function CounterScreen() {
   }, [branch.id]);
 
   const byId = React.useMemo(() => new Map(products.map((p) => [p.id, p])), [products]);
+
+  // What the card charge, the EMI charge and an exchange do to the total. Worked out in
+  // one place so the blocker, the panel and the database all agree on what is payable.
+  const extraCharges = React.useMemo(() => {
+    const base = computeTotals(sale.lines, byId, parseDiscount(sale.discount)).total;
+    const cardType = cardTypes.find((c) => c.id === sale.extras.card?.typeId);
+    const card = cardType && cardChargeMode === "add"
+      ? Math.round((base * Number(cardType.charge_pct ?? 0)) / 100)
+      : 0;
+    const plan = sale.extras.emi
+      ? emiPlans.find((p) => p.months === sale.extras.emi!.months
+          && (!sale.extras.emi!.bank || p.bank === sale.extras.emi!.bank))
+      : undefined;
+    const emi = plan ? Math.round((base * plan.chargePct) / 100) : 0;
+    return {
+      total: card + emi,
+      exchange: Math.min(sale.extras.exchange?.value ?? 0, base + card + emi),
+    };
+  }, [sale.lines, sale.discount, sale.extras, byId, cardTypes, cardChargeMode, emiPlans]);
   const results = React.useMemo(() => searchProducts(products, query, categoryId), [products, query, categoryId]);
   const discountPct = parseDiscount(sale.discount);
   const totals = computeTotals(sale.lines, byId, discountPct);
@@ -110,6 +191,8 @@ export function CounterScreen() {
         pinApproved: sale.approvalId !== null, phone: sale.phone, method: sale.method,
         cashReceived: sale.cashReceived, paymentRef: sale.paymentRef,
         dueAmount: sale.dueAmount, customer,
+        extraCharges: extraCharges.total, exchangeValue: extraCharges.exchange,
+        cardLast4: sale.extras.card?.last4 ?? null,
       })
     : "Loading";
 
@@ -196,7 +279,15 @@ export function CounterScreen() {
         approvalId: sale.approvalId,
         customerPhone: sale.phone || null,
         cashReceived: sale.method === "cash" && payingNow > 0 ? Number(sale.cashReceived) : null,
-        paymentRef: sale.method === "cash" || payingNow === 0 ? null : sale.paymentRef,
+        // For a card sale the last four digits ARE the reference, wherever they were typed.
+        paymentRef: sale.method === "cash" || payingNow === 0
+          ? null
+          : sale.method === "card"
+            ? sale.extras.card?.last4 || sale.paymentRef
+            : sale.paymentRef,
+        // Everything the advanced counter added (P10a). Sent only when something is
+        // actually in it, so a simple sale carries nothing extra.
+        extras: Object.keys(sale.extras).length > 0 ? sale.extras : undefined,
       });
       setReceipt(r);
       loadProducts().catch(() => say("Sale saved, but stock didn't refresh. Reload the page."));
@@ -304,6 +395,16 @@ export function CounterScreen() {
           pinMessage={pinMessage}
           approvedBy={approvedBy}
           creditOn={Boolean(features.credit_sales)}
+          cardTypes={cardTypes}
+          posAccounts={posAccounts}
+          saleFields={saleFields}
+          team={team}
+          emiPlans={emiPlans}
+          // Every line has to be EMI-able: a bank will not finance a laptop and a
+          // 50-taka cable on one agreement, and the database refuses it too.
+          emiAllowed={sale.lines.length > 0 && sale.lines.every((l) => emiFor.get(l.productId))}
+          cardChargeMode={cardChargeMode}
+          allProducts={products}
           onCheckPin={onCheckPin}
           onComplete={onComplete}
         />

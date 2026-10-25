@@ -18,7 +18,7 @@ import type {
   CashMovementRow, ShiftRow,
   ReturnResult, SaleDetail, SaleDetailLine, SaleRow,
   CustomerAging, CustomerGroup, CustomerRow, CustomerStatement, DueRow, PaymentReceipt,
-  StatementEntry,
+  StatementEntry, EmiPlan, PriceHelp, SaleField,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import type { Backend } from "./types";
@@ -79,6 +79,7 @@ export function createDemoBackend(): Backend {
     receiptFooter: "Thank you. Keep this receipt for warranty claims.",
     invoicePrefix: "DEMO", currency: "BDT", aitPct: 0, poApprovalLimit: 0,
     cashShortLimit: 50, returnDays: 7, saleApprovalLimit: 0, approveAllSales: false,
+    cardChargeMode: "absorb" as "absorb" | "add",
   };
   // `active` defaults to true in every setup table, so the demo rows have to say so
   // too or the whole list reads as switched off.
@@ -138,6 +139,8 @@ export function createDemoBackend(): Backend {
       row({ name: "Shop rent", applies_to: "expense" }),
       row({ name: "Staff advance", applies_to: "expense" }),
     ],
+    // The shop's own extra fields on a sale (P10a).
+    sale_fields: [row({ name: "PO number", show_on_invoice: true })],
   };
   const PERMISSION_KEYS = [
     { key: "sell", label: "Sell at the counter", area: "counter", hasLimit: false },
@@ -228,6 +231,13 @@ export function createDemoBackend(): Backend {
     reference: string | null; branchId: string; shiftId: string | null; at: string;
   }[] = [];
   let receiptCounter = 1;
+  // The full counter (P10a): the bank's EMI plans and the shop's own extra fields.
+  const emiPlans: EmiPlan[] = [
+    { id: "emi-12", bank: "City Bank", months: 12, chargePct: 4, minAmount: 10000, active: true },
+    { id: "emi-24", bank: "City Bank", months: 24, chargePct: 8, minAmount: 25000, active: true },
+  ];
+  // Which categories the shop allows EMI on. Laptops only, as a shop would set it.
+  const emiCategories = new Set<string>(["c5"]);
 
   /**
    * Mirrors customer_aging(): what is owed, by age, with collections applied OLDEST
@@ -546,12 +556,54 @@ export function createDemoBackend(): Backend {
       };
 
       let change: number | null = null;
+      // Everything the advanced counter adds (P10a), with the same rules the database
+      // applies: EMI only where the owner allows it and the bank runs it, the card
+      // charge only when the shop passes it on, and an exchange never worth more than
+      // the sale.
+      const x = input.extras ?? {};
+      let cardCharge = 0;
+      let emiCharge = 0;
+      let exchangeValue = 0;
+      const cardType = x.card?.typeId
+        ? lists.card_types.find((c) => c.id === x.card!.typeId) ?? null
+        : null;
+      if (x.card?.typeId && !cardType) fail("CARD_TYPE_NOT_FOUND");
+      for (const name of Object.keys(x.extraFields ?? {})) {
+        if (!lists.sale_fields.some((f) => f.name === name && f.active !== false)) {
+          fail(`UNKNOWN_SALE_FIELD:${name}`);
+        }
+      }
+      if (cardType && shopDetails.cardChargeMode === "add") {
+        cardCharge = roundTaka((totals.total * Number(cardType.charge_pct ?? 0)) / 100);
+      }
+      if (x.emi?.months) {
+        const plan = emiPlans.find(
+          (e) => e.active && e.months === x.emi!.months
+            && (!x.emi!.bank || e.bank === x.emi!.bank));
+        if (!plan) fail(`NO_EMI_PLAN:${x.emi.months}`);
+        for (const line of input.lines) {
+          const prod = catalogue.find((c) => c.id === line.productId);
+          if (!emiCategories.has(prod?.categoryId ?? "")) {
+            fail(`EMI_NOT_ALLOWED:${prod?.name ?? "this item"}`);
+          }
+        }
+        if (totals.total < plan!.minAmount) fail(`EMI_BELOW_MINIMUM:${plan!.minAmount}`);
+        emiCharge = roundTaka((totals.total * plan!.chargePct) / 100);
+      }
+      if (x.exchange && x.exchange.value != null) {
+        if (!x.exchange.description?.trim()) fail("EXCHANGE_NEEDS_DESCRIPTION");
+        exchangeValue = Math.max(x.exchange.value, 0);
+      }
+      const grandTotal = totals.total + cardCharge + emiCharge;
+      if (exchangeValue > grandTotal) fail(`EXCHANGE_OVER_TOTAL:${grandTotal}`);
+      const payable = grandTotal - exchangeValue;
+
       // Paying now, paying later, or some of each (P10). 'due' is the whole total on the
       // slate; dueAmount splits it. Same rules as complete_sale().
       let onDue = Math.max(input.dueAmount ?? 0, 0);
-      if (input.paymentMethod === "due") onDue = totals.total;
-      if (onDue > totals.total) fail("DUE_MORE_THAN_TOTAL");
-      const paidNow = roundTaka(totals.total - onDue);
+      if (input.paymentMethod === "due") onDue = payable;
+      if (onDue > payable) fail("DUE_MORE_THAN_TOTAL");
+      const paidNow = roundTaka(payable - onDue);
 
       if (onDue > 0) {
         if (!features.credit_sales) fail("FEATURE_OFF:credit_sales");
@@ -566,8 +618,25 @@ export function createDemoBackend(): Backend {
         }
       }
 
-      // What is handed over now is checked against the PAID part, not the total.
-      if (input.paymentMethod === "cash") {
+      // A split has to add up to what is being paid now, to the taka: off by one and
+      // the drawer is wrong at closing time and nobody knows why.
+      const splits = x.payments ?? [];
+      if (splits.length > 0) {
+        const sum = splits.reduce((n, sp) => n + sp.amount, 0);
+        if (roundTaka(sum) !== roundTaka(paidNow)) fail(`SPLIT_DOES_NOT_ADD_UP:${paidNow}`);
+      }
+
+      // What is handed over now is checked against the PAID part, not the total. With a
+      // split, the cash part is whatever the breakdown says.
+      const cashPart = splits.length > 0
+        ? splits.filter((sp) => sp.method === "cash").reduce((n, sp) => n + sp.amount, 0)
+        : paidNow;
+      if (splits.length > 0) {
+        if (input.cashReceived != null && input.cashReceived > 0) {
+          if (input.cashReceived < cashPart) fail("CASH_SHORT");
+          change = roundTaka(input.cashReceived - cashPart);
+        }
+      } else if (input.paymentMethod === "cash") {
         if (input.cashReceived == null || input.cashReceived < paidNow) fail("CASH_SHORT");
         change = roundTaka((input.cashReceived ?? 0) - paidNow);
       } else if (paidNow > 0 && (!input.paymentRef || input.paymentRef.trim().length < 4)) {
@@ -581,13 +650,46 @@ export function createDemoBackend(): Backend {
         stock[input.branchId][productId] = (stock[input.branchId][productId] ?? 0) - qty;
       }
 
+      // The old item, when the shop wants to resell it. Same rule as the database: it
+      // needs a product to be booked in as, and a serial if that product is tracked.
+      if (x.exchange?.addToStock) {
+        if (!x.exchange.productId) fail("EXCHANGE_NEEDS_PRODUCT");
+        const used = catalogue.find((c) => c.id === x.exchange!.productId);
+        if (!used) fail("PRODUCT_NOT_FOUND");
+        if (used!.isSerial) {
+          const sn = (x.exchange.serial ?? "").trim();
+          if (!sn) fail(`SERIAL_REQUIRED:${used!.name}`);
+          if (serials.some((y) => y.serial === sn)) fail(`SERIAL_ALREADY_KNOWN:${sn}`);
+          serials.push({
+            id: crypto.randomUUID(), serial: sn, productId: used!.id,
+            branchId: input.branchId, sold: false,
+          });
+        } else {
+          stock[input.branchId][used!.id] = (stock[input.branchId][used!.id] ?? 0) + 1;
+        }
+        costs[used!.id] = exchangeValue;
+        noteMovement({
+          at: new Date().toISOString(), product: used!.name, code: used!.code, change: 1,
+          reason: "purchase", why: null, note: "Taken in exchange", who: staff.name,
+          location: branch.locations[0]?.name ?? null,
+        });
+      }
+
       // The drawer this was rung up on gains what the customer handed over, less the
       // change: for a cash sale that is the total, which is what the till can be
       // checked against at closing time.
       if (openShift) {
         openShift.salesCount += 1;
-        openShift.byMethod[input.paymentMethod] =
-          (openShift.byMethod[input.paymentMethod] ?? 0) + totals.total;
+        // With a split, each method gets its own share; otherwise the whole paid part
+        // went in by the one method chosen.
+        if (splits.length > 0) {
+          for (const sp of splits) {
+            openShift.byMethod[sp.method] = (openShift.byMethod[sp.method] ?? 0) + sp.amount;
+          }
+        } else if (paidNow > 0) {
+          openShift.byMethod[input.paymentMethod] =
+            (openShift.byMethod[input.paymentMethod] ?? 0) + paidNow;
+        }
       }
 
       // Numbering is per branch, with the branch's code in it.
@@ -623,7 +725,7 @@ export function createDemoBackend(): Backend {
         staff: staff.name, staffId: staff.id, shiftId: openShift?.id ?? null,
         subtotal: totals.subtotal, discountPct: totals.discountPct,
         discountAmount: totals.discountAmount, vatAmount: 0, chargesAmount: 0,
-        total: totals.total, paymentMethod: input.paymentMethod,
+        total: payable, paymentMethod: input.paymentMethod,
         cashReceived: input.paymentMethod === "cash" ? input.cashReceived ?? null : null,
         changeGiven: change, paymentRef: input.paymentRef ?? null,
         status: "completed",
@@ -642,12 +744,32 @@ export function createDemoBackend(): Backend {
         id: saleId, invoiceNo, createdAt,
         staffName: staff.name, shopName: staff.shopName, shopAddress: branch.address,
         branchName: branch.name, branchAddress: branch.address, branchPhone: branch.phone,
-        subtotal: totals.subtotal, discountPct: totals.discountPct, discountAmount: totals.discountAmount, total: totals.total,
+        subtotal: totals.subtotal, discountPct: totals.discountPct,
+        discountAmount: totals.discountAmount, total: payable,
         paymentMethod: input.paymentMethod,
         cashReceived: input.paymentMethod === "cash" ? input.cashReceived : null,
         changeGiven: change, paymentRef: input.paymentRef, customerPhone: input.customerPhone,
         paidAmount: paidNow, dueAmount: onDue,
         customerOwes: customer ? dueFor(customer.id) : null,
+        cardCharge, emiCharge, exchangeValue,
+        emiMonths: x.emi?.months ?? null,
+        emiBank: x.emi?.bank ?? null,
+        cardType: (cardType?.name as string | undefined) ?? null,
+        cardLast4: x.card?.last4 ?? null,
+        attention: x.attention ?? null,
+        customerBin: x.customerBin ?? null,
+        narration: x.narration ?? null,
+        soldBy: x.soldBy
+          ? team.find((m) => m.id === x.soldBy)?.name ?? staff.name
+          : staff.name,
+        extraFields: x.extraFields ?? null,
+        exchange: exchangeValue > 0 || x.exchange?.description
+          ? { description: x.exchange!.description, serial: x.exchange!.serial ?? null,
+              value: exchangeValue }
+          : null,
+        payments: splits.map((sp) => ({
+          method: sp.method, amount: sp.amount, reference: sp.reference ?? null,
+        })),
         vatAmount: 0, chargesAmount: 0, charges: [],
         receiptFooter: shopDetails.receiptFooter, binVat: shopDetails.binVat,
         priceListName: priceLists.find((l) => l.id === listId)?.name ?? null,
@@ -779,6 +901,8 @@ export function createDemoBackend(): Backend {
           ? Number(values.sale_approval_limit) || 0 : shopDetails.saleApprovalLimit,
         approveAllSales: values.approve_all_sales !== undefined
           ? Boolean(values.approve_all_sales) : shopDetails.approveAllSales,
+        cardChargeMode: values.card_charge_mode !== undefined
+          ? (values.card_charge_mode as "absorb" | "add") : shopDetails.cardChargeMode,
       });
       staff.shopName = shopDetails.name;
     },
@@ -1477,6 +1601,74 @@ export function createDemoBackend(): Backend {
       }
       fail("CUSTOMER_NOT_FOUND");
       return { name: "", amount: 0, asOf };
+    },
+
+    // --- The full counter (P10a) ---
+
+    async priceHelp(productId, branchId, customerId): Promise<PriceHelp> {
+      branchOr404(branchId);
+      const p = catalogue.find((x) => x.id === productId);
+      if (!p) fail("PRODUCT_NOT_FOUND");
+      const allowed = emiCategories.has(p!.categoryId ?? "");
+      const lineFor = (s: DemoSale) => s.items.find((i) => i.productId === productId);
+      const mine = sales
+        .filter((s) => s.status === "completed" && lineFor(s))
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      const theirs = customerId
+        ? mine.filter((s) => s.customerId === customerId) : [];
+      return {
+        productId,
+        lastPriceToCustomer: theirs[0] ? lineFor(theirs[0])!.unitPrice : null,
+        lastPriceToCustomerOn: theirs[0] ? theirs[0].createdAt.slice(0, 10) : null,
+        lastPrice: mine[0] ? lineFor(mine[0])!.unitPrice : null,
+        here: productsAt(branchId).find((x) => x.id === productId)?.stock ?? 0,
+        // Where else it is, so "we haven't got one" can become "the other branch has two".
+        elsewhere: branches
+          .filter((b) => b.id !== branchId && b.active)
+          .map((b) => ({
+            branch: b.name,
+            qty: productsAt(b.id).find((x) => x.id === productId)?.stock ?? 0,
+          }))
+          .filter((x) => x.qty > 0),
+        emiAllowed: allowed,
+        emiPlans: allowed ? structuredClone(emiPlans.filter((e) => e.active)) : [],
+      };
+    },
+
+    async listEmiPlans() { return structuredClone(emiPlans); },
+
+    async saveEmiPlan(id, values) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:edit_settings");
+      if (!id && !String(values.bank ?? "").trim()) fail("EMI_BANK_REQUIRED");
+      if (id) {
+        const e = emiPlans.find((x) => x.id === id);
+        if (!e) fail("EMI_PLAN_NOT_FOUND");
+        Object.assign(e!, {
+          bank: String(values.bank ?? "").trim() || e!.bank,
+          months: Number(values.months) || e!.months,
+          chargePct: values.charge_pct !== undefined ? Number(values.charge_pct) || 0 : e!.chargePct,
+          minAmount: values.min_amount !== undefined ? Number(values.min_amount) || 0 : e!.minAmount,
+          active: "active" in values ? Boolean(values.active) : e!.active,
+        });
+        return;
+      }
+      emiPlans.push({
+        id: crypto.randomUUID(), bank: String(values.bank).trim(),
+        months: Number(values.months) || 12,
+        chargePct: Number(values.charge_pct) || 0,
+        minAmount: Number(values.min_amount) || 0,
+        active: true,
+      });
+    },
+
+    async listSaleFields(): Promise<SaleField[]> {
+      // One source: the setup list the owner edits in Settings, not a second copy.
+      return lists.sale_fields
+        .filter((f) => f.active !== false)
+        .map((f) => ({
+          id: f.id, name: String(f.name),
+          showOnInvoice: Boolean(f.show_on_invoice), active: true,
+        }));
     },
 
     // --- Credit sales and customers (P10) ---

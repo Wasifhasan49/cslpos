@@ -88,6 +88,12 @@ export interface CheckoutState {
   paymentRef: string;
   /** How much is going on the customer's slate instead of being paid now (P10). */
   dueAmount?: string;
+  /** What the card charge, the EMI charge and an exchange do to the total (P10a). */
+  extraCharges?: number;
+  exchangeValue?: number;
+  /** The card's last four digits, when they were typed into the card panel rather than
+   *  the payment reference box. One field, not two. */
+  cardLast4?: string | null;
   /** What the counter knows about the buyer, for the credit rules. */
   customer?: {
     name: string | null; creditAllowed?: boolean; creditLimit?: number;
@@ -123,7 +129,8 @@ export function saleBlocker(s: CheckoutState): string | null {
 
   // What goes on the slate, and what is therefore being handed over now (P10). The
   // database checks all of this again; this is so the counter says it first.
-  const onDue = Math.min(Math.max(Number(s.dueAmount ?? 0) || 0, 0), totals.total);
+  const payable = totals.total + (s.extraCharges ?? 0) - (s.exchangeValue ?? 0);
+  const onDue = Math.min(Math.max(Number(s.dueAmount ?? 0) || 0, 0), payable);
   if (onDue > 0) {
     if (!s.customer) return "Selling on due needs the customer's mobile number";
     if (s.customer.creditAllowed === false) {
@@ -134,17 +141,18 @@ export function saleBlocker(s: CheckoutState): string | null {
       return `Only ${formatTaka(left)} of their credit limit is left — a manager has to approve the rest`;
     }
   }
-  const payingNow = totals.total - onDue;
+  const payingNow = payable - onDue;
 
   if (payingNow > 0) {
     if (s.method === "cash") {
       const received = parseFloat(s.cashReceived);
       if (Number.isNaN(received) || received < payingNow)
         return `Enter the cash received (at least ${formatTaka(payingNow)})`;
+    } else if (s.method === "card") {
+      const digits = (s.cardLast4 ?? s.paymentRef).trim();
+      if (digits.length < 4) return "Enter the last 4 digits of the card";
     } else if (s.paymentRef.trim().length < 4) {
-      return s.method === "card"
-        ? "Enter the last 4 digits of the card"
-        : `Enter the ${s.method === "bkash" ? "bKash" : "Nagad"} transaction ID`;
+      return `Enter the ${s.method === "bkash" ? "bKash" : "Nagad"} transaction ID`;
     }
   }
   return null;
@@ -250,6 +258,9 @@ export const SALE_ERROR_CODES = [
   "NOT_AWAITING_APPROVAL",
   "GROUP_NAME_REQUIRED", "GROUP_NOT_FOUND", "DUE_MORE_THAN_TOTAL", "DUE_NEEDS_CUSTOMER",
   "CUSTOMER_HAS_NO_CREDIT", "OVER_CREDIT_LIMIT",
+  "EMI_BANK_REQUIRED", "EMI_PLAN_NOT_FOUND", "UNKNOWN_SALE_FIELD", "CARD_TYPE_NOT_FOUND",
+  "NO_EMI_PLAN", "EMI_BELOW_MINIMUM", "EMI_NOT_ALLOWED", "EXCHANGE_NEEDS_DESCRIPTION",
+  "EXCHANGE_OVER_TOTAL", "SPLIT_DOES_NOT_ADD_UP", "EXCHANGE_NEEDS_PRODUCT",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -476,6 +487,25 @@ export function friendlyError(raw: string): string {
       return detail != null && detail !== ""
         ? `That would take them over their credit limit — only ${detail} of it is left. A manager can approve it.`
         : "That would take them over their credit limit. A manager can approve it.";
+    case "EMI_BANK_REQUIRED": return "Say which bank runs this EMI plan.";
+    case "EMI_PLAN_NOT_FOUND": return "That EMI plan no longer exists. Reload and try again.";
+    case "UNKNOWN_SALE_FIELD":
+      return `"${detail ?? "That field"}" isn't one of this shop's extra fields. The owner adds them in Settings.`;
+    case "CARD_TYPE_NOT_FOUND": return "Pick which card was used.";
+    case "NO_EMI_PLAN":
+      return `No bank here runs ${detail ?? "that"}-month EMI. Pick a tenure from the list.`;
+    case "EMI_BELOW_MINIMUM":
+      return `The bank won't run EMI below ${detail ?? "its minimum"}. Take it as a normal card payment.`;
+    case "EMI_NOT_ALLOWED":
+      return `${detail ?? "This item"} can't go on EMI. The owner allows it per product or category.`;
+    case "EXCHANGE_NEEDS_DESCRIPTION":
+      return "Say what is being taken in exchange. A value with nothing attached can't be checked later.";
+    case "EXCHANGE_OVER_TOTAL":
+      return `An exchange can't be worth more than the sale (${detail ?? "the total"}). Paying the difference out is a purchase, not a sale.`;
+    case "EXCHANGE_NEEDS_PRODUCT":
+      return "To put the old item on the shelf, say which product it is going in as.";
+    case "SPLIT_DOES_NOT_ADD_UP":
+      return `The split has to add up to ${detail ?? "what is being paid now"}.`;
     case "SERIAL_CHANGE_HAS_STOCK":
       return `${detail ?? "This product"} already has stock, so it can't switch between serial-tracked and not. Sell or write off the stock first.`;
     // Keep the raw text so a code we have not seen can still be reported and fixed,

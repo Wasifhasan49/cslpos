@@ -58,6 +58,24 @@ export function ReceiptDialog({ receipt, onNewSale }: { receipt: Receipt; onNewS
           {receipt.discountAmount > 0 && (
             <div className="flex justify-between"><span>Discount {receipt.discountPct}%</span><span className="num">− {formatTaka(receipt.discountAmount)}</span></div>
           )}
+          {(receipt.cardCharge ?? 0) > 0 && (
+            <div className="flex justify-between">
+              <span>Card charge{receipt.cardType && ` · ${receipt.cardType}`}</span>
+              <span className="num">{formatTaka(receipt.cardCharge ?? 0)}</span>
+            </div>
+          )}
+          {(receipt.emiCharge ?? 0) > 0 && (
+            <div className="flex justify-between">
+              <span>EMI charge · {receipt.emiBank}</span>
+              <span className="num">{formatTaka(receipt.emiCharge ?? 0)}</span>
+            </div>
+          )}
+          {(receipt.exchangeValue ?? 0) > 0 && (
+            <div className="flex justify-between">
+              <span>Taken in exchange</span>
+              <span className="num">− {formatTaka(receipt.exchangeValue ?? 0)}</span>
+            </div>
+          )}
           <div className="flex justify-between text-[17px] font-bold"><span>Total</span><span className="num">{formatTaka(receipt.total)}</span></div>
           {onDue > 0 && (
             <>
@@ -80,6 +98,45 @@ export function ReceiptDialog({ receipt, onNewSale }: { receipt: Receipt; onNewS
           ) : (
             <div className="flex justify-between text-ink-soft"><span>{method}</span><span className="num">{receipt.paymentRef}</span></div>
           ))}
+          {receipt.payments && receipt.payments.length > 1 && (
+            <div className="flex flex-col gap-0.5 text-xs text-muted">
+              {receipt.payments.map((x, i) => (
+                <span key={i}>
+                  {x.method}: <span className="num">{formatTaka(x.amount)}</span>
+                  {x.reference && ` · ${x.reference}`}
+                </span>
+              ))}
+            </div>
+          )}
+          {receipt.emiMonths != null && receipt.emiMonths > 0 && (
+            <div className="text-xs text-ink-soft">
+              <span className="num">{receipt.emiMonths}</span> month EMI with {receipt.emiBank}
+              {receipt.cardLast4 && ` · card ending ${receipt.cardLast4}`}
+            </div>
+          )}
+          {receipt.exchange && (
+            <div className="text-xs text-ink-soft">
+              Exchange: {receipt.exchange.description}
+              {receipt.exchange.serial && <span className="code"> {receipt.exchange.serial}</span>}
+            </div>
+          )}
+          {receipt.attention && (
+            <div className="text-xs text-muted">Attention: {receipt.attention}</div>
+          )}
+          {receipt.customerBin && (
+            <div className="code text-xs text-muted">BIN {receipt.customerBin}</div>
+          )}
+          {receipt.extraFields && Object.entries(receipt.extraFields)
+            .filter(([, v]) => v)
+            .map(([k, v]) => (
+              <div key={k} className="text-xs text-muted">{k}: {v}</div>
+            ))}
+          {receipt.narration && (
+            <div className="text-xs text-muted">{receipt.narration}</div>
+          )}
+          {receipt.soldBy && receipt.soldBy !== receipt.staffName && (
+            <div className="text-xs text-muted">Sold by {receipt.soldBy}</div>
+          )}
           {receipt.customerPhone && <div className="text-xs text-muted">Customer: <span className="num">{receipt.customerPhone}</span></div>}
           <p className="text-center text-xs text-muted">Keep this receipt for warranty claims.</p>
         </div>

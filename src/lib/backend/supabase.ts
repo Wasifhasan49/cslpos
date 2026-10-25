@@ -13,7 +13,7 @@ import type {
   CashReason, ShiftClosed, ShiftRow, ShiftState,
   ApprovalStatus, RefundMethod, ReturnResult, SaleDetail, SaleRow, SaleStatus,
   CustomerAging, CustomerGroup, CustomerRow, CustomerStatement, DueRow, PaymentReceipt,
-  StatementEntry,
+  StatementEntry, EmiPlan, PriceHelp, SaleField,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
@@ -201,6 +201,42 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         p_discount_type_id: input.discountTypeId ?? null,
         p_category_id: input.categoryId ?? null,
         p_due_amount: input.dueAmount ?? 0,
+        // Everything the advanced counter adds (P10a), snake_cased for the function.
+        p_extras: input.extras ? {
+          attention: input.extras.attention ?? null,
+          customer_address: input.extras.customerAddress ?? null,
+          customer_bin: input.extras.customerBin ?? null,
+          customer_nid: input.extras.customerNid ?? null,
+          narration: input.extras.narration ?? null,
+          sold_by: input.extras.soldBy ?? null,
+          extra_fields: input.extras.extraFields ?? null,
+          ...(input.extras.card ? {
+            card: {
+              type_id: input.extras.card.typeId ?? null,
+              bank: input.extras.card.bank ?? null,
+              pos_account_id: input.extras.card.posAccountId ?? null,
+              last4: input.extras.card.last4 ?? null,
+            },
+          } : {}),
+          ...(input.extras.emi ? {
+            emi: { months: input.extras.emi.months, bank: input.extras.emi.bank ?? null },
+          } : {}),
+          ...(input.extras.exchange ? {
+            exchange: {
+              description: input.extras.exchange.description,
+              serial: input.extras.exchange.serial ?? null,
+              value: input.extras.exchange.value,
+              product_id: input.extras.exchange.productId ?? null,
+              add_to_stock: input.extras.exchange.addToStock ?? false,
+            },
+          } : {}),
+          ...(input.extras.payments?.length ? {
+            payments: input.extras.payments.map((x) => ({
+              method: x.method, amount: x.amount,
+              reference: x.reference ?? null, account_id: x.accountId ?? null,
+            })),
+          } : {}),
+        } : null,
       });
       if (error) throw new Error(friendlyError(error.message));
       const r = data as Record<string, unknown>;
@@ -231,6 +267,22 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         paymentRef: (r.payment_ref as string | null) ?? null, customerPhone: (r.customer_phone as string | null) ?? null,
         paidAmount: num(r.paid_amount), dueAmount: num(r.due_amount),
         customerOwes: numOrNull(r.customer_owes),
+        cardCharge: num(r.card_charge), emiCharge: num(r.emi_charge),
+        exchangeValue: num(r.exchange_value),
+        emiMonths: numOrNull(r.emi_months),
+        emiBank: (r.emi_bank as string | null) ?? null,
+        cardType: (r.card_type as string | null) ?? null,
+        cardLast4: (r.card_last4 as string | null) ?? null,
+        attention: (r.attention as string | null) ?? null,
+        customerBin: (r.customer_bin as string | null) ?? null,
+        narration: (r.narration as string | null) ?? null,
+        soldBy: (r.sold_by as string | null) ?? null,
+        extraFields: (r.extra_fields as Record<string, string> | null) ?? null,
+        exchange: (r.exchange as Receipt["exchange"]) ?? null,
+        payments: ((r.payments as Record<string, unknown>[] | null) ?? []).map((x) => ({
+          method: String(x.method), amount: num(x.amount),
+          reference: (x.reference as string | null) ?? null,
+        })),
         items,
       };
     },
@@ -338,10 +390,10 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
       const TABLES: SettingTable[] = [
         "units", "vat_rates", "hs_codes", "extra_charges", "discount_types",
         "payment_methods", "card_types", "bank_accounts", "warranty_terms",
-        "transaction_categories",
+        "transaction_categories", "sale_fields",
       ];
       const [shopRes, featRes, keysRes, roleRes, staffPermRes, docRes, ...listRes] = await Promise.all([
-        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct, po_approval_limit, cash_short_limit, return_days, sale_approval_limit, approve_all_sales").limit(1).maybeSingle(),
+        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct, po_approval_limit, cash_short_limit, return_days, sale_approval_limit, approve_all_sales, card_charge_mode").limit(1).maybeSingle(),
         sb.from("shop_features").select("feature, enabled"),
         sb.from("permission_keys").select("key, label, area, has_limit").order("sort"),
         sb.from("role_permissions").select("role, perm, allowed, num_limit"),
@@ -367,6 +419,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
           returnDays: num(shop.return_days),
           saleApprovalLimit: num(shop.sale_approval_limit),
           approveAllSales: Boolean(shop.approve_all_sales),
+          cardChargeMode: (shop.card_charge_mode ?? "absorb") as "absorb" | "add",
         },
         features: Object.fromEntries((featRes.data ?? []).map((r) => [r.feature, r.enabled])),
         lists,
@@ -939,6 +992,66 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         supplier: String(r.supplier), amount: num(r.amount), balance: num(r.balance),
         aging: readAging(r.aging),
       };
+    },
+
+    // --- The full counter (P10a) ---
+
+    async priceHelp(productId, branchId, customerId): Promise<PriceHelp> {
+      const { data, error } = await sb.rpc("price_help", {
+        p_product_id: productId, p_branch_id: branchId, p_customer_id: customerId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const d = (data ?? {}) as Record<string, unknown>;
+      return {
+        productId: String(d.product_id),
+        lastPriceToCustomer: numOrNull(d.last_price_to_customer),
+        lastPriceToCustomerOn: (d.last_price_to_customer_on as string | null) ?? null,
+        lastPrice: numOrNull(d.last_price),
+        here: num(d.here),
+        elsewhere: ((d.elsewhere as Record<string, unknown>[] | null) ?? []).map((e) => ({
+          branch: String(e.branch), qty: num(e.qty),
+        })),
+        emiAllowed: Boolean(d.emi_allowed),
+        emiPlans: ((d.emi_plans as Record<string, unknown>[] | null) ?? []).map((e) => ({
+          id: String(e.id), bank: String(e.bank), months: num(e.months),
+          chargePct: num(e.charge_pct), minAmount: num(e.min_amount), active: true,
+        })),
+      };
+    },
+
+    async listEmiPlans(): Promise<EmiPlan[]> {
+      const { data, error } = await sb
+        .from("emi_plans")
+        .select("id, bank, months, charge_pct, min_amount, active")
+        .order("bank").order("months");
+      if (error) throw loadError("the EMI plans", error);
+      type Row = {
+        id: string; bank: string; months: number; charge_pct: number | string;
+        min_amount: number | string; active: boolean;
+      };
+      return ((data ?? []) as Row[]).map((e) => ({
+        id: e.id, bank: e.bank, months: e.months, chargePct: num(e.charge_pct),
+        minAmount: num(e.min_amount), active: e.active,
+      }));
+    },
+
+    async saveEmiPlan(id, values): Promise<void> {
+      const { error } = await sb.rpc("save_emi_plan", { p_id: id, p_values: values });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async listSaleFields(): Promise<SaleField[]> {
+      const { data, error } = await sb
+        .from("sale_fields")
+        .select("id, name, show_on_invoice, active")
+        .order("sort").order("name");
+      if (error) throw loadError("the extra fields", error);
+      type Row = { id: string; name: string; show_on_invoice: boolean; active: boolean };
+      return ((data ?? []) as Row[])
+        .filter((f) => f.active)
+        .map((f) => ({
+          id: f.id, name: f.name, showOnInvoice: f.show_on_invoice, active: f.active,
+        }));
     },
 
     // --- Credit sales and customers (P10) ---

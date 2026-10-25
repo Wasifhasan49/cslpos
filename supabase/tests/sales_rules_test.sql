@@ -2819,5 +2819,271 @@ select pg_temp.check(
   public.customer_due((select v from pg_temp.p10 where k='cust')) > 0,
   'a cashier can see what the customer in front of them owes');
 
+-- ===========================================================================
+-- 22. THE FULL COUNTER (P10a)
+-- ===========================================================================
+-- The done-when: a simple cash sale still works untouched, AND a 72,000 laptop
+-- goes out on 12-month EMI by card with the bank charge added, an old laptop
+-- taken in exchange for 15,000, with Attention and BIN filled in.
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+create table pg_temp.p10a (k text primary key, v uuid);
+
+-- ---- The simple sale is untouched ----
+-- Everything new is optional, so the four-argument call still works exactly as before.
+select pg_temp.check(
+  (public.complete_sale(:'BRANCH_A',
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]',
+    'cash', 0, null, null, 500)->>'total')::numeric = 500,
+  'the simple cash sale still goes through with nothing extra said');
+
+-- ---- The shop sets up EMI and its own extra fields ----
+select pg_temp.check(
+  (public.save_emi_plan(null, '{"bank":"City Bank","months":12,"charge_pct":4,"min_amount":10000}')
+   ->>'months')::int = 12,
+  'the owner types in the bank''s 12-month EMI plan');
+select public.save_emi_plan(null, '{"bank":"City Bank","months":24,"charge_pct":8,"min_amount":25000}');
+select pg_temp.expect_error($q$select public.save_emi_plan(null, '{"months": 6}')$q$, 'EMI_BANK_REQUIRED');
+select public.save_setting_row('sale_fields', null, '{"name":"PO number","show_on_invoice":true}');
+select public.save_setting_row('card_types', null, '{"name":"Visa Platinum","charge_pct":2.5}');
+
+-- EMI is off until the owner allows it, per product or per category.
+select pg_temp.check(
+  public.emi_allowed('00000000-0000-4000-8000-0000000000aa') = false,
+  'EMI is off on every product until the owner says otherwise');
+select public.save_setting_row('card_types', (select id from public.card_types where name = 'Visa Platinum'), '{"charge_pct":2.5}');
+
+-- ---- A 72,000 laptop on EMI, by card, with an exchange ----
+select public.save_shop_details('{"card_charge_mode": "add"}');
+do $$
+declare r jsonb; ser uuid; cat uuid;
+begin
+  -- Allow EMI on the Laptops category, which is how a shop would actually do it.
+  select category_id into cat from public.products
+    where id = '00000000-0000-4000-8000-0000000000aa';
+  update public.categories set emi_allowed = true where id = cat;
+
+  perform public.receive_goods('00000000-0000-4000-8000-0000000000b1'::uuid,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000aa","qty":1,"unit_cost":66000,
+       "serials":["P10ALAPTOP001"]}]');
+  select id into ser from public.serials where serial = 'P10ALAPTOP001';
+
+  r := public.complete_sale(
+    '00000000-0000-4000-8000-0000000000b1'::uuid,
+    jsonb_build_array(jsonb_build_object(
+      'product_id', '00000000-0000-4000-8000-0000000000aa', 'qty', 1,
+      'serial_ids', jsonb_build_array(ser))),
+    'card', 0, null, '01911000777', null, '4119',
+    p_extras => jsonb_build_object(
+      'attention', 'Mr Faruk, Accounts',
+      'customer_bin', '004123456-0101',
+      'customer_address', 'Motijheel, Dhaka',
+      'narration', 'Laptop for the new accountant',
+      'extra_fields', jsonb_build_object('PO number', 'PO-4471'),
+      'card', jsonb_build_object(
+        'type_id', (select id from public.card_types where name = 'Visa Platinum'),
+        'bank', 'City Bank', 'last4', '4119'),
+      'emi', jsonb_build_object('months', 12, 'bank', 'City Bank'),
+      'exchange', jsonb_build_object(
+        'description', 'Old HP Pavilion, 2019, working', 'serial', 'OLDHP2019X',
+        'value', 15000)));
+  insert into pg_temp.p10a values ('sale', (r->>'id')::uuid);
+
+  -- 72,000 + 2.5% card (1,800) + 4% EMI (2,880) = 76,680, less 15,000 exchange = 61,680.
+  if (r->>'card_charge')::numeric <> 1800 then raise exception 'WRONG CARD CHARGE: %', r->>'card_charge'; end if;
+  if (r->>'emi_charge')::numeric <> 2880 then raise exception 'WRONG EMI CHARGE: %', r->>'emi_charge'; end if;
+  if (r->>'exchange_value')::numeric <> 15000 then raise exception 'WRONG EXCHANGE: %', r->>'exchange_value'; end if;
+  if (r->>'total')::numeric <> 61680 then raise exception 'WRONG TOTAL: %', r->>'total'; end if;
+  if (r->>'attention') <> 'Mr Faruk, Accounts' then raise exception 'ATTENTION LOST: %', r; end if;
+  if (r->>'customer_bin') <> '004123456-0101' then raise exception 'BIN LOST: %', r; end if;
+  if (r->'extra_fields'->>'PO number') <> 'PO-4471' then raise exception 'PO NUMBER LOST: %', r->'extra_fields'; end if;
+  if (r->>'emi_months')::int <> 12 then raise exception 'EMI MONTHS LOST: %', r; end if;
+  raise notice 'ok: 72,000 laptop, +1,800 card, +2,880 EMI, −15,000 exchange = 61,680';
+end $$;
+select pg_temp.check(
+  (select attention from public.sales where id = (select v from pg_temp.p10a where k='sale'))
+    = 'Mr Faruk, Accounts',
+  'the sale itself carries who it is addressed to');
+select pg_temp.check(
+  (select card_last4 from public.sales where id = (select v from pg_temp.p10a where k='sale')) = '4119',
+  'and the last four digits of the card');
+select pg_temp.check(
+  (select description from public.sale_exchanges
+   where sale_id = (select v from pg_temp.p10a where k='sale')) = 'Old HP Pavilion, 2019, working',
+  'and the old laptop that was taken in, described');
+select pg_temp.check(
+  (select sold_by from public.sales where id = (select v from pg_temp.p10a where k='sale'))
+    = (select id from public.staff where name = 'Owner'),
+  'and who sold it, which defaults to whoever rang it up');
+
+-- ---- The rules the screen must not be able to talk its way past ----
+-- A bank will not run EMI on a 500-taka adapter, and the plan says so.
+select pg_temp.expect_error(
+  format($q$select public.complete_sale('%s',
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]',
+    'card', 0, null, null, null, '4119',
+    p_extras => '{"emi": {"months": 12, "bank": "City Bank"}}')$q$, :'BRANCH_A'),
+  'EMI_BELOW_MINIMUM');
+-- And over the minimum it is still refused on a product the owner has not allowed.
+do $$
+begin
+  perform public.receive_goods('00000000-0000-4000-8000-0000000000b1'::uuid,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":40,"unit_cost":300}]');
+end $$;
+select pg_temp.expect_error(
+  format($q$select public.complete_sale('%s',
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":30}]',
+    'card', 0, null, null, null, '4119',
+    p_extras => '{"emi": {"months": 12, "bank": "City Bank"}}')$q$, :'BRANCH_A'),
+  'EMI_NOT_ALLOWED');
+-- A tenure the bank does not run. Cables are allowed on EMI from here on, so the only
+-- thing left to refuse is the tenure itself.
+do $$
+declare cat uuid;
+begin
+  select category_id into cat from public.products
+    where id = '00000000-0000-4000-8000-0000000000a1';
+  update public.categories set emi_allowed = true where id = cat;
+end $$;
+select pg_temp.expect_error(
+  format($q$select public.complete_sale('%s',
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":30}]',
+    'card', 0, null, null, null, '4119',
+    p_extras => '{"emi": {"months": 9, "bank": "City Bank"}}')$q$, :'BRANCH_A'),
+  'NO_EMI_PLAN');
+-- An extra field the shop never defined.
+select pg_temp.expect_error(
+  format($q$select public.complete_sale('%s',
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]',
+    'cash', 0, null, null, 500,
+    p_extras => '{"extra_fields": {"Invented Field": "x"}}')$q$, :'BRANCH_A'),
+  'UNKNOWN_SALE_FIELD');
+-- An exchange worth more than the sale is a purchase in disguise.
+select pg_temp.expect_error(
+  format($q$select public.complete_sale('%s',
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]',
+    'cash', 0, null, null, 500,
+    p_extras => '{"exchange": {"description": "Old laptop", "value": 50000}}')$q$, :'BRANCH_A'),
+  'EXCHANGE_OVER_TOTAL');
+-- An exchange with no description is a number nobody can check.
+select pg_temp.expect_error(
+  format($q$select public.complete_sale('%s',
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]',
+    'cash', 0, null, null, 500,
+    p_extras => '{"exchange": {"value": 100}}')$q$, :'BRANCH_A'),
+  'EXCHANGE_NEEDS_DESCRIPTION');
+-- A split that does not add up leaves the drawer wrong at closing time.
+select pg_temp.expect_error(
+  format($q$select public.complete_sale('%s',
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]',
+    'cash', 0, null, null, 500,
+    p_extras => '{"payments": [{"method": "cash", "amount": 300}]}')$q$, :'BRANCH_A'),
+  'SPLIT_DOES_NOT_ADD_UP');
+
+-- ---- Split payment across methods ----
+select public.set_prices('00000000-0000-4000-8000-0000000000a6',
+  (select id from public.price_lists where shop_id = :'SHOP' and is_default), 1200);
+do $$
+declare r jsonb;
+begin
+  -- A 1,200 cooling pad: 700 cash, 500 by bKash.
+  perform public.receive_goods('00000000-0000-4000-8000-0000000000b1'::uuid,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a6","qty":1,"unit_cost":900}]');
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1'::uuid,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a6","qty":1}]',
+    'cash', 0, null, null, 700,
+    p_extras => jsonb_build_object('payments', jsonb_build_array(
+      jsonb_build_object('method', 'cash', 'amount', 700),
+      jsonb_build_object('method', 'bkash', 'amount', 500, 'reference', 'TRX99001'))));
+  if (r->>'change_given')::numeric <> 0 then raise exception 'CHANGE ON AN EXACT SPLIT: %', r; end if;
+  if jsonb_array_length(r->'payments') <> 2 then raise exception 'SPLIT NOT RECORDED: %', r->'payments'; end if;
+  raise notice 'ok: 1,200 paid as 700 cash and 500 bKash, both recorded';
+end $$;
+select pg_temp.check(
+  (select sum(amount) from public.sale_payments
+   where sale_id = (select id from public.sales order by created_at desc limit 1)) = 1200,
+  'and the two parts add up to what was paid');
+
+-- ---- An exchange can go back on the shelf as a used unit ----
+do $$
+declare r jsonb; before_qty integer;
+begin
+  select coalesce(sum(qty), 0) into before_qty from public.branch_stock
+    where product_id = '00000000-0000-4000-8000-0000000000a9'
+      and branch_id = '00000000-0000-4000-8000-0000000000b1';
+  perform public.receive_goods('00000000-0000-4000-8000-0000000000b1'::uuid,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1,"unit_cost":500}]');
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1'::uuid,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1}]',
+    'cash', 0, null, null, 1000,
+    p_extras => jsonb_build_object('exchange', jsonb_build_object(
+      'description', 'Used TP-Link router, works', 'serial', 'USEDROUTER01',
+      'value', 300, 'product_id', '00000000-0000-4000-8000-0000000000a9',
+      'add_to_stock', true)));
+  if (select coalesce(sum(qty), 0) from public.branch_stock
+      where product_id = '00000000-0000-4000-8000-0000000000a9'
+        and branch_id = '00000000-0000-4000-8000-0000000000b1') <> before_qty + 1 then
+    raise exception 'THE USED ROUTER DID NOT REACH THE SHELF';
+  end if;
+  raise notice 'ok: the old router went on the shelf as a used unit with its serial';
+end $$;
+select pg_temp.check(
+  (select status from public.serials where serial = 'USEDROUTER01') = 'in_stock',
+  'and its serial is sellable');
+select pg_temp.check(
+  (select count(*) from public.stock_movements
+   where note like '%taken in exchange') = 1,
+  'and the stock movement says where it came from');
+
+-- ---- Price help, without handing over the shop's cost ----
+do $$
+declare h jsonb;
+begin
+  h := public.price_help('00000000-0000-4000-8000-0000000000a1',
+        '00000000-0000-4000-8000-0000000000b1',
+        (select id from public.customers where phone = '01911000777'));
+  if (h->>'last_price') is null then raise exception 'NO LAST PRICE: %', h; end if;
+  if not (h ? 'here') then raise exception 'NO STOCK FIGURE: %', h; end if;
+  if h ? 'cost' then raise exception 'PRICE HELP LEAKED THE COST: %', h; end if;
+  raise notice 'ok: the counter can see the last price and the stock, and not the cost';
+end $$;
+select pg_temp.check(
+  (public.price_help('00000000-0000-4000-8000-0000000000aa', :'BRANCH_A')->>'emi_allowed')::boolean,
+  'and that this laptop can go on EMI');
+select pg_temp.check(
+  jsonb_array_length(public.price_help('00000000-0000-4000-8000-0000000000aa', :'BRANCH_A')->'emi_plans') = 2,
+  'with the two plans the bank runs');
+select pg_temp.check(
+  jsonb_array_length(public.price_help('00000000-0000-4000-8000-0000000000ab', :'BRANCH_A')->'emi_plans') = 0,
+  'and no plans at all on something EMI is not allowed on');
+
+-- ---- The shop decides who pays the card company ----
+select public.save_shop_details('{"card_charge_mode": "absorb"}');
+do $$
+declare r jsonb;
+begin
+  perform public.receive_goods('00000000-0000-4000-8000-0000000000b1'::uuid,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1,"unit_cost":500}]');
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1'::uuid,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1}]',
+    'card', 0, null, null, null, '4119',
+    p_extras => jsonb_build_object('card', jsonb_build_object(
+      'type_id', (select id from public.card_types where name = 'Visa Platinum'),
+      'last4', '4119')));
+  if (r->>'card_charge')::numeric <> 0 then
+    raise exception 'THE SHOP ABSORBS THE CHARGE, SO THE CUSTOMER MUST NOT PAY IT: %', r;
+  end if;
+  if (r->>'total')::numeric <> 850 then raise exception 'WRONG TOTAL: %', r; end if;
+  raise notice 'ok: with the charge absorbed, the customer pays the shelf price';
+end $$;
+
+-- ---- Who may do what ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.expect_error($q$select public.save_emi_plan(null, '{"bank":"X","months":3}')$q$, 'NOT_ALLOWED:edit_settings');
+-- A cashier can use the price help: it exists so they can sell without guessing.
+select pg_temp.check(
+  public.price_help('00000000-0000-4000-8000-0000000000a1', :'BRANCH_A') ? 'here',
+  'a cashier can see the price help, because that is who it is for');
+
 reset role;
 \echo ALL DATABASE CHECKS PASSED

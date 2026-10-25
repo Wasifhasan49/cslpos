@@ -10,10 +10,13 @@ import {
   DOC_TYPE_LABELS, FEATURE_SWITCHES, MANAGER_SHARES, PERMISSION_AREA_LABELS,
   SETTING_LISTS, type FieldSpec, type ListSpec,
 } from "@/lib/settings-schema";
-import type { Role, SettingRow, SettingsBundle, StaffMember } from "@/lib/types";
+import { formatTaka } from "@/lib/sale";
+import type {
+  EmiPlan, Role, SettingRow, SettingsBundle, StaffMember,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type SectionKey = "shop" | "features" | "lists" | "permissions" | "documents";
+type SectionKey = "shop" | "features" | "lists" | "permissions" | "documents" | "emi";
 
 const SECTIONS: { key: SectionKey; label: string }[] = [
   { key: "shop", label: "Shop" },
@@ -21,6 +24,7 @@ const SECTIONS: { key: SectionKey; label: string }[] = [
   { key: "features", label: "Features" },
   { key: "permissions", label: "Who can do what" },
   { key: "documents", label: "Document numbers" },
+  { key: "emi", label: "EMI plans" },
 ];
 
 export function SettingsScreen() {
@@ -118,7 +122,167 @@ export function SettingsScreen() {
         <PermissionsSection bundle={bundle} team={team} busy={busy} readOnly={readOnly} run={run} />
       )}
       {section === "documents" && <DocumentsSection bundle={bundle} busy={busy} readOnly={readOnly} run={run} />}
+      {section === "emi" && <EmiSection busy={busy} readOnly={readOnly} run={run} />}
     </Shell>
+  );
+}
+
+/**
+ * The bank's own EMI rules. These come from the bank, so the owner types them in rather
+ * than the software guessing: 12 months at 4%, nothing under 10,000.
+ */
+function EmiSection({
+  busy, readOnly, run,
+}: {
+  busy: boolean;
+  readOnly: boolean;
+  run: (fn: () => Promise<void>, reloadShell?: boolean) => Promise<void>;
+}) {
+  const { backend } = useStaff();
+  const [plans, setPlans] = React.useState<EmiPlan[] | null>(null);
+  const [adding, setAdding] = React.useState(false);
+  const [editing, setEditing] = React.useState<EmiPlan | null>(null);
+  const [nonce, setNonce] = React.useState(0);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    backend.listEmiPlans()
+      .then((p) => { if (!cancelled) setPlans(p); })
+      .catch(() => { if (!cancelled) setPlans([]); });
+    return () => { cancelled = true; };
+  }, [backend, nonce]);
+
+  const save = async (id: string | null, values: Record<string, unknown>) => {
+    await run(() => backend.saveEmiPlan(id, values));
+    setNonce((n) => n + 1);
+    setAdding(false);
+    setEditing(null);
+  };
+
+  if (!plans) return <p className="text-muted">Loading…</p>;
+
+  const form = (plan: EmiPlan | null) => (
+    <EmiForm plan={plan} busy={busy} onCancel={() => { setAdding(false); setEditing(null); }}
+      onSave={(values) => save(plan?.id ?? null, values)} />
+  );
+
+  return (
+    <section className="flex flex-col gap-3">
+      <p className="text-[13px] text-muted">
+        What each bank charges for each tenure, and the smallest sale it will finance.
+        Until a plan is here, the counter offers no EMI at all — and EMI is also allowed
+        per product or category, on the Products screen.
+      </p>
+
+      {!readOnly && !adding && (
+        <Button className="self-start" onClick={() => { setAdding(true); setEditing(null); }}>
+          <Plus className="size-4" aria-hidden /> Add a plan
+        </Button>
+      )}
+      {adding && form(null)}
+
+      {plans.length === 0 && !adding && (
+        <p className="rounded-xl border border-dashed border-line-strong bg-subtle p-6 text-center text-muted">
+          No EMI plans yet.
+        </p>
+      )}
+
+      <ul className="flex flex-col gap-1.5">
+        {plans.map((p) => (
+          <li key={p.id}>
+            {editing?.id === p.id ? form(p) : (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-line bg-surface px-3 py-2.5">
+                <span className="flex min-w-[160px] flex-1 flex-col">
+                  <span className="font-semibold">
+                    {p.bank} · <span className="num">{p.months}</span> months
+                    {!p.active && <span className="ml-2 text-[13px] font-normal text-warn-ink">turned off</span>}
+                  </span>
+                  <span className="text-[13px] text-muted">
+                    <span className="num">{p.chargePct}%</span> charge
+                    {p.minAmount > 0 && <> · nothing under <span className="num">{formatTaka(p.minAmount)}</span></>}
+                  </span>
+                </span>
+                {!readOnly && (
+                  <Button variant="ghost" size="sm" onClick={() => { setEditing(p); setAdding(false); }}>
+                    Change
+                  </Button>
+                )}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function EmiForm({
+  plan, busy, onSave, onCancel,
+}: {
+  plan: EmiPlan | null;
+  busy: boolean;
+  onSave: (values: Record<string, unknown>) => void;
+  onCancel: () => void;
+}) {
+  const [f, setF] = React.useState({
+    bank: plan?.bank ?? "",
+    months: String(plan?.months ?? 12),
+    charge_pct: String(plan?.chargePct ?? 0),
+    min_amount: String(plan?.minAmount ?? 0),
+    active: plan?.active ?? true,
+  });
+
+  return (
+    <form
+      className="flex flex-wrap items-end gap-3 rounded-xl border-2 border-brand bg-surface p-4"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSave({
+          bank: f.bank.trim(),
+          months: Number(f.months) || 12,
+          charge_pct: Number(f.charge_pct) || 0,
+          min_amount: Number(f.min_amount) || 0,
+          active: f.active,
+        });
+      }}
+    >
+      <div className="flex-[2_1_180px]">
+        <Field label="Bank" required>
+          <Input value={f.bank} onChange={(e) => setF({ ...f, bank: e.target.value })} required />
+        </Field>
+      </div>
+      <div className="w-28">
+        <Field label="Months">
+          <Input
+            inputMode="numeric" value={f.months}
+            onChange={(e) => setF({ ...f, months: e.target.value.replace(/\D/g, "") })}
+            className="num"
+          />
+        </Field>
+      </div>
+      <div className="w-28">
+        <Field label="Charge %">
+          <Input
+            inputMode="decimal" value={f.charge_pct}
+            onChange={(e) => setF({ ...f, charge_pct: e.target.value.replace(/[^0-9.]/g, "") })}
+            className="num"
+          />
+        </Field>
+      </div>
+      <div className="w-36">
+        <Field label="Smallest sale">
+          <Input
+            inputMode="numeric" value={f.min_amount}
+            onChange={(e) => setF({ ...f, min_amount: e.target.value.replace(/\D/g, "") })}
+            className="num"
+          />
+        </Field>
+      </div>
+      <Button type="submit" disabled={busy || !f.bank.trim()}>
+        {busy ? "Saving…" : plan ? "Save" : "Add plan"}
+      </Button>
+      <Button type="button" variant="outline" onClick={onCancel} disabled={busy}>Cancel</Button>
+    </form>
   );
 }
 

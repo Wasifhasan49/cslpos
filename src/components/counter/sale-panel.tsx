@@ -6,8 +6,12 @@ import { Minus, Plus, ScanBarcode, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { PAYMENT_METHODS, formatTaka, quickCashAmounts, warrantyLabel, type Totals } from "@/lib/sale";
+import { MoreOptions } from "./more-options";
+import { expandSerialRange, parseSerialList } from "@/lib/serials";
 import { useSale } from "@/lib/store/sale-store";
-import type { Approver, CustomerLookup, Product, Staff } from "@/lib/types";
+import type {
+  Approver, CustomerLookup, EmiPlan, Product, SaleField, SettingRow, Staff, StaffMember,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -29,6 +33,15 @@ interface Props {
   approvedBy: string | null;
   /** Whether the shop sells on due at all (the "Credit sales" feature switch, P10). */
   creditOn: boolean;
+  /** Everything the advanced counter needs to offer (P10a). */
+  cardTypes: SettingRow[];
+  posAccounts: SettingRow[];
+  saleFields: SaleField[];
+  team: StaffMember[];
+  emiPlans: EmiPlan[];
+  emiAllowed: boolean;
+  cardChargeMode: "absorb" | "add";
+  allProducts: Product[];
   onCheckPin: () => void;
   onComplete: () => void;
 }
@@ -103,12 +116,27 @@ function LinePrice({ product, line }: { product: Product; line: { productId: str
   );
 }
 
-export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, submitting, error, customer, approvers, checkingPin, pinMessage, approvedBy, creditOn, onCheckPin, onComplete }: Props) {
+export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, submitting, error, customer, approvers, checkingPin, pinMessage, approvedBy, creditOn, cardTypes, posAccounts, saleFields, team, emiPlans, emiAllowed, cardChargeMode, allProducts, onCheckPin, onComplete }: Props) {
   const s = useSale();
   const overLimit = totals.discountPct > staff.discountLimitPct;
+  // The card company's cut, the bank's EMI charge and anything taken in exchange all
+  // change what the customer actually pays, so they are worked out here and shown —
+  // a button that says 72,000 next to a receipt that says 74,880 is a lie.
+  const cardType = cardTypes.find((c) => c.id === s.extras.card?.typeId);
+  const cardCharge = cardType && cardChargeMode === "add"
+    ? Math.round((totals.total * Number(cardType.charge_pct ?? 0)) / 100)
+    : 0;
+  const emiPlan = s.extras.emi
+    ? emiPlans.find((p) => p.months === s.extras.emi!.months
+        && (!s.extras.emi!.bank || p.bank === s.extras.emi!.bank))
+    : undefined;
+  const emiCharge = emiPlan ? Math.round((totals.total * emiPlan.chargePct) / 100) : 0;
+  const exchangeValue = Math.min(s.extras.exchange?.value ?? 0, totals.total + cardCharge + emiCharge);
+  const payable = totals.total + cardCharge + emiCharge - exchangeValue;
+
   // On due, what is left to pay now, and therefore what the cash box is checked against.
-  const onDue = Math.min(Math.max(Number(s.dueAmount) || 0, 0), totals.total);
-  const payingNow = Math.max(totals.total - onDue, 0);
+  const onDue = Math.min(Math.max(Number(s.dueAmount) || 0, 0), payable);
+  const payingNow = Math.max(payable - onDue, 0);
   const received = parseFloat(s.cashReceived);
   const showChange = s.method === "cash" && !Number.isNaN(received) && received >= payingNow && payingNow > 0;
   const methodLabel = PAYMENT_METHODS.find((m) => m.id === s.method)?.label ?? "";
@@ -175,6 +203,15 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
                     })}
                     {p.serials.length === 0 && <span className="text-[13px] text-bad-ink">No serials in stock</span>}
                   </div>
+                  {/* Tapping is fine for two laptops and hopeless for forty. A run can
+                      be scanned first-to-last or pasted straight from the supplier. */}
+                  {p.serials.length > 3 && (
+                    <BulkSerials
+                      product={p}
+                      picked={line.serialIds}
+                      onChange={(ids) => s.setSerials(p.id, ids)}
+                    />
+                  )}
                 </div>
               )}
 
@@ -289,8 +326,26 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
                 <span>Discount {totals.discountPct}%</span><span className="num">− {formatTaka(totals.discountAmount)}</span>
               </div>
             )}
+            {cardCharge > 0 && (
+              <div className="flex justify-between text-[15px] text-ink-soft">
+                <span>Card charge {cardType ? `${cardType.charge_pct}%` : ""}</span>
+                <span className="num">+ {formatTaka(cardCharge)}</span>
+              </div>
+            )}
+            {emiCharge > 0 && (
+              <div className="flex justify-between text-[15px] text-ink-soft">
+                <span>EMI charge · {emiPlan?.bank}</span>
+                <span className="num">+ {formatTaka(emiCharge)}</span>
+              </div>
+            )}
+            {exchangeValue > 0 && (
+              <div className="flex justify-between text-[15px] text-ink-soft">
+                <span>Taken in exchange</span>
+                <span className="num">− {formatTaka(exchangeValue)}</span>
+              </div>
+            )}
             <div className="flex items-baseline justify-between text-[22px] font-bold">
-              <span>Total</span><span className="num">{formatTaka(totals.total)}</span>
+              <span>Total</span><span className="num">{formatTaka(payable)}</span>
             </div>
           </div>
 
@@ -349,7 +404,15 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
                     key={m.id}
                     type="button"
                     aria-pressed={on}
-                    onClick={() => s.setMethod(m.id)}
+                    onClick={() => {
+                      s.setMethod(m.id);
+                      // Picking Card and then not being asked which card is how a shop
+                      // ends up unable to match a statement; picking something else
+                      // should not leave card details hanging about either.
+                      s.setExtras(m.id === "card"
+                        ? { ...s.extras, card: s.extras.card ?? {} }
+                        : { ...s.extras, card: undefined });
+                    }}
                     className={cn(
                       "h-12 rounded-lg text-[15px] font-semibold focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus",
                       on ? "border-2 border-brand bg-ok-bg text-ok-ink" : "border border-line bg-surface text-ink hover:bg-subtle",
@@ -363,6 +426,8 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
           </div>
           )}
 
+          {/* With the card panel open, the last four digits are asked for there. Asking
+              twice on one screen is how BMS ended up with 40 fields. */}
           {payingNow > 0 && (s.method === "cash" ? (
             <div className="flex flex-col gap-2">
               <Label htmlFor="recv">Cash received</Label>
@@ -381,12 +446,27 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
                 </div>
               )}
             </div>
-          ) : (
+          ) : s.method === "card" && s.extras.card !== undefined ? null : (
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="txn">{s.method === "card" ? "Card last 4 digits" : `${methodLabel} transaction ID`}</Label>
               <Input id="txn" value={s.paymentRef} onChange={(e) => s.setPaymentRef(e.target.value)} placeholder={s.method === "card" ? "1234" : "e.g. 9JK4L2M8QX"} className="num" />
             </div>
           ))}
+
+          <MoreOptions
+            extras={s.extras}
+            onChange={s.setExtras}
+            cardTypes={cardTypes}
+            posAccounts={posAccounts}
+            saleFields={saleFields}
+            team={team}
+            emiPlans={emiPlans}
+            emiAllowed={emiAllowed}
+            total={totals.total}
+            payingNow={payingNow}
+            products={allProducts}
+            cardChargeMode={cardChargeMode}
+          />
 
           <div className="flex flex-col gap-2">
             <Button size="lg" className="h-[58px]" disabled={!!blocker || submitting} onClick={onComplete}>
@@ -394,7 +474,7 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
                 ? "Saving…"
                 : onDue > 0
                   ? `Complete · ${formatTaka(payingNow)} now, ${formatTaka(onDue)} on due`
-                  : `Complete sale · ${formatTaka(totals.total)}`}
+                  : `Complete sale · ${formatTaka(payable)}`}
             </Button>
             {error ? (
               <span role="alert" className="text-center text-[13px] font-semibold text-bad-ink">{error}</span>
@@ -405,5 +485,130 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
         </div>
       )}
     </aside>
+  );
+}
+
+/**
+ * Picking a run of serials without tapping each one.
+ *
+ * Only the serials actually on the shelf here can be sold, so whatever is scanned or
+ * pasted is matched against them and anything that does not match is named rather than
+ * silently dropped — a missing serial means a missing box, which somebody has to know.
+ */
+function BulkSerials({
+  product, picked, onChange,
+}: {
+  product: Product;
+  picked: string[];
+  onChange: (ids: string[]) => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [mode, setMode] = React.useState<"range" | "paste">("range");
+  const [from, setFrom] = React.useState("");
+  const [to, setTo] = React.useState("");
+  const [paste, setPaste] = React.useState("");
+  const [problem, setProblem] = React.useState("");
+
+  const take = (wanted: string[]) => {
+    if (wanted.length === 0) { setProblem("Nothing to add."); return; }
+    const byText = new Map(product.serials.map((x) => [x.serial.toUpperCase(), x.id]));
+    const found: string[] = [];
+    const missing: string[] = [];
+    for (const t of wanted) {
+      const id = byText.get(t.toUpperCase());
+      if (id) found.push(id); else missing.push(t);
+    }
+    if (found.length > 0) onChange([...new Set([...picked, ...found])]);
+    setProblem(missing.length === 0
+      ? ""
+      : missing.length === wanted.length
+        ? `None of those are on the shelf here: ${missing.slice(0, 4).join(", ")}${missing.length > 4 ? "…" : ""}`
+        : `Added ${found.length}. Not here: ${missing.slice(0, 4).join(", ")}${missing.length > 4 ? "…" : ""}`);
+  };
+
+  if (!open) {
+    return (
+      <Button variant="ghost" size="sm" className="self-start" onClick={() => setOpen(true)}>
+        Pick a lot at once
+      </Button>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-line bg-subtle p-2.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {([["range", "Scan first and last"], ["paste", "Paste a list"]] as const).map(([m, label]) => (
+          <button
+            key={m}
+            type="button"
+            aria-pressed={mode === m}
+            onClick={() => setMode(m)}
+            className={cn(
+              "min-h-11 rounded-lg px-2.5 text-[13px]",
+              mode === m ? "border-2 border-brand bg-ok-bg font-semibold text-ok-ink"
+                : "border border-line bg-surface hover:bg-subtle",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+        <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setOpen(false)}>
+          Done
+        </Button>
+      </div>
+
+      {mode === "range" ? (
+        <form
+          className="flex flex-wrap items-end gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const r = expandSerialRange(from, to);
+            if (r.problems.length > 0) { setProblem(r.problems[0].why); return; }
+            take(r.serials);
+            setFrom(""); setTo("");
+          }}
+        >
+          <Input
+            value={from} onChange={(e) => setFrom(e.target.value)}
+            placeholder="First" aria-label="First serial" className="code h-11 w-36"
+          />
+          <Input
+            value={to} onChange={(e) => setTo(e.target.value)}
+            placeholder="Last" aria-label="Last serial" className="code h-11 w-36"
+          />
+          <Button type="submit" variant="outline" className="h-11" disabled={!from.trim() || !to.trim()}>
+            Add the range
+          </Button>
+        </form>
+      ) : (
+        <div className="flex flex-col gap-2">
+          <textarea
+            value={paste}
+            onChange={(e) => setPaste(e.target.value)}
+            rows={3}
+            aria-label={`Paste serials for ${product.name}`}
+            placeholder="One a line, or separated by commas"
+            className="code w-full rounded-lg border border-line-strong bg-surface p-2.5 text-base"
+          />
+          <Button
+            variant="outline" className="h-11 self-start"
+            disabled={paste.trim() === ""}
+            onClick={() => { take(parseSerialList(paste)); setPaste(""); }}
+          >
+            Add these
+          </Button>
+        </div>
+      )}
+
+      {problem && <p role="alert" className="text-[13px] text-warn-ink">{problem}</p>}
+      {picked.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="num text-[13px] text-muted">{picked.length} picked</span>
+          <Button variant="ghost" size="sm" onClick={() => { onChange([]); setProblem(""); }}>
+            Clear them
+          </Button>
+        </div>
+      )}
+    </div>
   );
 }

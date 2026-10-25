@@ -170,6 +170,17 @@ export const SETTING_LISTS: ListSpec[] = [
       { key: "active", label: "In use", type: "bool" },
     ],
   },
+  {
+    table: "sale_fields",
+    title: "Extra fields on a sale",
+    what: "Your own fields at the counter: a PO number, a reference, anything the shop needs recorded against a sale.",
+    nameField: "name",
+    fields: [
+      { key: "name", label: "Field", type: "text", required: true },
+      { key: "show_on_invoice", label: "Print it on the invoice", type: "bool" },
+      { key: "active", label: "In use", type: "bool" },
+    ],
+  },
 ];
 
 export interface FeatureSpec {

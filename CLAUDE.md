@@ -198,6 +198,23 @@ chains with many branches; CSL's single-branch store is only the first customer.
   "due" payment method, because a switch that changes nothing at the till is a bug.
   `customers.name` and `customers.name_text` were two columns for one fact (P9's search
   read the empty one); P10 merges them and drops `name`.
+- **The full counter is additive, and the simple sale stays four actions** (P10a). BMS's
+  sales screen has ~40 fields and 22 buttons; the capability is not the problem, the
+  arrangement is. So the corporate fields, the exchange, the split payment, the sold-by
+  and the shop's own extra fields all live behind one "More options" line, the card panel
+  appears only when Card is picked, and the EMI panel appears only when every line can
+  actually go on EMI. Everything new reaches `complete_sale()` as ONE `p_extras` jsonb
+  rather than twelve more arguments — it was already on thirteen, and a twenty-six
+  argument function is one nobody can call correctly. What the database enforces, not the
+  screen: EMI only on products the owner allows, for a tenure the bank runs, above that
+  plan's minimum; the card charge is the shop's decision (`shops.card_charge_mode`), not
+  the cashier's; an exchange can never be worth more than the sale, because paying the
+  difference out is a purchase and dressing it up as a sale hides it; and a split payment
+  has to add up to what is being paid now, to the taka, or the drawer is wrong at closing
+  time. `price_help()` gives the counter the last price this customer paid, the last
+  price anyone paid, and where the stock is — deliberately **not** cost or margin, which
+  stays behind the `see_cost` permission. The on-screen total includes the card and EMI
+  charges, because a button saying 72,000 next to a receipt saying 74,880 is a lie.
 - **Imports upsert by code and never delete** (P4). A shop's export may be partial or
   last week's, so importing one must never remove anything, and re-running the same file
   must change nothing — that is what makes it safe to retry after a timeout. Opening
@@ -265,8 +282,13 @@ The list below is the original short version; BUILD_PROMPTS.md wins where they d
    with the discount and VAT shares worked out.
    ~~**Credit sales and customers**~~ — done (P10): customer records with groups, credit
    limits and terms, selling part or all of a sale on due, collecting against the oldest
-   invoice, a due list with aging, and a printable statement. Next: the **full counter**
-   (P10a).
+   invoice, a due list with aging, and a printable statement.
+   ~~**The full counter**~~ — done (P10a): corporate fields, sold-by, shop-defined extra
+   fields, card and POS details, bank EMI plans, exchange/trade-in, split payments,
+   bulk serial picking and price help — all folded away so the simple sale is untouched.
+   **Not done:** importing sale lines from Excel for a big corporate order, and the print
+   choices (A4 invoice, challan, money receipt, warranty stickers, direct print) which
+   belong to P16.
 7. **Warranty lookup** by serial or phone; simple claim log (P11).
 8. **Owner dashboard** (phone-first), see product decisions above (P12).
 9. **Accounts** (P13 onwards), then SMS receipts and printing.
