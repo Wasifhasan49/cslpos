@@ -82,6 +82,13 @@ export interface SerialUnit {
   serial: string;
 }
 
+export interface PriceList {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  active: boolean;
+}
+
 /** What the counter sees. No cost price, ever. */
 export interface Product {
   id: string;
@@ -97,12 +104,72 @@ export interface Product {
   stock: number;
   reorderLevel: number;
   serials: SerialUnit[]; // in-stock units at this branch, for serial items
+  /** Maximum Retail Price, if the shop records it. */
+  mrp?: number | null;
+  /** The band a seller may move the price inside. Below `minPrice` needs a manager.
+   *  With no band set, `minPrice` equals the list price: the owner has given nobody
+   *  permission to go below it. */
+  minPrice?: number | null;
+  maxPrice?: number | null;
+  /** A service: no stock to run out of. */
+  isInventory?: boolean;
+}
+
+/** A row in the owner's product list. Cost and margin are ABSENT, not null, for a
+ *  login that may not see them — the numbers never reach the browser. */
+export interface CatalogueRow {
+  id: string;
+  code: string;
+  barcode: string | null;
+  name: string;
+  brand: string | null;
+  model?: string | null;
+  categoryId: string | null;
+  category?: string | null;
+  unit?: string | null;
+  specification?: string | null;
+  warrantyMonths: number;
+  warrantyTerm?: string | null;
+  isSerial: boolean;
+  isInventory: boolean;
+  active: boolean;
+  reorderLevel: number;
+  price: number;
+  mrp: number | null;
+  minPrice: number | null;
+  maxPrice: number | null;
+  /** Stock at the branch being viewed, and across the whole shop. */
+  stock: number;
+  totalStock: number;
+  cost?: number;
+  marginPct?: number;
+}
+
+/** What the counter learns when it looks a customer up by phone. */
+export interface CustomerLookup {
+  id: string;
+  phone: string;
+  name: string | null;
+  priceListId: string | null;
+  priceListName: string | null;
+  /** A standing discount the owner granted. It applies on its own, with no approval. */
+  discountPct: number;
+}
+
+export interface BulkPriceChange {
+  productId: string;
+  name: string;
+  from: number;
+  to: number;
 }
 
 export interface CartLine {
   productId: string;
   qty: number; // for serial items this always equals serialIds.length
   serialIds: string[];
+  /** What the seller wants to charge, if they changed it. Left out means "the price the
+   *  owner set". The database re-checks it against the band either way. */
+  unitPrice?: number | null;
 }
 
 export interface SaleInput {
@@ -122,6 +189,9 @@ export interface SaleInput {
   discountTypeId?: string | null;
   /** How this sale is classified in reports (BMS "Transaction Category"). */
   categoryId?: string | null;
+  /** Which price list to charge from. Left out means the customer's own list, or the
+   *  shop default for a walk-in. */
+  priceListId?: string | null;
   customerPhone: string | null;
   cashReceived: number | null;
   paymentRef: string | null;
@@ -139,6 +209,11 @@ export interface ReceiptLine {
   vatAmount: number;
   /** Inclusive means the tax is already inside unitPrice. */
   vatInclusive: boolean;
+  /** The price the owner set, when the seller charged something else. */
+  listPrice?: number | null;
+  priceOverridden?: boolean;
+  /** A free item from an offer: charged at zero, but it still left the shelf. */
+  isGift?: boolean;
 }
 
 export interface Receipt {
@@ -169,6 +244,11 @@ export interface Receipt {
   charges: { name: string; amount: number }[];
   receiptFooter: string | null;
   binVat: string | null;
+  /** Which price list was used, so a dealer bill says so. */
+  priceListName?: string | null;
+  customerName?: string | null;
+  /** The customer's standing discount, if they had one. */
+  customerDiscountPct?: number;
   items: ReceiptLine[];
 }
 

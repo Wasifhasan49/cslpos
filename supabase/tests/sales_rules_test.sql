@@ -294,7 +294,7 @@ select pg_temp.check(
   (select count(*) from public.serials where serial = 'S64DNX0T49999') = 0,
   'the cashier cannot see a serial sitting at Branch B');
 -- But the catalogue is shop-wide: a product exists and has a price everywhere.
-select pg_temp.check((select count(*) from public.products) = 11, 'the cashier still sees the whole catalogue');
+select pg_temp.check((select count(*) from public.products) = 12, 'the cashier still sees the whole catalogue');
 select pg_temp.check((select count(*) from public.branches where shop_id = :'SHOP') = 2, 'the cashier can see that both branches exist (the switcher needs it)');
 
 -- branch_products() reports Branch A's own figures, not the shop's total.
@@ -323,9 +323,21 @@ select pg_temp.check(
 select pg_temp.check(
   (select array_length(public.current_branch_ids(), 1)) = 2,
   'the owner gets both branches without a staff_branches row');
-select pg_temp.check(
-  (public.complete_sale(:'BRANCH_B', '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]', 'cash', 0, null, null, 500)->>'invoice_no') = 'DEMO-SB-2026000001',
-  'Branch B numbers from its own 1, with its own code');
+-- 550, not 500: Branch B has its own price for the splitter, and a branch override
+-- beats the all-branches price.
+do $$
+declare r jsonb;
+begin
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b2',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]', 'cash', 0, null, null, 550);
+  if (r->>'invoice_no') <> 'DEMO-SB-2026000001' then
+    raise exception 'WRONG INVOICE: %', r->>'invoice_no';
+  end if;
+  if (r->>'total')::numeric <> 550 then
+    raise exception 'BRANCH PRICE OVERRIDE IGNORED: %', r->>'total';
+  end if;
+  raise notice 'ok: Branch B numbers from its own 1 and charges its own 550 price';
+end $$;
 select pg_temp.check(
   (select qty from public.branch_stock where product_id = '00000000-0000-4000-8000-0000000000a1' and location_id = :'LOC_B') = 5,
   'that sale came out of Branch B stock');
@@ -361,7 +373,7 @@ select pg_temp.check(
    where b.code = 'TB3' and l.is_default) = 1,
   'a new branch gets a default stock location, so it can hold stock immediately');
 select pg_temp.check(
-  (select count(*) from public.branch_stock bs join public.branches b on b.id = bs.branch_id where b.code = 'TB3') = 11,
+  (select count(*) from public.branch_stock bs join public.branches b on b.id = bs.branch_id where b.code = 'TB3') = 12,
   'every product starts at 0 there, so stock reports show a real zero not a gap');
 select pg_temp.expect_error($q$select public.save_branch(null, 'Bad code', 'lowercase')$q$, 'BAD_BRANCH_CODE');
 select pg_temp.expect_error($q$select public.save_branch(null, '', 'X1')$q$, 'BRANCH_NAME_REQUIRED');
@@ -384,7 +396,7 @@ select pg_temp.check(
   (select array_length(public.current_branch_ids(), 1)) = 2,
   'the cashier now has both branches');
 select pg_temp.check(
-  (public.complete_sale(:'BRANCH_B', '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]', 'cash', 0, null, null, 500)->>'invoice_no') = 'DEMO-SB-2026000002',
+  (public.complete_sale(:'BRANCH_B', '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]', 'cash', 0, null, null, 550)->>'invoice_no') = 'DEMO-SB-2026000002',
   'Branch B''s numbering carries on from its own last invoice');
 
 -- ===========================================================================
@@ -577,6 +589,280 @@ select pg_temp.check((select count(*) from public.upazilas) > 480, 'nearly 500 u
 select pg_temp.check((select name from public.districts where id = 1) = 'Comilla', 'districts carry real names');
 select pg_temp.check((select count(*) from public.upazilas u join public.districts d on d.id = u.district_id where d.name = 'Dhaka') > 1, 'Dhaka district has its thanas');
 select pg_temp.check((select count(*) from public.countries) > 10, 'countries for suppliers who import');
+
+
+-- ===========================================================================
+-- 14. PRODUCTS AND PRICES (P3)
+-- ===========================================================================
+-- The rule this product exists for: the owner sets prices, they fill in
+-- automatically, and a seller may only move inside the band the owner allowed.
+
+\set LIST_RETAIL '(select id from public.price_lists where shop_id = ''00000000-0000-4000-8000-000000000001'' and is_default)'
+\set LIST_DEALER '00000000-0000-4000-8000-0000000000f2'
+\set KEYBOARD '00000000-0000-4000-8000-0000000000a5'
+\set MOUSE    '00000000-0000-4000-8000-0000000000a4'
+\set SERVICE  '00000000-0000-4000-8000-0000000000ac'
+\set HDMI     '00000000-0000-4000-8000-0000000000a2'
+\set ADAPTER  '00000000-0000-4000-8000-0000000000a3'
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+
+-- Every shop gets a Retail list, and every product a price on it, so nothing is
+-- unsellable just because nobody opened the pricing screen.
+select pg_temp.check((select count(*) from public.price_lists where shop_id = :'SHOP' and is_default) = 1, 'the shop has exactly one default price list');
+select pg_temp.check(
+  (select count(*) from public.products p where p.shop_id = :'SHOP'
+     and not exists (select 1 from public.product_prices pp
+                     where pp.product_id = p.id and pp.branch_id is null
+                       and pp.price_list_id = (select id from public.price_lists where shop_id = :'SHOP' and is_default))) = 0,
+  'every product has a price on the default list');
+
+-- resolve_price: branch override beats the all-branches price.
+select pg_temp.check((public.resolve_price(:'KEYBOARD', :'BRANCH_A')->>'price')::numeric = 850, 'the keyboard is 850 at Branch A');
+select pg_temp.check((public.resolve_price('00000000-0000-4000-8000-0000000000a1', :'BRANCH_A')->>'price')::numeric = 500, 'the splitter is 500 at Branch A');
+select pg_temp.check((public.resolve_price('00000000-0000-4000-8000-0000000000a1', :'BRANCH_B')->>'price')::numeric = 550, 'but 550 at Branch B, where there is an override');
+
+-- With no minimum set, the list price IS the floor: nobody has been given permission
+-- to go below it.
+select pg_temp.check((public.resolve_price(:'MOUSE', :'BRANCH_A')->>'min_price')::numeric = 450, 'with no band, the list price is the floor');
+select pg_temp.check((public.resolve_price(:'KEYBOARD', :'BRANCH_A')->>'min_price')::numeric = 800, 'the keyboard may go down to 800');
+select pg_temp.check((public.resolve_price(:'KEYBOARD', :'BRANCH_A')->>'mrp')::numeric = 950, 'and its MRP is on the record');
+
+-- The dealer list is cheaper.
+select pg_temp.check((public.resolve_price(:'KEYBOARD', :'BRANCH_A', :'LIST_DEALER')->>'price')::numeric = 750, 'a dealer pays 750 for the keyboard');
+
+-- ---- The done-when, part 1: a dealer gets the dealer price automatically ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+do $$
+declare r jsonb;
+begin
+  -- The cashier passes no price list at all; the customer's phone number decides it.
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1}]', 'cash', 0, null,
+        '01811000000', 750);
+  if (r->>'total')::numeric <> 750 then raise exception 'DEALER PRICE NOT APPLIED: %', r->>'total'; end if;
+  if (r->>'price_list_name') <> 'Dealer' then raise exception 'WRONG PRICE LIST: %', r->>'price_list_name'; end if;
+  if (r->'items'->0->>'unit_price')::numeric <> 750 then raise exception 'WRONG LINE PRICE'; end if;
+  raise notice 'ok: a dealer customer is charged 750 automatically, from their own price list';
+end $$;
+
+-- A walk-in with no phone number still pays retail.
+do $$
+declare r jsonb;
+begin
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1}]', 'cash', 0, null, null, 850);
+  if (r->>'total')::numeric <> 850 then raise exception 'WALK-IN NOT CHARGED RETAIL: %', r->>'total'; end if;
+  raise notice 'ok: a walk-in pays the retail 850';
+end $$;
+
+-- A customer's standing discount applies on its own, with no approval: the owner set it.
+do $$
+declare r jsonb;
+begin
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1}]', 'cash', 0, null,
+        '01911000000', 800);
+  -- 8% off 850 = 68, so 782.
+  if (r->>'total')::numeric <> 782 then raise exception 'STANDING DISCOUNT NOT APPLIED: %', r->>'total'; end if;
+  if (r->>'customer_discount_pct')::numeric <> 8 then raise exception 'DISCOUNT NOT REPORTED'; end if;
+  raise notice 'ok: a regular customer gets their 8%% automatically, no PIN';
+end $$;
+
+-- ---- The done-when, part 2: the band, and the PIN below it ----
+-- Down to the minimum is allowed outright.
+do $$
+declare r jsonb;
+begin
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1,"unit_price":800}]',
+        'cash', 0, null, null, 800);
+  if (r->>'total')::numeric <> 800 then raise exception 'MINIMUM PRICE REFUSED: %', r->>'total'; end if;
+  if not (r->'items'->0->>'price_overridden')::boolean then raise exception 'OVERRIDE NOT FLAGGED'; end if;
+  if (r->'items'->0->>'list_price')::numeric <> 850 then raise exception 'LIST PRICE NOT KEPT'; end if;
+  raise notice 'ok: a cashier may drop the keyboard to its 800 minimum without asking';
+end $$;
+
+-- One taka below it is refused without a manager.
+select pg_temp.expect_error(format($q$select public.complete_sale('%s', '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":1,"unit_price":799}]', 'cash', 0, null, null, 799)$q$, :'BRANCH_A'), 'MANAGER_PIN_REQUIRED');
+
+-- A product with no band cannot be discounted by a cashier at all.
+select pg_temp.expect_error(format($q$select public.complete_sale('%s', '[{"product_id":"00000000-0000-4000-8000-0000000000a4","qty":1,"unit_price":400}]', 'cash', 0, null, null, 400)$q$, :'BRANCH_A'), 'MANAGER_PIN_REQUIRED');
+
+-- With a manager's approval it goes through, and the override is logged with BOTH
+-- prices so the owner can see what it cost them.
+do $$
+declare r jsonb; a jsonb;
+begin
+  a := public.verify_manager_pin('aaaaaaaa-0000-4000-8000-000000000001', '4821');
+  if not (a->>'ok')::boolean then raise exception 'APPROVAL REFUSED: %', a; end if;
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":2,"unit_price":700}]',
+        'cash', 0, (a->>'approval_id')::uuid, null, 1400);
+  if (r->>'total')::numeric <> 1400 then raise exception 'APPROVED OVERRIDE REFUSED: %', r->>'total'; end if;
+  raise notice 'ok: with a PIN, the keyboard goes out at 700';
+end $$;
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+do $$
+declare d jsonb;
+begin
+  select details into d from public.audit_log
+    where action = 'price_overridden' and (details->>'charged')::numeric = 700 limit 1;
+  if d is null then raise exception 'OVERRIDE NOT LOGGED'; end if;
+  if (d->>'list_price')::numeric <> 850 then raise exception 'LIST PRICE MISSING FROM LOG: %', d; end if;
+  -- 2 x (850 - 700) = 300 the shop gave away.
+  if (d->>'difference')::numeric <> 300 then raise exception 'GIVEAWAY NOT COMPUTED: %', d; end if;
+  raise notice 'ok: the override is logged with list 850, charged 700, and 300 given away';
+end $$;
+
+-- Raising the price above the list is an override too, not a free pass.
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.expect_error(format($q$select public.complete_sale('%s', '[{"product_id":"00000000-0000-4000-8000-0000000000a4","qty":1,"unit_price":600}]', 'cash', 0, null, null, 600)$q$, :'BRANCH_A'), 'MANAGER_PIN_REQUIRED');
+
+-- ---- The done-when, part 3: a cashier sees no cost or margin, anywhere ----
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.catalogue(:'BRANCH_A')) x where x ? 'cost') = 0,
+  'the catalogue a cashier receives has no cost key at all');
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.catalogue(:'BRANCH_A')) x where x ? 'margin_pct') = 0,
+  'and no margin key either');
+select pg_temp.check((select count(*) from public.product_costs) = 0, 'and the cost table is still empty to them');
+select pg_temp.check((select count(*) from public.purchase_prices) = 0, 'and so are agreed purchase prices');
+-- The owner does get them.
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+-- Earlier tests received stock with a unit cost, so more than one product has a cost
+-- by now; what matters is that the owner gets them and the cashier gets none.
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.catalogue(:'BRANCH_A')) x where x ? 'cost') >= 1,
+  'the owner sees cost on the products that have one');
+select pg_temp.check(
+  (select (x->>'cost')::numeric from jsonb_array_elements(public.catalogue(:'BRANCH_A')) x
+   where x->>'code' = 'VEN-AUD-35') = 250,
+  'and it is the real figure');
+select pg_temp.check(
+  (select (x->>'margin_pct')::numeric from jsonb_array_elements(public.catalogue(:'BRANCH_A')) x
+   where x->>'code' = 'VEN-AUD-35') = 100,
+  'and its margin: 500 sold, 250 cost, 100%');
+
+-- ---- Services have no stock to run out of ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+do $$
+declare r jsonb;
+begin
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000ac","qty":3}]', 'cash', 0, null, null, 1500);
+  if (r->>'total')::numeric <> 1500 then raise exception 'SERVICE NOT BILLED: %', r->>'total'; end if;
+  raise notice 'ok: a service bills three times over with no stock at all';
+end $$;
+select pg_temp.check(
+  (select count(*) from public.stock_movements sm join public.products p on p.id = sm.product_id
+   where p.code = 'SVC-OS') = 0,
+  'and it moves no stock, because there is none to move');
+
+-- ---- Gifts: buy one HDMI cable, get a Type-C adapter free ----
+do $$
+declare r jsonb; gift jsonb;
+begin
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a2","qty":2}]', 'cash', 0, null, null, 1000);
+  select e into gift from jsonb_array_elements(r->'items') e where (e->>'is_gift')::boolean;
+  if gift is null then raise exception 'NO GIFT LINE: %', r->'items'; end if;
+  if (gift->>'qty')::integer <> 2 then raise exception 'WRONG GIFT QTY: %', gift; end if;
+  if (gift->>'line_total')::numeric <> 0 then raise exception 'GIFT WAS CHARGED FOR: %', gift; end if;
+  -- 2 cables at 450 and nothing for the adapters.
+  if (r->>'total')::numeric <> 900 then raise exception 'GIFT CHANGED THE TOTAL: %', r->>'total'; end if;
+  raise notice 'ok: two cables bring two free adapters, at zero, and the total is still 900';
+end $$;
+-- The gift still left the shelf, so it still left stock: 7 adapters minus 2.
+select pg_temp.check(
+  (select qty from public.branch_stock where product_id = :'ADAPTER' and location_id = :'LOC_A') = 5,
+  'the free adapters came out of stock, because they physically left');
+
+-- ---- Owner-only catalogue and price writes ----
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+select pg_temp.check(
+  (public.upsert_product(null, '{"name":"Test cable","code":"TST-1","price":100}')->>'code') = 'TST-1',
+  'the owner can add a product');
+select pg_temp.check(
+  (select count(*) from public.product_prices pp join public.products p on p.id = pp.product_id
+   where p.code = 'TST-1') >= 1,
+  'and it gets a price on the default list, so it is sellable at once');
+select pg_temp.check(
+  (select count(*) from public.branch_stock bs join public.products p on p.id = bs.product_id
+   where p.code = 'TST-1') >= 2,
+  'and a zero-stock row at every branch');
+select pg_temp.expect_error($q$select public.upsert_product(null, '{"code":"X"}')$q$, 'PRODUCT_NAME_REQUIRED');
+select pg_temp.expect_error($q$select public.upsert_product(null, '{"name":"X"}')$q$, 'PRODUCT_CODE_REQUIRED');
+
+-- A serial item with stock cannot quietly become a non-serial one.
+select pg_temp.expect_error($q$update public.products set is_serial = false where code = 'SAM-980-500'$q$, 'SERIAL_CHANGE_HAS_STOCK');
+
+-- Price bands are checked when set, not only when used.
+select pg_temp.expect_error(format($q$select public.set_prices('%s', '%s', 500, null, 600, 400)$q$, :'MOUSE', :LIST_RETAIL), 'BAD_PRICE_BAND');
+select pg_temp.check(
+  (public.set_prices(:'MOUSE', :'LIST_DEALER', 410, null, 390)->>'price')::numeric = 410,
+  'the owner can set a dealer price and its floor');
+
+-- Bulk price change, with a dry run first so the screen can show old → new.
+do $$
+declare r jsonb;
+begin
+  r := public.bulk_update_prices(array['00000000-0000-4000-8000-0000000000a4']::uuid[],
+        (select id from public.price_lists where shop_id = '00000000-0000-4000-8000-000000000001' and is_default),
+        'percent', 10, null, true);
+  if not (r->>'dry_run')::boolean then raise exception 'DRY RUN NOT FLAGGED'; end if;
+  if (r->'changes'->0->>'from')::numeric <> 450 then raise exception 'WRONG OLD PRICE: %', r; end if;
+  if (r->'changes'->0->>'to')::numeric <> 495 then raise exception 'WRONG NEW PRICE: %', r; end if;
+  raise notice 'ok: a dry run shows 450 becoming 495 and changes nothing';
+end $$;
+select pg_temp.check((public.resolve_price(:'MOUSE', :'BRANCH_A')->>'price')::numeric = 450, 'and the price really is unchanged after a dry run');
+select public.bulk_update_prices(array[:'MOUSE']::uuid[], :LIST_RETAIL, 'percent', 10, null, false);
+select pg_temp.check((public.resolve_price(:'MOUSE', :'BRANCH_A')->>'price')::numeric = 495, 'then the real run applies it');
+select pg_temp.expect_error(format($q$select public.bulk_update_prices(array['%s']::uuid[], '%s', 'sideways', 10)$q$, :'MOUSE', :LIST_RETAIL), 'BAD_PRICE_MODE');
+select pg_temp.expect_error(format($q$select public.bulk_update_prices(array[]::uuid[], '%s', 'set', 10)$q$, :LIST_RETAIL), 'NO_PRODUCTS_PICKED');
+
+-- Price history is in the audit log, which is how an owner sees who changed what.
+-- One direct set_prices and one through the bulk change: both logged, and the bulk
+-- dry run logged nothing because it wrote nothing.
+select pg_temp.check((select count(*) from public.audit_log where action = 'price_set') >= 2, 'every price change is logged, including the ones made in bulk');
+select pg_temp.check(
+  (select count(*) from public.audit_log where action = 'price_set'
+     and (details->'to'->>'price')::numeric = 495) = 1,
+  'and the log carries the old and new price');
+
+-- Merging categories, for fixing the BMS typos ("Convarter" into "Converters").
+select pg_temp.check(
+  (public.merge_categories(
+    (select id from public.categories where name = 'Printing'),
+    (select id from public.categories where name = 'Accessories'))->>'products_moved')::integer = 1,
+  'merging a category moves its products');
+select pg_temp.check((select count(*) from public.categories where name = 'Printing') = 0, 'and the old category is gone');
+select pg_temp.check((select count(*) from public.audit_log where action = 'categories_merged') = 1, 'and the merge is logged');
+select pg_temp.expect_error($q$select public.merge_categories(
+  (select id from public.categories where name = 'Accessories'),
+  (select id from public.categories where name = 'Accessories'))$q$, 'SAME_CATEGORY');
+
+-- Price lists: owner only, and a shop always keeps a default.
+select pg_temp.check((public.save_price_list(null, 'Corporate')->>'name') = 'Corporate', 'the owner can add a price list');
+select pg_temp.expect_error($q$select public.save_price_list(
+  (select id from public.price_lists where is_default and shop_id = '00000000-0000-4000-8000-000000000001'),
+  null, false)$q$, 'LAST_PRICE_LIST');
+select set_config('request.jwt.claim.sub', '44444444-4444-4444-8444-444444444444', false);
+select pg_temp.expect_error($q$select public.save_price_list(null, 'Sneaky')$q$, 'NOT_OWNER');
+-- A manager CAN set prices: that is their job.
+select pg_temp.check(
+  (public.set_prices('00000000-0000-4000-8000-0000000000a6', :LIST_RETAIL, 1250)->>'price')::numeric = 1250,
+  'a manager can set a price');
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.expect_error(format($q$select public.set_prices('%s', '%s', 1)$q$, :'MOUSE', :LIST_RETAIL), 'NOT_ALLOWED');
+select pg_temp.expect_error($q$select public.upsert_product(null, '{"name":"Nope","code":"NOPE"}')$q$, 'NOT_ALLOWED');
+select pg_temp.expect_error($q$select public.merge_categories(
+  (select id from public.categories where name = 'Laptops'),
+  (select id from public.categories where name = 'Accessories'))$q$, 'NOT_ALLOWED');
+
+-- Attributes: Group and Brand on by default, the rest there to be switched on.
+select pg_temp.check((select count(*) from public.attribute_types where shop_id = :'SHOP' and enabled) = 2, 'Group and Brand are on by default');
+select pg_temp.check((select count(*) from public.attribute_types where shop_id = :'SHOP') = 7, 'and five more are there to switch on');
 
 reset role;
 \echo ALL DATABASE CHECKS PASSED

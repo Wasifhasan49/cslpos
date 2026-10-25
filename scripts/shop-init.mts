@@ -112,6 +112,21 @@ if (error || !shop) {
 ok(`Created "${shop.name}"`);
 info(`id ${shop.id}`);
 
+// Units, payment methods, warranty terms, discount reasons, role permissions, document
+// sequences and a Retail price list. Without this a brand-new shop has no payment
+// method the till will accept and no price list, so it cannot sell anything.
+for (const fn of ["seed_shop_defaults", "seed_price_defaults"]) {
+  const { error: seedError } = await sb.rpc(fn, { p_shop_id: shop.id });
+  if (seedError) {
+    fail(
+      `The shop was created but its defaults could not be set up (${fn}).`,
+      seedError.message,
+      "Check every migration in supabase/migrations/ has been run, then run `pnpm check`.",
+    );
+  }
+}
+ok("Set up units, payment methods, warranty terms, permissions and a Retail price list");
+
 if (withSamples) {
   await loadSamples(shop.id);
 }

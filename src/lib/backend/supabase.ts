@@ -2,9 +2,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { friendlyError } from "../sale";
 import { supabaseBrowser } from "../supabase/client";
 import type {
-  ApprovalResult, Approver, BranchAdmin, Category, FeatureKey, PaymentMethod, Product,
-  Receipt, Role, SaleInput, SettingRow, SettingTable, SettingsBundle, StaffLookup,
-  StaffMember,
+  ApprovalResult, Approver, BranchAdmin, BulkPriceChange, CatalogueRow, Category,
+  CustomerLookup, FeatureKey, PaymentMethod, PriceList, Product, Receipt, Role, SaleInput,
+  SettingRow, SettingTable, SettingsBundle, StaffLookup, StaffMember,
 } from "../types";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
 import type { Backend } from "./types";
@@ -56,23 +56,42 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
       return data ?? [];
     },
 
-    async listProducts(branchId: string): Promise<Product[]> {
-      // One call: the database joins this branch's stock and its in-stock serials, so
-      // the browser never has to be trusted with which branch it is looking at.
-      const { data, error } = await sb.rpc("branch_products", { p_branch_id: branchId });
+    async listProducts(branchId: string, priceListId?: string | null): Promise<Product[]> {
+      // One call: the database joins this branch's stock, its in-stock serials and the
+      // price from the right list, so the browser is never trusted with any of it.
+      const { data, error } = await sb.rpc("branch_products", {
+        p_branch_id: branchId,
+        p_price_list_id: priceListId ?? null,
+      });
       if (error) throw loadError("products", error);
       type Row = {
         id: string; code: string; barcode: string | null; name: string; brand: string | null;
         category_id: string | null; price: number | string; warranty_months: number;
-        is_serial: boolean; reorder_level: number; stock: number | string;
+        is_serial: boolean; is_inventory: boolean; reorder_level: number; stock: number | string;
+        mrp: number | string | null; min_price: number | string | null; max_price: number | string | null;
         serials: { id: string; serial: string }[];
       };
       return ((data as Row[] | null) ?? []).map((r) => ({
         id: r.id, code: r.code, barcode: r.barcode, name: r.name, brand: r.brand,
         categoryId: r.category_id, price: num(r.price), warrantyMonths: r.warranty_months,
-        isSerial: r.is_serial, reorderLevel: r.reorder_level, stock: num(r.stock),
+        isSerial: r.is_serial, isInventory: r.is_inventory,
+        reorderLevel: r.reorder_level, stock: num(r.stock),
+        mrp: numOrNull(r.mrp), minPrice: numOrNull(r.min_price), maxPrice: numOrNull(r.max_price),
         serials: r.serials ?? [],
       }));
+    },
+
+    async findCustomer(phone: string): Promise<CustomerLookup | null> {
+      const { data, error } = await sb.rpc("customer_by_phone", { p_phone: phone });
+      // A lookup failing must not stop a sale: the customer is a nicety, the sale is not.
+      if (error || !data) return null;
+      const r = data as Record<string, unknown>;
+      return {
+        id: String(r.id), phone: String(r.phone), name: (r.name as string | null) ?? null,
+        priceListId: (r.price_list_id as string | null) ?? null,
+        priceListName: (r.price_list_name as string | null) ?? null,
+        discountPct: num(r.discount_pct),
+      };
     },
 
     async listApprovers(): Promise<Approver[]> {
@@ -109,13 +128,19 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
     async completeSale(input: SaleInput): Promise<Receipt> {
       const { data, error } = await sb.rpc("complete_sale", {
         p_branch_id: input.branchId,
-        p_items: input.lines.map((l) => ({ product_id: l.productId, qty: l.qty, serial_ids: l.serialIds })),
+        p_items: input.lines.map((l) => ({
+          product_id: l.productId, qty: l.qty, serial_ids: l.serialIds,
+          // Left out entirely when the seller did not change it, so the database uses
+          // the owner's price rather than echoing one back from the browser.
+          ...(l.unitPrice == null ? {} : { unit_price: l.unitPrice }),
+        })),
         p_payment_method: input.paymentMethod,
         p_discount_pct: input.discountPct,
         p_approval_id: input.approvalId,
         p_customer_phone: input.customerPhone,
         p_cash_received: input.cashReceived,
         p_payment_ref: input.paymentRef,
+        p_price_list_id: input.priceListId ?? null,
         p_charges: input.chargeIds?.length ? input.chargeIds.map((id) => ({ charge_id: id })) : null,
         p_discount_type_id: input.discountTypeId ?? null,
         p_category_id: input.categoryId ?? null,
@@ -126,6 +151,8 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         name: String(i.name), qty: num(i.qty), unitPrice: num(i.unit_price), lineTotal: num(i.line_total),
         warrantyUntil: (i.warranty_until as string | null) ?? null, serials: (i.serials as string[]) ?? [],
         vatPct: num(i.vat_pct), vatAmount: num(i.vat_amount), vatInclusive: i.vat_inclusive !== false,
+        listPrice: numOrNull(i.list_price), priceOverridden: Boolean(i.price_overridden),
+        isGift: Boolean(i.is_gift),
       }));
       return {
         id: String(r.id), invoiceNo: String(r.invoice_no), createdAt: String(r.created_at),
@@ -139,6 +166,9 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         charges: ((r.charges as { name: string; amount: number | string }[] | null) ?? []).map((c) => ({ name: c.name, amount: num(c.amount) })),
         receiptFooter: (r.receipt_footer as string | null) ?? null,
         binVat: (r.bin_vat as string | null) ?? null,
+        priceListName: (r.price_list_name as string | null) ?? null,
+        customerName: (r.customer_name as string | null) ?? null,
+        customerDiscountPct: num(r.customer_discount_pct),
         paymentMethod: r.payment_method as PaymentMethod,
         cashReceived: numOrNull(r.cash_received), changeGiven: numOrNull(r.change_given),
         paymentRef: (r.payment_ref as string | null) ?? null, customerPhone: (r.customer_phone as string | null) ?? null,
@@ -326,6 +356,85 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
     async setDocumentNextNumber(branchId, docType, next, prefix): Promise<void> {
       const { error } = await sb.rpc("set_document_next_number", {
         p_branch_id: branchId, p_doc_type: docType, p_next: next, p_prefix: prefix ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    // --- Products and prices ---
+
+    async listPriceLists(): Promise<PriceList[]> {
+      const { data, error } = await sb
+        .from("price_lists").select("id, name, is_default, active").order("sort").order("name");
+      if (error) throw loadError("price lists", error);
+      return (data ?? []).map((r) => ({
+        id: r.id, name: r.name, isDefault: r.is_default, active: r.active,
+      }));
+    },
+
+    async loadCatalogue(branchId: string, priceListId?: string | null): Promise<CatalogueRow[]> {
+      const { data, error } = await sb.rpc("catalogue", {
+        p_branch_id: branchId, p_price_list_id: priceListId ?? null,
+      });
+      if (error) throw loadError("the product list", error);
+      type Row = Record<string, unknown>;
+      return ((data as Row[] | null) ?? []).map((r) => ({
+        id: String(r.id), code: String(r.code), barcode: (r.barcode as string | null) ?? null,
+        name: String(r.name), brand: (r.brand as string | null) ?? null,
+        model: (r.model as string | null) ?? null,
+        categoryId: (r.category_id as string | null) ?? null,
+        category: (r.category as string | null) ?? null,
+        unit: (r.unit as string | null) ?? null,
+        specification: (r.specification as string | null) ?? null,
+        warrantyMonths: num(r.warranty_months),
+        warrantyTerm: (r.warranty_term as string | null) ?? null,
+        isSerial: Boolean(r.is_serial), isInventory: r.is_inventory !== false,
+        active: r.active !== false,
+        reorderLevel: num(r.reorder_level),
+        price: num(r.price), mrp: numOrNull(r.mrp),
+        minPrice: numOrNull(r.min_price), maxPrice: numOrNull(r.max_price),
+        stock: num(r.stock), totalStock: num(r.total_stock),
+        // Only spread these in when the database actually sent them: a cashier gets no
+        // `cost` key at all, and copying `undefined` in would be a lie about that.
+        ...("cost" in r ? { cost: num(r.cost) } : {}),
+        ...("margin_pct" in r ? { marginPct: num(r.margin_pct) } : {}),
+      }));
+    },
+
+    async upsertProduct(id, values): Promise<void> {
+      const { error } = await sb.rpc("upsert_product", { p_id: id, p_values: values });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async setPrices({ productId, priceListId, price, mrp, minPrice, maxPrice, branchId }): Promise<void> {
+      const { error } = await sb.rpc("set_prices", {
+        p_product_id: productId, p_price_list_id: priceListId, p_price: price,
+        p_mrp: mrp ?? null, p_min_price: minPrice ?? null, p_max_price: maxPrice ?? null,
+        p_branch_id: branchId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async bulkUpdatePrices({ productIds, priceListId, mode, value, branchId, dryRun }): Promise<BulkPriceChange[]> {
+      const { data, error } = await sb.rpc("bulk_update_prices", {
+        p_product_ids: productIds, p_price_list_id: priceListId,
+        p_mode: mode, p_value: value, p_branch_id: branchId ?? null, p_dry_run: dryRun,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as { changes?: { product_id: string; name: string; from: number | string; to: number | string }[] };
+      return (r.changes ?? []).map((c) => ({
+        productId: c.product_id, name: c.name, from: num(c.from), to: num(c.to),
+      }));
+    },
+
+    async mergeCategories(fromId, intoId): Promise<{ productsMoved: number }> {
+      const { data, error } = await sb.rpc("merge_categories", { p_from: fromId, p_into: intoId });
+      if (error) throw new Error(friendlyError(error.message));
+      return { productsMoved: num((data as Record<string, unknown>).products_moved) };
+    },
+
+    async savePriceList(id, name, isDefault, active): Promise<void> {
+      const { error } = await sb.rpc("save_price_list", {
+        p_id: id, p_name: name, p_is_default: isDefault ?? null, p_active: active ?? null,
       });
       if (error) throw new Error(friendlyError(error.message));
     },

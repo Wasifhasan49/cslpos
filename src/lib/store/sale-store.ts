@@ -22,6 +22,9 @@ interface SaleState {
   changeQty: (p: Product, delta: number) => void;
   toggleSerial: (productId: string, serialId: string) => void;
   removeLine: (productId: string) => void;
+  /** What the seller wants to charge for this line. null puts it back to the owner's
+   *  price, which is different from "0". */
+  setLinePrice: (productId: string, unitPrice: number | null) => void;
   setDiscount: (v: string) => void;
   setPin: (v: string) => void;
   setApprover: (id: string | null) => void;
@@ -81,6 +84,12 @@ export const useSale = create<SaleState>((set, get) => ({
     }),
 
   removeLine: (productId) => set({ lines: get().lines.filter((l) => l.productId !== productId) }),
+  // Changing a price drops any approval: it was given for a different number.
+  setLinePrice: (productId, unitPrice) =>
+    set({
+      lines: get().lines.map((l) => (l.productId === productId ? { ...l, unitPrice } : l)),
+      approvalId: null,
+    }),
   // Changing the discount drops any approval: it was approved for a different amount.
   setDiscount: (v) => set({ discount: v.replace(/[^0-9.]/g, "").slice(0, 5), pin: "", approvalId: null }),
   setPin: (v) => set({ pin: v.replace(/\D/g, "").slice(0, 6) }),

@@ -38,7 +38,8 @@ export function computeTotals(lines: CartLine[], products: Map<string, Product>,
   for (const line of lines) {
     const p = products.get(line.productId);
     if (!p) continue;
-    subtotal += p.price * line.qty;
+    // A seller may have moved this line's price inside the band the owner allowed.
+    subtotal += (line.unitPrice ?? p.price) * line.qty;
     itemCount += line.qty;
   }
   const discountAmount = roundTaka((subtotal * discountPct) / 100);
@@ -69,6 +70,17 @@ export function saleBlocker(s: CheckoutState): string | null {
     if (!p) return "A product in this sale no longer exists. Remove it.";
     if (p.isSerial && line.serialIds.length === 0) return `Pick the serial number for ${p.name}`;
     if (line.qty > p.stock) return `Only ${p.stock} of ${p.name} in stock`;
+    // The band is the owner's standing permission. Below it the sale needs a manager,
+    // so say so here rather than letting the database refuse it after payment is typed.
+    if (line.unitPrice != null && line.unitPrice !== p.price && !s.pinApproved) {
+      const min = p.minPrice ?? p.price;
+      if (line.unitPrice < min) {
+        return `${p.name} can't go below ${formatTaka(min)} without a manager`;
+      }
+      if (p.maxPrice != null && line.unitPrice > p.maxPrice) {
+        return `${p.name} can't go above ${formatTaka(p.maxPrice)} without a manager`;
+      }
+    }
   }
   const totals = computeTotals(s.lines, s.products, s.discountPct);
   if (totals.itemCount === 0) return "Add a product to start";
@@ -158,6 +170,10 @@ export const SALE_ERROR_CODES = [
   "LOCATION_NOT_FOUND", "NOT_ALLOWED", "BAD_PERMISSION", "BAD_SETTING_TABLE",
   "BAD_SETTING_FIELD", "NOTHING_TO_SAVE", "SETTING_NOT_FOUND", "BAD_DOCUMENT_NUMBER",
   "NUMBER_GOES_BACKWARDS", "BAD_DISCOUNT_TYPE", "BAD_CATEGORY", "BAD_CHARGE",
+  "BAD_PRICE", "BAD_PRICE_BAND", "BAD_PRICE_MODE", "PRODUCT_NAME_REQUIRED",
+  "PRODUCT_CODE_REQUIRED", "PRICE_LIST_NOT_FOUND", "PRICE_LIST_NAME_REQUIRED",
+  "LAST_PRICE_LIST", "NO_PRODUCTS_PICKED", "CATEGORY_NOT_FOUND", "SAME_CATEGORY",
+  "SERIAL_CHANGE_HAS_STOCK",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -250,6 +266,19 @@ export function friendlyError(raw: string): string {
     case "BAD_DISCOUNT_TYPE": return "Pick a discount reason from the list.";
     case "BAD_CATEGORY": return "Pick a category from the list.";
     case "BAD_CHARGE": return "That extra charge isn't set up in this shop.";
+    case "BAD_PRICE": return "A price can't be less than nothing.";
+    case "BAD_PRICE_BAND": return "The lowest price can't be more than the highest.";
+    case "BAD_PRICE_MODE": return "Choose whether to set the price, or change it by a percentage or an amount.";
+    case "PRODUCT_NAME_REQUIRED": return "Give the product a name.";
+    case "PRODUCT_CODE_REQUIRED": return "Give the product a code. It's what a barcode scan looks for.";
+    case "PRICE_LIST_NOT_FOUND": return "That price list isn't in this shop.";
+    case "PRICE_LIST_NAME_REQUIRED": return "Give the price list a name.";
+    case "LAST_PRICE_LIST": return "This is the shop's only price list, so it can't be turned off. Make another one the default first.";
+    case "NO_PRODUCTS_PICKED": return "Pick some products first.";
+    case "CATEGORY_NOT_FOUND": return "That category isn't in this shop.";
+    case "SAME_CATEGORY": return "Pick two different categories to merge.";
+    case "SERIAL_CHANGE_HAS_STOCK":
+      return `${detail ?? "This product"} already has stock, so it can't switch between serial-tracked and not. Sell or write off the stock first.`;
     // Keep the raw text so a code we have not seen can still be reported and fixed,
     // instead of everything looking like a network problem.
     default: return `Something went wrong. Tell the owner this: ${raw.trim().slice(0, 120)}`;

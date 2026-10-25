@@ -7,7 +7,7 @@ import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { computeTotals, isSessionExpired, parseDiscount, saleBlocker, searchProducts } from "@/lib/sale";
 import { useSale } from "@/lib/store/sale-store";
-import type { Approver, Category, Product, Receipt } from "@/lib/types";
+import type { Approver, Category, CustomerLookup, Product, Receipt } from "@/lib/types";
 import { ProductPicker } from "./product-picker";
 import { ReceiptDialog } from "./receipt-dialog";
 import { SalePanel } from "./sale-panel";
@@ -34,6 +34,7 @@ export function CounterScreen() {
   const [pinMessage, setPinMessage] = React.useState("");
   const [checkingPin, setCheckingPin] = React.useState(false);
   const [approvedBy, setApprovedBy] = React.useState<string | null>(null);
+  const [customer, setCustomer] = React.useState<CustomerLookup | null>(null);
   const [receipt, setReceipt] = React.useState<Receipt | null>(null);
 
   const say = React.useCallback((msg: string) => {
@@ -100,6 +101,30 @@ export function CounterScreen() {
   React.useEffect(() => { setSaleError(""); }, [sale.lines, sale.discount, sale.phone, sale.method, sale.cashReceived, sale.paymentRef]);
   React.useEffect(() => { setPinMessage(""); }, [sale.pin, sale.approverId]);
 
+  // A customer's price list decides the prices on screen, so the catalogue is re-read
+  // once a whole phone number is typed. A dealer should see dealer prices BEFORE the
+  // sale is completed, not be surprised by the total.
+  React.useEffect(() => {
+    const phone = sale.phone;
+    if (phone.length !== 11) {
+      if (customer) { setCustomer(null); void loadProducts(); }
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const found = await backend.findCustomer(phone);
+        if (cancelled || found?.id === customer?.id) return;
+        setCustomer(found);
+        setProducts(await backend.listProducts(branch.id, found?.priceListId ?? null));
+      } catch {
+        // A customer lookup failing must never stop a sale.
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sale.phone, backend, branch.id]);
+
   const add = (p: Product) => { setSaleError(""); say(sale.addProduct(p)); };
 
   const onEnter = () => {
@@ -142,6 +167,7 @@ export function CounterScreen() {
       const r = await backend.completeSale({
         lines: sale.lines,
         branchId: branch.id,
+        priceListId: customer?.priceListId ?? null,
         paymentMethod: sale.method,
         discountPct,
         approvalId: discountPct > (staff?.discountLimitPct ?? 0) ? sale.approvalId : null,
@@ -168,6 +194,7 @@ export function CounterScreen() {
     useSale.getState().reset();
     setPinMessage("");
     setApprovedBy(null);
+    setCustomer(null);
     setQuery("");
     setTimeout(() => searchRef.current?.focus(), 0);
   }, []);
@@ -244,6 +271,7 @@ export function CounterScreen() {
           nextInvoiceHint="Invoice number is added when you complete"
           submitting={submitting}
           error={saleError}
+          customer={customer}
           approvers={approvers}
           checkingPin={checkingPin}
           pinMessage={pinMessage}

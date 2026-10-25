@@ -4,11 +4,11 @@
 // The demo person is an OWNER with two branches, so everything a shop would be shown —
 // the branch switcher, the whole menu, the approval PIN screen — is reachable. Demo
 // mode is also the sales demo. Nothing here names a real shop.
-import { addMonths, computeTotals, dhakaToday, friendlyError, isValidPhone, roundTaka } from "../sale";
+import { addMonths, dhakaToday, friendlyError, isValidPhone, roundTaka } from "../sale";
 import type {
-  ApprovalResult, Approver, BranchAdmin, FeatureKey, Product, Receipt, ReceiptLine, Role,
-  SaleInput, SerialUnit, SettingRow, SettingTable, SettingsBundle, Staff, StaffLookup,
-  StaffMember,
+  ApprovalResult, Approver, BranchAdmin, BulkPriceChange, CatalogueRow, CustomerLookup,
+  FeatureKey, PriceList, Product, Receipt, ReceiptLine, Role, SaleInput, SerialUnit,
+  SettingRow, SettingTable, SettingsBundle, Staff, StaffLookup, StaffMember,
 } from "../types";
 import type { Backend } from "./types";
 import {
@@ -140,7 +140,8 @@ export function createDemoBackend(): Backend {
   const MANAGER_CAN = new Set(["sell","give_discount","change_price","see_cost","void_sale",
     "return_sale","reprint","approve","receive_stock","adjust_stock","transfer_stock",
     "view_reports","export_reports"]);
-  const CASHIER_CAN = new Set(["sell","give_discount","reprint"]);
+  // change_price means "within the band the owner set" — below it still needs a PIN.
+  const CASHIER_CAN = new Set(["sell","give_discount","change_price","reprint"]);
   const rolePermissions = (["owner","manager","cashier"] as Role[]).flatMap((role) =>
     PERMISSION_KEYS.map((k) => ({
       role, perm: k.key,
@@ -149,6 +150,35 @@ export function createDemoBackend(): Backend {
     })),
   );
   const staffPermissions: { staffId: string; perm: string; allowed: boolean; numLimit: number | null }[] = [];
+
+  // Two price lists, so the dealer rule has something to show, and a band on the
+  // keyboard so "down to the minimum, no further" is demonstrable.
+  const priceLists: PriceList[] = [
+    { id: "pl-retail", name: "Retail", isDefault: true, active: true },
+    { id: "pl-dealer", name: "Dealer", isDefault: false, active: true },
+  ];
+  interface DemoPrice { price: number; mrp: number | null; min: number | null; max: number | null }
+  const prices: Record<string, Record<string, DemoPrice>> = { "pl-retail": {}, "pl-dealer": {} };
+  for (const p of catalogue) {
+    prices["pl-retail"][p.id] = { price: p.price, mrp: null, min: null, max: null };
+  }
+  prices["pl-retail"]["a5"] = { price: 850, mrp: 950, min: 800, max: null };
+  prices["pl-dealer"]["a5"] = { price: 750, mrp: 950, min: 700, max: null };
+  prices["pl-dealer"]["a1"] = { price: 420, mrp: null, min: 400, max: null };
+  prices["pl-dealer"]["a4"] = { price: 400, mrp: null, min: 380, max: null };
+
+  const customers: CustomerLookup[] = [
+    { id: "c-dealer", phone: "01811000000", name: "Karim Traders", priceListId: "pl-dealer", priceListName: "Dealer", discountPct: 0 },
+    { id: "c-regular", phone: "01911000000", name: "Regular Rahim", priceListId: "pl-retail", priceListName: "Retail", discountPct: 8 },
+  ];
+
+  /** Mirrors resolve_price(): the list price, with the list price as the floor when the
+   *  owner set no minimum. */
+  const priceFor = (productId: string, listId: string): DemoPrice => {
+    const onList = prices[listId]?.[productId] ?? prices["pl-retail"][productId];
+    const base = onList ?? { price: catalogue.find((p) => p.id === productId)?.price ?? 0, mrp: null, min: null, max: null };
+    return { ...base, min: base.min ?? base.price };
+  };
 
   let pin = DEMO_PIN;
   let failedPinTries = 0;
@@ -180,16 +210,18 @@ export function createDemoBackend(): Backend {
     return b;
   };
 
-  /** The catalogue as one branch sees it. */
-  const productsAt = (branchId: string): Product[] =>
+  /** The catalogue as one branch sees it, priced from one list. */
+  const productsAt = (branchId: string, listId = "pl-retail"): Product[] =>
     catalogue.map((p) => {
+      const pr = priceFor(p.id, listId);
       const mine: SerialUnit[] = serials
         .filter((s) => s.productId === p.id && s.branchId === branchId && !s.sold)
         .map(({ id, serial }) => ({ id, serial }));
       return {
         id: p.id, code: p.code, barcode: p.barcode, name: p.name, brand: p.brand,
-        categoryId: p.categoryId, price: p.price, warrantyMonths: p.warrantyMonths,
+        categoryId: p.categoryId, price: pr.price, warrantyMonths: p.warrantyMonths,
         isSerial: p.isSerial, reorderLevel: p.reorderLevel,
+        mrp: pr.mrp, minPrice: pr.min, maxPrice: pr.max, isInventory: true,
         stock: p.isSerial ? mine.length : (stock[branchId]?.[p.id] ?? 0),
         serials: mine,
       };
@@ -199,7 +231,11 @@ export function createDemoBackend(): Backend {
     mode: "demo",
     async currentStaff(): Promise<StaffLookup> { return { kind: "ok", staff }; },
     async listCategories() { return DEMO_CATEGORIES; },
-    async listProducts(branchId: string) { branchOr404(branchId); return productsAt(branchId); },
+    async listProducts(branchId: string, priceListId?: string | null) {
+      branchOr404(branchId);
+      return productsAt(branchId, priceListId ?? "pl-retail");
+    },
+    async findCustomer(phone: string) { return customers.find((c) => c.phone === phone) ?? null; },
     async listApprovers(): Promise<Approver[]> {
       return team.filter((m) => m.hasPin && m.active && m.role !== "cashier")
         .map(({ id, name, role }) => ({ id, name, role }));
@@ -234,10 +270,30 @@ export function createDemoBackend(): Backend {
       if (input.lines.length === 0) fail("EMPTY_SALE");
       const today = dhakaToday();
       const items: ReceiptLine[] = [];
-      const atBranch = new Map(productsAt(input.branchId).map((p) => [p.id, p]));
+
+      // The customer's list decides the prices, exactly as complete_sale() does it.
+      const customer = input.customerPhone
+        ? customers.find((c) => c.phone === input.customerPhone) ?? null
+        : null;
+      const listId = input.priceListId ?? customer?.priceListId ?? "pl-retail";
+      const atBranch = new Map(productsAt(input.branchId, listId).map((p) => [p.id, p]));
+
+      // A price outside the band needs the same approval a big discount does, and it is
+      // decided BEFORE anything moves.
+      let needsApproval = input.discountPct > staff.discountLimitPct;
+      for (const line of input.lines) {
+        const p = atBranch.get(line.productId);
+        if (!p) return fail("PRODUCT_NOT_FOUND");
+        if (line.unitPrice != null && line.unitPrice !== p.price) {
+          const min = p.minPrice ?? p.price;
+          if (line.unitPrice < min || (p.maxPrice != null && line.unitPrice > p.maxPrice)) {
+            needsApproval = true;
+          }
+        }
+      }
 
       // Claim the approval first, so a sale is never built on one about to be rejected.
-      if (input.discountPct > staff.discountLimitPct) {
+      if (needsApproval) {
         const id = input.approvalId;
         if (!id) fail("MANAGER_PIN_REQUIRED");
         if (!approvals.delete(id as string)) fail("APPROVAL_NOT_VALID");
@@ -267,8 +323,10 @@ export function createDemoBackend(): Backend {
           stockTaken[p.id] = (stockTaken[p.id] ?? 0) + qty;
         }
 
+        const unit = line.unitPrice ?? p.price;
         items.push({
-          name: p.name, qty, unitPrice: p.price, lineTotal: p.price * qty,
+          name: p.name, qty, unitPrice: unit, lineTotal: unit * qty,
+          listPrice: p.price, priceOverridden: unit !== p.price, isGift: false,
           warrantyUntil: p.warrantyMonths > 0 ? addMonths(today, p.warrantyMonths) : null,
           serials: serials.filter((s) => line.serialIds.includes(s.id)).map((s) => s.serial),
           // Demo mode does not charge VAT: the switch is off, like a new shop.
@@ -276,11 +334,17 @@ export function createDemoBackend(): Backend {
         });
       }
 
-      const totals = computeTotals(
-        input.lines.map((l) => ({ ...l, qty: atBranch.get(l.productId)?.isSerial ? l.serialIds.length : l.qty })),
-        atBranch,
-        input.discountPct,
-      );
+      // The bigger of the manual and the customer's standing discount, never both.
+      const effectivePct = Math.max(input.discountPct, customer?.discountPct ?? 0);
+      const subtotal = items.reduce((sum, i) => sum + i.lineTotal, 0);
+      const discountAmount = roundTaka((subtotal * effectivePct) / 100);
+      const totals = {
+        itemCount: items.reduce((n, i) => n + i.qty, 0),
+        subtotal,
+        discountPct: effectivePct,
+        discountAmount,
+        total: subtotal - discountAmount,
+      };
 
       let change: number | null = null;
       if (input.paymentMethod === "cash") {
@@ -309,6 +373,9 @@ export function createDemoBackend(): Backend {
         changeGiven: change, paymentRef: input.paymentRef, customerPhone: input.customerPhone,
         vatAmount: 0, chargesAmount: 0, charges: [],
         receiptFooter: shopDetails.receiptFooter, binVat: shopDetails.binVat,
+        priceListName: priceLists.find((l) => l.id === listId)?.name ?? null,
+        customerName: customer?.name ?? null,
+        customerDiscountPct: customer?.discountPct ?? 0,
         items,
       };
     },
@@ -457,6 +524,139 @@ export function createDemoBackend(): Backend {
       }
       const entry = { staffId, perm, allowed, numLimit: limit ?? null };
       if (i >= 0) staffPermissions[i] = entry; else staffPermissions.push(entry);
+    },
+
+    // --- Products and prices ---
+
+    async listPriceLists() { return structuredClone(priceLists); },
+
+    async loadCatalogue(branchId: string, priceListId?: string | null): Promise<CatalogueRow[]> {
+      branchOr404(branchId);
+      const listId = priceListId ?? "pl-retail";
+      // The demo person is an owner, so costs are included. A cashier in a real shop
+      // gets rows with no cost key at all.
+      const DEMO_COSTS: Record<string, number> = { a1: 250 };
+      return catalogue.map((p) => {
+        const pr = priceFor(p.id, listId);
+        const cost = DEMO_COSTS[p.id];
+        return {
+          id: p.id, code: p.code, barcode: p.barcode, name: p.name, brand: p.brand,
+          model: null, categoryId: p.categoryId,
+          category: DEMO_CATEGORIES.find((c) => c.id === p.categoryId)?.name ?? null,
+          unit: "pcs", specification: null,
+          warrantyMonths: p.warrantyMonths, warrantyTerm: null,
+          isSerial: p.isSerial, isInventory: true, active: true,
+          reorderLevel: p.reorderLevel,
+          price: pr.price, mrp: pr.mrp, minPrice: pr.min, maxPrice: pr.max,
+          stock: p.isSerial
+            ? serials.filter((s) => s.productId === p.id && s.branchId === branchId && !s.sold).length
+            : (stock[branchId]?.[p.id] ?? 0),
+          totalStock: p.isSerial
+            ? serials.filter((s) => s.productId === p.id && !s.sold).length
+            : Object.values(stock).reduce((n, byProduct) => n + (byProduct[p.id] ?? 0), 0),
+          ...(staff.role === "cashier" ? {} : cost != null ? { cost, marginPct: Math.round(((pr.price - cost) / cost) * 1000) / 10 } : {}),
+        };
+      });
+    },
+
+    async upsertProduct(id, values) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:edit_settings");
+      const v = values as Record<string, string | number | boolean | null>;
+      if (id) {
+        const p = catalogue.find((x) => x.id === id);
+        if (!p) fail("PRODUCT_NOT_FOUND");
+        Object.assign(p!, {
+          name: (v.name as string)?.trim() || p!.name,
+          code: (v.code as string)?.trim() || p!.code,
+          brand: v.brand !== undefined ? (v.brand as string) : p!.brand,
+          categoryId: v.category_id !== undefined ? (v.category_id as string) : p!.categoryId,
+          warrantyMonths: v.warranty_months != null ? Number(v.warranty_months) : p!.warrantyMonths,
+          reorderLevel: v.reorder_level != null ? Number(v.reorder_level) : p!.reorderLevel,
+        });
+        return;
+      }
+      if (!(v.name as string)?.trim()) fail("PRODUCT_NAME_REQUIRED");
+      if (!(v.code as string)?.trim()) fail("PRODUCT_CODE_REQUIRED");
+      const newId = crypto.randomUUID();
+      catalogue.push({
+        id: newId, categoryId: (v.category_id as string) ?? null,
+        code: String(v.code).trim(), barcode: null, name: String(v.name).trim(),
+        brand: (v.brand as string) ?? null, price: Number(v.price) || 0,
+        warrantyMonths: Number(v.warranty_months) || 0, isSerial: false,
+        reorderLevel: Number(v.reorder_level) || 0, serialNumbers: [],
+      });
+      for (const list of priceLists) prices[list.id][newId] = { price: Number(v.price) || 0, mrp: null, min: null, max: null };
+      for (const b of branches) stock[b.id][newId] = 0;
+    },
+
+    async setPrices({ productId, priceListId, price, mrp, minPrice, maxPrice }) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:edit_settings");
+      if (price < 0) fail("BAD_PRICE");
+      if (minPrice != null && maxPrice != null && minPrice > maxPrice) fail("BAD_PRICE_BAND");
+      if (!prices[priceListId]) fail("PRICE_LIST_NOT_FOUND");
+      prices[priceListId][productId] = {
+        price, mrp: mrp ?? null, min: minPrice ?? null, max: maxPrice ?? null,
+      };
+      if (priceLists.find((l) => l.id === priceListId)?.isDefault) {
+        const p = catalogue.find((x) => x.id === productId);
+        if (p) p.price = price;
+      }
+    },
+
+    async bulkUpdatePrices({ productIds, priceListId, mode, value, dryRun }): Promise<BulkPriceChange[]> {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:edit_settings");
+      if (!["set", "percent", "amount"].includes(mode)) fail(`BAD_PRICE_MODE:${mode}`);
+      if (productIds.length === 0) fail("NO_PRODUCTS_PICKED");
+      const out: BulkPriceChange[] = [];
+      for (const id of productIds) {
+        const cur = priceFor(id, priceListId);
+        const next = Math.max(
+          mode === "set" ? value
+            : mode === "percent" ? Math.round(cur.price * (100 + value)) / 100
+            : cur.price + value,
+          0,
+        );
+        out.push({ productId: id, name: catalogue.find((p) => p.id === id)?.name ?? "", from: cur.price, to: next });
+        if (!dryRun) {
+          prices[priceListId][id] = { ...cur, price: next };
+          if (priceLists.find((l) => l.id === priceListId)?.isDefault) {
+            const p = catalogue.find((x) => x.id === id);
+            if (p) p.price = next;
+          }
+        }
+      }
+      return out;
+    },
+
+    async mergeCategories(fromId, intoId) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:edit_settings");
+      if (fromId === intoId) fail("SAME_CATEGORY");
+      let moved = 0;
+      for (const p of catalogue) {
+        if (p.categoryId === fromId) { p.categoryId = intoId; moved += 1; }
+      }
+      const i = DEMO_CATEGORIES.findIndex((c) => c.id === fromId);
+      if (i >= 0) DEMO_CATEGORIES.splice(i, 1);
+      return { productsMoved: moved };
+    },
+
+    async savePriceList(id, name, isDefault, active) {
+      if (staff.role !== "owner") fail("NOT_OWNER");
+      if (id) {
+        const l = priceLists.find((x) => x.id === id);
+        if (!l) fail("PRICE_LIST_NOT_FOUND");
+        if (l!.isDefault && (isDefault === false || active === false)) fail("LAST_PRICE_LIST");
+        l!.name = name.trim() || l!.name;
+        if (isDefault) { for (const o of priceLists) o.isDefault = false; l!.isDefault = true; }
+        if (active != null) l!.active = active;
+        return;
+      }
+      if (!name.trim()) fail("PRICE_LIST_NAME_REQUIRED");
+      const newId = crypto.randomUUID();
+      if (isDefault) for (const o of priceLists) o.isDefault = false;
+      priceLists.push({ id: newId, name: name.trim(), isDefault: Boolean(isDefault), active: true });
+      prices[newId] = {};
+      for (const p of catalogue) prices[newId][p.id] = { price: p.price, mrp: null, min: null, max: null };
     },
 
     async setDocumentNextNumber(branchId, docType, next) {

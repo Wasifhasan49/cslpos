@@ -104,3 +104,58 @@ update public.products set unit_id = (select id from public.units where shop_id 
   where shop_id = '00000000-0000-4000-8000-000000000001';
 update public.products set warranty_term_id = (select id from public.warranty_terms where shop_id = '00000000-0000-4000-8000-000000000001' and name = '1 year replacement')
   where shop_id = '00000000-0000-4000-8000-000000000001' and warranty_months = 12;
+
+-- Retail (default) plus a Dealer list, so the dealer-price rule has something to prove.
+select public.seed_price_defaults('00000000-0000-4000-8000-000000000001');
+
+insert into public.price_lists (id, shop_id, name, is_default, sort) values
+  ('00000000-0000-4000-8000-0000000000f2', '00000000-0000-4000-8000-000000000001', 'Dealer', false, 2)
+on conflict (id) do nothing;
+
+-- Retail bands: the keyboard may be discounted to 800 but no further, and the mouse is
+-- fixed at its list price (no minimum set means the list price IS the floor).
+update public.product_prices set min_price = 800, mrp = 950
+  where product_id = '00000000-0000-4000-8000-0000000000a5'
+    and price_list_id = (select id from public.price_lists
+                         where shop_id = '00000000-0000-4000-8000-000000000001' and is_default);
+
+-- Dealer prices: cheaper, and with their own floor.
+insert into public.product_prices (shop_id, product_id, price_list_id, price, min_price) values
+  ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000a5', '00000000-0000-4000-8000-0000000000f2', 750, 700),
+  ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-0000000000f2', 420, 400),
+  ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000a4', '00000000-0000-4000-8000-0000000000f2', 400, 380)
+on conflict do nothing;
+
+-- The second branch charges more for the splitter, to prove a branch override wins.
+insert into public.product_prices (shop_id, product_id, price_list_id, branch_id, price) values
+  ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000a1',
+   (select id from public.price_lists where shop_id = '00000000-0000-4000-8000-000000000001' and is_default),
+   '00000000-0000-4000-8000-0000000000b2', 550)
+on conflict do nothing;
+
+-- A service: sold at the counter, no stock, never runs out.
+insert into public.products (id, shop_id, code, name, brand, price, warranty_months, is_serial, is_inventory, reorder_level)
+values ('00000000-0000-4000-8000-0000000000ac', '00000000-0000-4000-8000-000000000001',
+        'SVC-OS', 'Windows install and setup', null, 500, 0, false, false, 0)
+on conflict (id) do nothing;
+insert into public.product_prices (shop_id, product_id, price_list_id, price)
+select '00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000ac', id, 500
+from public.price_lists where shop_id = '00000000-0000-4000-8000-000000000001' and is_default
+on conflict do nothing;
+
+-- A dealer customer, so the dealer price applies automatically.
+insert into public.customers (shop_id, phone, name_text, price_list_id, discount_pct) values
+  ('00000000-0000-4000-8000-000000000001', '01811000000', 'Karim Traders',
+   '00000000-0000-4000-8000-0000000000f2', 0)
+on conflict (shop_id, phone) do nothing;
+
+-- A customer with a standing discount the owner granted.
+insert into public.customers (shop_id, phone, name_text, discount_pct) values
+  ('00000000-0000-4000-8000-000000000001', '01911000000', 'Regular Rahim', 8)
+on conflict (shop_id, phone) do nothing;
+
+-- Buy an HDMI cable, get a Type-C adapter free, while the offer runs.
+insert into public.gift_offers (shop_id, buy_product_id, buy_qty, free_product_id, free_qty, starts_on, ends_on)
+values ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000a2', 1,
+        '00000000-0000-4000-8000-0000000000a3', 1, public.dhaka_today(), public.dhaka_today() + 30)
+on conflict do nothing;

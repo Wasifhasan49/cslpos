@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { PAYMENT_METHODS, formatTaka, quickCashAmounts, warrantyLabel, type Totals } from "@/lib/sale";
 import { useSale } from "@/lib/store/sale-store";
-import type { Approver, Product, Staff } from "@/lib/types";
+import type { Approver, CustomerLookup, Product, Staff } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -18,6 +18,9 @@ interface Props {
   nextInvoiceHint: string;
   submitting: boolean;
   error: string;
+  /** The customer, once a whole phone number is typed. Their price list is already
+   *  applied to the prices on screen. */
+  customer: CustomerLookup | null;
   /** Owners and managers who have set an approval PIN. */
   approvers: Approver[];
   checkingPin: boolean;
@@ -28,7 +31,77 @@ interface Props {
   onComplete: () => void;
 }
 
-export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, submitting, error, approvers, checkingPin, pinMessage, approvedBy, onCheckPin, onComplete }: Props) {
+/**
+ * The price on one line, and the way to change it.
+ *
+ * Shown as plain text until someone taps it, because the overwhelmingly common case is
+ * that the owner's price is simply correct and a row of editable boxes would invite
+ * haggling that BMS's empty price list already caused.
+ */
+function LinePrice({ product, line }: { product: Product; line: { productId: string; unitPrice?: number | null } }) {
+  const s = useSale();
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState("");
+
+  const charged = line.unitPrice ?? product.price;
+  const min = product.minPrice ?? product.price;
+
+  if (editing) {
+    return (
+      <form
+        className="flex flex-wrap items-center gap-1.5 py-1"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const n = Number(draft);
+          s.setLinePrice(product.id, draft === "" || Number.isNaN(n) ? null : n);
+          setEditing(false);
+        }}
+      >
+        <Input
+          autoFocus
+          inputMode="decimal"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value.replace(/[^0-9.]/g, ""))}
+          aria-label={`Price for ${product.name}`}
+          className="num h-10 w-24"
+        />
+        <Button type="submit" size="sm" className="h-10">Use it</Button>
+        <Button
+          type="button" variant="ghost" size="sm" className="h-10"
+          onClick={() => { s.setLinePrice(product.id, null); setEditing(false); }}
+        >
+          Reset
+        </Button>
+        <span className="w-full text-xs text-muted">
+          {min < product.price
+            ? `Down to ${formatTaka(min)} without asking. Below that needs a manager.`
+            : "Any change here needs a manager."}
+        </span>
+      </form>
+    );
+  }
+
+  return (
+    <span className="flex flex-wrap items-center gap-1.5 text-[13px] text-muted">
+      <span className={cn("num", charged !== product.price && "font-semibold text-warn-ink")}>
+        {formatTaka(charged)}
+      </span>
+      {charged !== product.price && (
+        <span className="num line-through">{formatTaka(product.price)}</span>
+      )}
+      each · {warrantyLabel(product.warrantyMonths)}
+      <button
+        type="button"
+        onClick={() => { setDraft(String(charged)); setEditing(true); }}
+        className="min-h-11 underline"
+      >
+        change price
+      </button>
+    </span>
+  );
+}
+
+export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, submitting, error, customer, approvers, checkingPin, pinMessage, approvedBy, onCheckPin, onComplete }: Props) {
   const s = useSale();
   const overLimit = totals.discountPct > staff.discountLimitPct;
   const received = parseFloat(s.cashReceived);
@@ -62,7 +135,7 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
               <div className="flex justify-between gap-3">
                 <div className="flex min-w-0 flex-col gap-0.5">
                   <span className="text-[15px] font-semibold leading-snug">{p.name}</span>
-                  <span className="text-[13px] text-muted"><span className="num">{formatTaka(p.price)}</span> each · {warrantyLabel(p.warrantyMonths)}</span>
+                  <LinePrice product={p} line={line} />
                 </div>
                 <Button variant="ghost" size="icon" aria-label={`Remove ${p.name}`} onClick={() => s.removeLine(p.id)}>
                   <X className="size-5 text-muted" />
@@ -120,6 +193,17 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
 
       {s.lines.length > 0 && (
         <div className="flex flex-col gap-4 px-[18px] py-4">
+          {customer && (
+            <div className="flex flex-col gap-0.5 rounded-[10px] bg-ok-bg p-3 text-[13px] text-ok-ink">
+              <span className="font-semibold">{customer.name ?? customer.phone}</span>
+              <span>
+                {customer.priceListName
+                  ? `${customer.priceListName} prices are being used`
+                  : "Retail prices"}
+                {customer.discountPct > 0 && ` · ${customer.discountPct}% standing discount`}
+              </span>
+            </div>
+          )}
           <div className="flex flex-wrap gap-3">
             <div className="flex flex-[1_1_130px] flex-col gap-1.5">
               <Label htmlFor="disc">Discount %</Label>
