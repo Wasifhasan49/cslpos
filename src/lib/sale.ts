@@ -261,6 +261,9 @@ export const SALE_ERROR_CODES = [
   "EMI_BANK_REQUIRED", "EMI_PLAN_NOT_FOUND", "UNKNOWN_SALE_FIELD", "CARD_TYPE_NOT_FOUND",
   "NO_EMI_PLAN", "EMI_BELOW_MINIMUM", "EMI_NOT_ALLOWED", "EXCHANGE_NEEDS_DESCRIPTION",
   "EXCHANGE_OVER_TOTAL", "SPLIT_DOES_NOT_ADD_UP", "EXCHANGE_NEEDS_PRODUCT",
+  "NOTHING_TO_LOOK_UP", "ITEM_REQUIRED", "PROBLEM_REQUIRED", "CLAIM_ALREADY_OPEN",
+  "CLAIM_NOT_FOUND", "CLAIM_NOT_APPROVED", "CLAIM_ALREADY_CLOSED", "BAD_CLAIM_STATUS",
+  "CLAIM_NEEDS_SUPPLIER", "REJECT_REASON_REQUIRED", "NAME_REQUIRED",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -506,6 +509,23 @@ export function friendlyError(raw: string): string {
       return "To put the old item on the shelf, say which product it is going in as.";
     case "SPLIT_DOES_NOT_ADD_UP":
       return `The split has to add up to ${detail ?? "what is being paid now"}.`;
+    case "NOTHING_TO_LOOK_UP":
+      return "Type a serial number, an invoice number or the customer's mobile.";
+    case "ITEM_REQUIRED": return "Say what the item is.";
+    case "PROBLEM_REQUIRED": return "Say what is wrong with it.";
+    case "CLAIM_ALREADY_OPEN":
+      return "There is already an open claim on this unit. Open that one instead of starting a second.";
+    case "CLAIM_NOT_FOUND": return "That claim no longer exists. Reload and try again.";
+    case "CLAIM_NOT_APPROVED":
+      return "This claim is waiting for a manager to approve it before it can move.";
+    case "CLAIM_ALREADY_CLOSED":
+      return `This claim is already ${detail ?? "closed"}.`;
+    case "BAD_CLAIM_STATUS": return "That isn't a step a claim can move to.";
+    case "CLAIM_NEEDS_SUPPLIER":
+      return "Say which supplier it is going to — \"with the supplier\" means nothing without a name.";
+    case "REJECT_REASON_REQUIRED":
+      return "Say why the claim is being turned down. The customer will ask.";
+    case "NAME_REQUIRED": return "Give it a name.";
     case "SERIAL_CHANGE_HAS_STOCK":
       return `${detail ?? "This product"} already has stock, so it can't switch between serial-tracked and not. Sell or write off the stock first.`;
     // Keep the raw text so a code we have not seen can still be reported and fixed,

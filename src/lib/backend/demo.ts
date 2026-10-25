@@ -19,6 +19,7 @@ import type {
   ReturnResult, SaleDetail, SaleDetailLine, SaleRow,
   CustomerAging, CustomerGroup, CustomerRow, CustomerStatement, DueRow, PaymentReceipt,
   StatementEntry, EmiPlan, PriceHelp, SaleField,
+  ClaimRow, ClaimStatus, ProblemType, SupplierRmaRow, Technician, WarrantyHit,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import type { Backend } from "./types";
@@ -79,7 +80,7 @@ export function createDemoBackend(): Backend {
     receiptFooter: "Thank you. Keep this receipt for warranty claims.",
     invoicePrefix: "DEMO", currency: "BDT", aitPct: 0, poApprovalLimit: 0,
     cashShortLimit: 50, returnDays: 7, saleApprovalLimit: 0, approveAllSales: false,
-    cardChargeMode: "absorb" as "absorb" | "add",
+    cardChargeMode: "absorb" as "absorb" | "add", claimApproval: false,
   };
   // `active` defaults to true in every setup table, so the demo rows have to say so
   // too or the whole list reads as switched off.
@@ -238,6 +239,21 @@ export function createDemoBackend(): Backend {
   ];
   // Which categories the shop allows EMI on. Laptops only, as a shop would set it.
   const emiCategories = new Set<string>(["c5"]);
+  // Warranty claims (P11). The faults a computer shop actually sees.
+  const problemTypes: ProblemType[] = [
+    "Not switching on", "Screen fault", "Keyboard fault", "Battery not holding",
+    "Overheating", "No sound", "Port or socket damaged", "Not detected",
+    "Physical damage", "Other",
+  ].map((name) => ({ id: `pt-${name.toLowerCase().replace(/\W+/g, "-")}`, name, active: true }));
+  const technicians: Technician[] = [
+    { id: "tech-1", name: "Shakil (in-house)", phone: "01700-000009", staffId: null, active: true },
+  ];
+  const claims: (ClaimRow & { shopSerialId: string | null })[] = [];
+  const manualWarranties: {
+    serial: string; item: string; phone: string | null; name: string | null;
+    soldOn: string | null; until: string | null; note: string | null;
+  }[] = [];
+  let claimCounter = 1;
 
   /**
    * Mirrors customer_aging(): what is owed, by age, with collections applied OLDEST
@@ -903,6 +919,8 @@ export function createDemoBackend(): Backend {
           ? Boolean(values.approve_all_sales) : shopDetails.approveAllSales,
         cardChargeMode: values.card_charge_mode !== undefined
           ? (values.card_charge_mode as "absorb" | "add") : shopDetails.cardChargeMode,
+        claimApproval: values.claim_approval !== undefined
+          ? Boolean(values.claim_approval) : shopDetails.claimApproval,
       });
       staff.shopName = shopDetails.name;
     },
@@ -1601,6 +1619,383 @@ export function createDemoBackend(): Backend {
       }
       fail("CUSTOMER_NOT_FOUND");
       return { name: "", amount: 0, asOf };
+    },
+
+    // --- Warranty lookup and claims (P11) ---
+
+    async warrantyLookup(query: string): Promise<WarrantyHit[]> {
+      const q = (query ?? "").trim();
+      if (!q) fail("NOTHING_TO_LOOK_UP");
+      const up = q.toUpperCase();
+      const out: WarrantyHit[] = [];
+
+      for (const sale of sales) {
+        for (const line of sale.items) {
+          const matchBySerial = line.serials.some((x) => x.serial.toUpperCase().startsWith(up));
+          const match = matchBySerial
+            || sale.invoiceNo.toUpperCase() === up
+            || sale.customerPhone === q;
+          if (!match) continue;
+          for (const sn of line.serials.length > 0 ? line.serials : [null]) {
+            out.push({
+              kind: "sold",
+              serialId: sn?.id ?? null, serial: sn?.serial ?? null,
+              serialStatus: sn?.status ?? null,
+              productId: line.productId, product: line.name,
+              saleId: sale.id, saleItemId: line.id, invoiceNo: sale.invoiceNo,
+              soldOn: sale.createdAt.slice(0, 10),
+              branch: sale.branch, soldBy: sale.staff,
+              customerId: sale.customerId, customerPhone: sale.customerPhone,
+              customerName: sale.customerName,
+              warrantyMonths: null, warrantyUntil: line.warrantyUntil,
+              warrantyText: null,
+              inWarranty: line.warrantyUntil != null && line.warrantyUntil >= dhakaToday(),
+              daysLeft: line.warrantyUntil
+                ? Math.round((new Date(line.warrantyUntil).getTime()
+                    - new Date(dhakaToday()).getTime()) / 86_400_000)
+                : null,
+              saleStatus: sale.status,
+              openClaim: claims.find(
+                (c) => c.serialId === (sn?.id ?? "") && c.open)?.claimNo ?? null,
+            });
+          }
+        }
+      }
+
+      // A swap unit left through a claim, not a till, so it has no sale line of its own.
+      for (const c of claims) {
+        if (c.status !== "delivered" || !c.replacementSerial) continue;
+        if (!(c.replacementSerial.toUpperCase().startsWith(up)
+              || c.claimNo.toUpperCase() === up || c.customerPhone === q)) continue;
+        const sn = serials.find((x) => x.serial === c.replacementSerial);
+        out.push({
+          kind: "replacement",
+          serialId: sn?.id ?? null, serial: c.replacementSerial,
+          serialStatus: sn?.sold ? "sold" : "in_stock",
+          productId: sn?.productId ?? null,
+          product: catalogue.find((p) => p.id === sn?.productId)?.name ?? null,
+          saleId: null, saleItemId: null, invoiceNo: null,
+          soldOn: c.deliveredAt?.slice(0, 10) ?? null,
+          branch: c.branch, soldBy: c.takenInBy,
+          customerId: null, customerPhone: c.customerPhone, customerName: c.customerName,
+          warrantyMonths: null,
+          // What was LEFT of the original cover, carried across by the claim.
+          warrantyUntil: c.warrantyUntil,
+          warrantyText: `Replaced under claim ${c.claimNo}, carrying the remaining warranty of ${c.serial ?? "the original"}`,
+          inWarranty: c.warrantyUntil != null && c.warrantyUntil >= dhakaToday(),
+          daysLeft: c.warrantyUntil
+            ? Math.round((new Date(c.warrantyUntil).getTime()
+                - new Date(dhakaToday()).getTime()) / 86_400_000)
+            : null,
+          saleStatus: "completed", openClaim: null,
+        });
+      }
+
+      for (const m of manualWarranties) {
+        if (!(m.serial.toUpperCase().startsWith(up) || m.phone === q)) continue;
+        out.push({
+          kind: "manual",
+          serialId: null, serial: m.serial, serialStatus: null,
+          productId: null, product: m.item,
+          saleId: null, saleItemId: null, invoiceNo: null,
+          soldOn: m.soldOn, branch: null, soldBy: null,
+          customerId: null, customerPhone: m.phone, customerName: m.name,
+          warrantyMonths: null, warrantyUntil: m.until, warrantyText: m.note,
+          inWarranty: m.until != null && m.until >= dhakaToday(),
+          daysLeft: m.until
+            ? Math.round((new Date(m.until).getTime() - new Date(dhakaToday()).getTime()) / 86_400_000)
+            : null,
+          saleStatus: null, openClaim: null,
+        });
+      }
+
+      return out;
+    },
+
+    async saveManualWarranty(values) {
+      // A promise the shop is making, so a manager makes it.
+      if (staff.role === "cashier") fail("NOT_MANAGER");
+      const serial = String(values.serial ?? "").trim();
+      if (!serial) fail("SERIAL_REQUIRED:this item");
+      const item = String(values.item_text ?? "").trim()
+        || catalogue.find((p) => p.id === values.product_id)?.name
+        || "";
+      if (!item) fail("ITEM_REQUIRED");
+      const row = {
+        serial, item,
+        phone: (values.customer_phone as string | null) ?? null,
+        name: (values.customer_name as string | null) ?? null,
+        soldOn: (values.sold_on as string | null) ?? null,
+        until: (values.warranty_until as string | null) ?? null,
+        note: (values.note as string | null) ?? null,
+      };
+      const at = manualWarranties.findIndex((m) => m.serial === serial);
+      if (at === -1) manualWarranties.push(row); else manualWarranties[at] = row;
+    },
+
+    async openClaim(input) {
+      const branch = branchOr404(input.branchId);
+      if (!input.problem?.trim()) fail("PROBLEM_REQUIRED");
+      if (!input.serialId && !input.productId && !input.itemText?.trim()) fail("ITEM_REQUIRED");
+
+      let warrantyUntil: string | null = null;
+      let customerPhone = input.customerPhone ?? null;
+      let customerName = input.customerName ?? null;
+      const sn = input.serialId ? serials.find((x) => x.id === input.serialId) : null;
+
+      if (input.serialId) {
+        if (claims.some((c) => c.serialId === input.serialId && c.open)) fail("CLAIM_ALREADY_OPEN");
+        // The cover and the customer come from the sale, not from whatever is typed.
+        for (const sale of sales) {
+          const line = sale.items.find((i) => i.serials.some((x) => x.id === input.serialId));
+          if (!line) continue;
+          warrantyUntil = line.warrantyUntil;
+          customerPhone = customerPhone ?? sale.customerPhone;
+          customerName = customerName ?? sale.customerName;
+          break;
+        }
+        if (!warrantyUntil && sn) {
+          warrantyUntil = manualWarranties.find((m) => m.serial === sn.serial)?.until ?? null;
+        }
+      }
+
+      const inWarranty = warrantyUntil != null && warrantyUntil >= dhakaToday();
+      const claimNo = `CLA-${branch.code}-${new Date().getFullYear()}${String(claimCounter++).padStart(6, "0")}`;
+      const product = catalogue.find((p) => p.id === (input.productId ?? sn?.productId));
+      const row = {
+        id: crypto.randomUUID(), claimNo, status: "received" as ClaimStatus,
+        approvalStatus: (shopDetails.claimApproval ? "awaiting_approval" : "approved") as
+          ClaimRow["approvalStatus"],
+        branch: branch.name, branchId: branch.id,
+        product: product?.name ?? input.itemText ?? null,
+        serial: sn?.serial ?? null, serialId: input.serialId ?? null,
+        shopSerialId: input.serialId ?? null,
+        problem: input.problem.trim(),
+        problemType: problemTypes.find((p) => p.id === input.problemTypeId)?.name ?? null,
+        accessories: input.accessories ?? [],
+        inWarranty, warrantyUntil,
+        customerPhone, customerName,
+        technician: technicians.find((t) => t.id === input.technicianId)?.name ?? null,
+        technicianId: input.technicianId ?? null,
+        supplier: null, supplierId: null, sentAt: null, backAt: null,
+        createdAt: new Date().toISOString(), deliveredAt: null,
+        takenInBy: staff.name, resolution: null, replacementSerial: null,
+        daysWaiting: 0, daysWithSupplier: null, open: true,
+        events: [{
+          at: new Date().toISOString(), to: "received" as ClaimStatus,
+          note: input.problem.trim(), who: staff.name,
+        }],
+        parts: [] as { product: string; qty: number }[],
+      };
+      claims.unshift(row);
+      // In the shop's hands and belonging to someone else: not stock, not sold.
+      if (sn) sn.sold = true;
+      return {
+        id: row.id, claimNo, inWarranty, needsApproval: shopDetails.claimApproval,
+      };
+    },
+
+    async setClaimStatus(input) {
+      const c = claims.find((x) => x.id === input.claimId);
+      if (!c) fail("CLAIM_NOT_FOUND");
+      if (c!.approvalStatus === "awaiting_approval") fail("CLAIM_NOT_APPROVED");
+      if (!c!.open) fail(`CLAIM_ALREADY_CLOSED:${c!.status}`);
+      const allowed = ["diagnosed", "with_supplier", "back_from_supplier", "repaired",
+                       "ready", "delivered", "rejected"];
+      if (!allowed.includes(input.status)) fail(`BAD_CLAIM_STATUS:${input.status}`);
+      if (input.status === "with_supplier" && !(input.supplierId ?? c!.supplierId)) {
+        fail("CLAIM_NEEDS_SUPPLIER");
+      }
+      if (input.status === "rejected" && !input.note?.trim()) fail("REJECT_REASON_REQUIRED");
+
+      const from = c!.status;
+      c!.status = input.status;
+      if (input.supplierId) {
+        c!.supplierId = input.supplierId;
+        c!.supplier = suppliers.find((s) => s.id === input.supplierId)?.name ?? null;
+      }
+      if (input.technicianId) {
+        c!.technicianId = input.technicianId;
+        c!.technician = technicians.find((t) => t.id === input.technicianId)?.name ?? null;
+      }
+      if (input.status === "with_supplier") c!.sentAt = new Date().toISOString();
+      if (input.status === "back_from_supplier") c!.backAt = new Date().toISOString();
+      if (["delivered", "rejected", "repaired"].includes(input.status) && input.note) {
+        c!.resolution = input.note;
+      }
+
+      if (input.status === "delivered") {
+        c!.deliveredAt = new Date().toISOString();
+        c!.open = false;
+        if (input.replacementSerialId) {
+          // A SWAP: the new unit goes to the customer carrying what was left of the
+          // original cover; the dead one stays the shop's problem.
+          const rep = serials.find((x) => x.id === input.replacementSerialId);
+          if (rep) { rep.sold = true; c!.replacementSerial = rep.serial; }
+          const prod = catalogue.find((p) => p.id === rep?.productId);
+          if (prod && !prod.isSerial) {
+            stock[c!.branchId][prod.id] = Math.max((stock[c!.branchId][prod.id] ?? 0) - 1, 0);
+          }
+          noteMovement({
+            at: new Date().toISOString(), product: prod?.name ?? "", code: prod?.code ?? "",
+            change: -1, reason: "adjust_out", why: "other",
+            note: `${c!.claimNo}: given as a warranty replacement`,
+            who: staff.name, location: null,
+          });
+        } else if (c!.shopSerialId) {
+          // The same unit, repaired and handed back. The customer's again.
+          const own = serials.find((x) => x.id === c!.shopSerialId);
+          if (own) own.sold = true;
+        }
+      }
+      if (input.status === "rejected") { c!.open = false; c!.deliveredAt = new Date().toISOString(); }
+
+      c!.events.push({
+        at: new Date().toISOString(), to: input.status,
+        note: input.note ?? null, who: staff.name,
+      });
+      c!.daysWaiting = Math.floor(
+        (new Date(c!.deliveredAt ?? new Date().toISOString()).getTime()
+          - new Date(c!.createdAt).getTime()) / 86_400_000);
+      void from;
+      return {
+        claimNo: c!.claimNo, status: input.status,
+        replacementSerial: c!.replacementSerial,
+      };
+    },
+
+    async approveClaim(claimId, approve, reason) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:approve");
+      const c = claims.find((x) => x.id === claimId);
+      if (!c) fail("CLAIM_NOT_FOUND");
+      if (c!.approvalStatus !== "awaiting_approval") {
+        fail(`NOT_AWAITING_APPROVAL:${c!.approvalStatus}`);
+      }
+      if (!approve && !reason?.trim()) fail("CANCEL_REASON_REQUIRED");
+      c!.approvalStatus = approve ? "approved" : "cancelled";
+    },
+
+    async useClaimPart(claimId, productId, qty = 1, serialId) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:adjust_stock");
+      const c = claims.find((x) => x.id === claimId);
+      if (!c) fail("CLAIM_NOT_FOUND");
+      if (qty <= 0) fail("BAD_QTY:the part");
+      const p = catalogue.find((x) => x.id === productId);
+      if (!p) fail("PRODUCT_NOT_FOUND");
+      if (p!.isSerial) {
+        if (!serialId) fail(`SERIAL_REQUIRED:${p!.name}`);
+        const sn = serials.find((x) => x.id === serialId && !x.sold);
+        if (!sn) fail(`SERIAL_NOT_AVAILABLE:${p!.name}`);
+        sn!.sold = true;
+      } else {
+        if ((stock[c!.branchId][p!.id] ?? 0) < qty) fail(`OUT_OF_STOCK:${p!.name}`);
+        stock[c!.branchId][p!.id] -= qty;
+      }
+      c!.parts.push({ product: p!.name, qty });
+      noteMovement({
+        at: new Date().toISOString(), product: p!.name, code: p!.code, change: -qty,
+        reason: "adjust_out", why: "internal_use",
+        note: `${c!.claimNo}: part used in repair`, who: staff.name, location: null,
+      });
+    },
+
+    async listClaims(input = {}): Promise<ClaimRow[]> {
+      const q = (input.query ?? "").trim().toUpperCase();
+      return claims
+        .filter((c) => !input.branchId || c.branchId === input.branchId)
+        .filter((c) => !input.status
+          || (input.status === "open" ? c.open : c.status === input.status))
+        .filter((c) => !input.technicianId || c.technicianId === input.technicianId)
+        .filter((c) => input.waitingOver == null
+          || Math.floor((new Date(c.deliveredAt ?? new Date().toISOString()).getTime()
+              - new Date(c.createdAt).getTime()) / 86_400_000) >= input.waitingOver)
+        .filter((c) => !q
+          || c.claimNo.toUpperCase().startsWith(q)
+          || (c.serial ?? "").toUpperCase().startsWith(q)
+          || (c.customerPhone ?? "").includes(input.query ?? "")
+          || (c.product ?? "").toUpperCase().includes(q))
+        .map((c) => {
+          // shopSerialId is the demo's own bookkeeping; ClaimRow does not carry it.
+          const row: ClaimRow = {
+            id: c.id, claimNo: c.claimNo, status: c.status,
+            approvalStatus: c.approvalStatus, branch: c.branch, branchId: c.branchId,
+            product: c.product, serial: c.serial, serialId: c.serialId,
+            problem: c.problem, problemType: c.problemType, accessories: c.accessories,
+            inWarranty: c.inWarranty, warrantyUntil: c.warrantyUntil,
+            customerPhone: c.customerPhone, customerName: c.customerName,
+            technician: c.technician, technicianId: c.technicianId,
+            supplier: c.supplier, supplierId: c.supplierId,
+            sentAt: c.sentAt, backAt: c.backAt, createdAt: c.createdAt,
+            deliveredAt: c.deliveredAt, takenInBy: c.takenInBy,
+            resolution: c.resolution, replacementSerial: c.replacementSerial,
+            daysWaiting: c.daysWaiting, daysWithSupplier: c.daysWithSupplier,
+            open: c.open, events: c.events, parts: c.parts,
+          };
+          return structuredClone({
+            ...row,
+            daysWaiting: Math.floor(
+              (new Date(c.deliveredAt ?? new Date().toISOString()).getTime()
+                - new Date(c.createdAt).getTime()) / 86_400_000),
+            daysWithSupplier: c.sentAt
+              ? Math.floor((new Date(c.backAt ?? new Date().toISOString()).getTime()
+                  - new Date(c.sentAt).getTime()) / 86_400_000)
+              : null,
+          });
+        })
+        .sort((a, b) => b.daysWaiting - a.daysWaiting);
+    },
+
+    async supplierRmaList(): Promise<SupplierRmaRow[]> {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:view_reports");
+      return claims
+        .filter((c) => c.status === "with_supplier" && c.supplierId)
+        .map((c) => ({
+          supplier: c.supplier ?? "", supplierId: c.supplierId ?? "",
+          claimNo: c.claimNo, claimId: c.id, product: c.product, serial: c.serial,
+          sentAt: c.sentAt ?? c.createdAt,
+          daysOut: Math.floor(
+            (Date.now() - new Date(c.sentAt ?? c.createdAt).getTime()) / 86_400_000),
+          problem: c.problem, branch: c.branch,
+        }));
+    },
+
+    async listProblemTypes() { return structuredClone(problemTypes.filter((p) => p.active)); },
+
+    async saveProblemType(id, name, active = true) {
+      if (staff.role === "cashier") fail("NOT_MANAGER");
+      if (!name.trim()) fail("NAME_REQUIRED");
+      if (id) {
+        const p = problemTypes.find((x) => x.id === id);
+        if (!p) fail("SETTING_NOT_FOUND");
+        p!.name = name.trim();
+        p!.active = active;
+        return;
+      }
+      problemTypes.push({ id: crypto.randomUUID(), name: name.trim(), active: true });
+    },
+
+    async listTechnicians() { return structuredClone(technicians.filter((t) => t.active)); },
+
+    async saveTechnician(id, values) {
+      if (staff.role === "cashier") fail("NOT_MANAGER");
+      if (!id && !String(values.name ?? "").trim()) fail("NAME_REQUIRED");
+      if (id) {
+        const t = technicians.find((x) => x.id === id);
+        if (!t) fail("SETTING_NOT_FOUND");
+        Object.assign(t!, {
+          name: String(values.name ?? "").trim() || t!.name,
+          phone: "phone" in values ? (values.phone as string | null) : t!.phone,
+          staffId: "staff_id" in values ? (values.staff_id as string | null) : t!.staffId,
+          active: "active" in values ? Boolean(values.active) : t!.active,
+        });
+        return;
+      }
+      technicians.push({
+        id: crypto.randomUUID(), name: String(values.name).trim(),
+        phone: (values.phone as string | null) ?? null,
+        staffId: (values.staff_id as string | null) ?? null,
+        active: true,
+      });
     },
 
     // --- The full counter (P10a) ---

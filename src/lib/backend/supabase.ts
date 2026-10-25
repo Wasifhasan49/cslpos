@@ -14,12 +14,54 @@ import type {
   ApprovalStatus, RefundMethod, ReturnResult, SaleDetail, SaleRow, SaleStatus,
   CustomerAging, CustomerGroup, CustomerRow, CustomerStatement, DueRow, PaymentReceipt,
   StatementEntry, EmiPlan, PriceHelp, SaleField,
+  ClaimEvent, ClaimRow, ClaimStatus, ProblemType, SupplierRmaRow, Technician, WarrantyHit,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
 import type { Backend } from "./types";
 
 const num = (v: unknown) => (v == null ? 0 : Number(v));
+
+/** Claims come back from two functions in the same shape. */
+function readClaim(c: Record<string, unknown>): ClaimRow {
+  return {
+    id: String(c.id), claimNo: String(c.claim_no), status: c.status as ClaimStatus,
+    approvalStatus: c.approval_status as ApprovalStatus,
+    branch: String(c.branch), branchId: String(c.branch_id),
+    product: (c.product as string | null) ?? null,
+    serial: (c.serial as string | null) ?? null,
+    serialId: (c.serial_id as string | null) ?? null,
+    problem: String(c.problem),
+    problemType: (c.problem_type as string | null) ?? null,
+    accessories: (c.accessories as string[] | null) ?? [],
+    inWarranty: Boolean(c.in_warranty),
+    warrantyUntil: (c.warranty_until as string | null) ?? null,
+    customerPhone: (c.customer_phone as string | null) ?? null,
+    customerName: (c.customer_name as string | null) ?? null,
+    technician: (c.technician as string | null) ?? null,
+    technicianId: (c.technician_id as string | null) ?? null,
+    supplier: (c.supplier as string | null) ?? null,
+    supplierId: (c.supplier_id as string | null) ?? null,
+    sentAt: (c.sent_at as string | null) ?? null,
+    backAt: (c.back_at as string | null) ?? null,
+    createdAt: String(c.created_at),
+    deliveredAt: (c.delivered_at as string | null) ?? null,
+    takenInBy: String(c.taken_in_by),
+    resolution: (c.resolution as string | null) ?? null,
+    replacementSerial: (c.replacement_serial as string | null) ?? null,
+    daysWaiting: num(c.days_waiting),
+    daysWithSupplier: numOrNull(c.days_with_supplier),
+    open: Boolean(c.open),
+    events: ((c.events as Record<string, unknown>[] | null) ?? []).map((e) => ({
+      at: String(e.at), to: e.to as ClaimStatus,
+      note: (e.note as string | null) ?? null,
+      who: (e.who as string | null) ?? null,
+    })) as ClaimEvent[],
+    parts: ((c.parts as Record<string, unknown>[] | null) ?? []).map((x) => ({
+      product: String(x.product), qty: num(x.qty),
+    })),
+  };
+}
 
 /** Both customer functions return the same aging shape, snake_cased. */
 function readCustomerAging(v: unknown): CustomerAging {
@@ -393,7 +435,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         "transaction_categories", "sale_fields",
       ];
       const [shopRes, featRes, keysRes, roleRes, staffPermRes, docRes, ...listRes] = await Promise.all([
-        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct, po_approval_limit, cash_short_limit, return_days, sale_approval_limit, approve_all_sales, card_charge_mode").limit(1).maybeSingle(),
+        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct, po_approval_limit, cash_short_limit, return_days, sale_approval_limit, approve_all_sales, card_charge_mode, claim_approval").limit(1).maybeSingle(),
         sb.from("shop_features").select("feature, enabled"),
         sb.from("permission_keys").select("key, label, area, has_limit").order("sort"),
         sb.from("role_permissions").select("role, perm, allowed, num_limit"),
@@ -420,6 +462,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
           saleApprovalLimit: num(shop.sale_approval_limit),
           approveAllSales: Boolean(shop.approve_all_sales),
           cardChargeMode: (shop.card_charge_mode ?? "absorb") as "absorb" | "add",
+          claimApproval: Boolean(shop.claim_approval),
         },
         features: Object.fromEntries((featRes.data ?? []).map((r) => [r.feature, r.enabled])),
         lists,
@@ -992,6 +1035,154 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         supplier: String(r.supplier), amount: num(r.amount), balance: num(r.balance),
         aging: readAging(r.aging),
       };
+    },
+
+    // --- Warranty lookup and claims (P11) ---
+
+    async warrantyLookup(query: string): Promise<WarrantyHit[]> {
+      const { data, error } = await sb.rpc("warranty_lookup", { p_query: query });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((h) => ({
+        kind: h.kind as WarrantyHit["kind"],
+        serialId: (h.serial_id as string | null) ?? null,
+        serial: (h.serial as string | null) ?? null,
+        serialStatus: (h.serial_status as string | null) ?? null,
+        productId: (h.product_id as string | null) ?? null,
+        product: (h.product as string | null) ?? null,
+        saleId: (h.sale_id as string | null) ?? null,
+        saleItemId: (h.sale_item_id as string | null) ?? null,
+        invoiceNo: (h.invoice_no as string | null) ?? null,
+        soldOn: (h.sold_on as string | null) ?? null,
+        branch: (h.branch as string | null) ?? null,
+        soldBy: (h.sold_by as string | null) ?? null,
+        customerId: (h.customer_id as string | null) ?? null,
+        customerPhone: (h.customer_phone as string | null) ?? null,
+        customerName: (h.customer_name as string | null) ?? null,
+        warrantyMonths: numOrNull(h.warranty_months),
+        warrantyUntil: (h.warranty_until as string | null) ?? null,
+        warrantyText: (h.warranty_text as string | null) ?? null,
+        inWarranty: Boolean(h.in_warranty),
+        daysLeft: numOrNull(h.days_left),
+        saleStatus: (h.sale_status as string | null) ?? null,
+        openClaim: (h.open_claim as string | null) ?? null,
+      }));
+    },
+
+    async saveManualWarranty(values): Promise<void> {
+      const { error } = await sb.rpc("save_manual_warranty", { p_values: values });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async openClaim(input) {
+      const { data, error } = await sb.rpc("open_claim", {
+        p_branch_id: input.branchId,
+        p_problem: input.problem,
+        p_serial_id: input.serialId ?? null,
+        p_product_id: input.productId ?? null,
+        p_item_text: input.itemText ?? null,
+        p_problem_type_id: input.problemTypeId ?? null,
+        p_accessories: input.accessories ?? null,
+        p_photo_urls: input.photoUrls ?? null,
+        p_customer_phone: input.customerPhone ?? null,
+        p_customer_name: input.customerName ?? null,
+        p_technician_id: input.technicianId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return {
+        id: String(r.id), claimNo: String(r.claim_no),
+        inWarranty: Boolean(r.in_warranty), needsApproval: Boolean(r.needs_approval),
+      };
+    },
+
+    async setClaimStatus(input) {
+      const { data, error } = await sb.rpc("set_claim_status", {
+        p_claim_id: input.claimId,
+        p_status: input.status,
+        p_note: input.note ?? null,
+        p_supplier_id: input.supplierId ?? null,
+        p_replacement_serial_id: input.replacementSerialId ?? null,
+        p_technician_id: input.technicianId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return {
+        claimNo: String(r.claim_no), status: r.status as ClaimStatus,
+        replacementSerial: (r.replacement_serial as string | null) ?? null,
+      };
+    },
+
+    async approveClaim(claimId, approve, reason): Promise<void> {
+      const { error } = await sb.rpc("approve_claim", {
+        p_claim_id: claimId, p_approve: approve, p_reason: reason ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async useClaimPart(claimId, productId, qty = 1, serialId): Promise<void> {
+      const { error } = await sb.rpc("use_claim_part", {
+        p_claim_id: claimId, p_product_id: productId, p_qty: qty,
+        p_serial_id: serialId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async listClaims(input = {}): Promise<ClaimRow[]> {
+      const { data, error } = await sb.rpc("claim_list", {
+        p_branch_id: input.branchId ?? null,
+        p_status: input.status ?? null,
+        p_technician_id: input.technicianId ?? null,
+        p_waiting_over: input.waitingOver ?? null,
+        p_query: input.query ?? null,
+        p_limit: 100,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map(readClaim);
+    },
+
+    async supplierRmaList(): Promise<SupplierRmaRow[]> {
+      const { data, error } = await sb.rpc("supplier_rma_list");
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((r) => ({
+        supplier: String(r.supplier), supplierId: String(r.supplier_id),
+        claimNo: String(r.claim_no), claimId: String(r.claim_id),
+        product: (r.product as string | null) ?? null,
+        serial: (r.serial as string | null) ?? null,
+        sentAt: String(r.sent_at), daysOut: num(r.days_out),
+        problem: String(r.problem), branch: String(r.branch),
+      }));
+    },
+
+    async listProblemTypes(): Promise<ProblemType[]> {
+      const { data, error } = await sb
+        .from("problem_types").select("id, name, active").order("sort").order("name");
+      if (error) throw loadError("the problem list", error);
+      return ((data ?? []) as ProblemType[]).filter((p) => p.active);
+    },
+
+    async saveProblemType(id, name, active = true): Promise<void> {
+      const { error } = await sb.rpc("save_problem_type", {
+        p_id: id, p_name: name, p_active: active,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async listTechnicians(): Promise<Technician[]> {
+      const { data, error } = await sb
+        .from("technicians").select("id, name, phone, staff_id, active").order("name");
+      if (error) throw loadError("the technicians", error);
+      type Row = {
+        id: string; name: string; phone: string | null; staff_id: string | null;
+        active: boolean;
+      };
+      return ((data ?? []) as Row[]).map((t) => ({
+        id: t.id, name: t.name, phone: t.phone, staffId: t.staff_id, active: t.active,
+      }));
+    },
+
+    async saveTechnician(id, values): Promise<void> {
+      const { error } = await sb.rpc("save_technician", { p_id: id, p_values: values });
+      if (error) throw new Error(friendlyError(error.message));
     },
 
     // --- The full counter (P10a) ---

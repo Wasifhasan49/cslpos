@@ -47,8 +47,15 @@ exception when others then
     raise exception 'EXPECTED % BUT GOT: %', code, sqlerrm;
   end if;
 end; $$;
+-- `ok is not true` rather than `not ok`: a check whose expression came out NULL — an
+-- empty subselect compared against a value, say — must FAIL. `not null` is null, so the
+-- old form let those through silently, which is the worst kind of passing test.
 create function pg_temp.check(ok boolean, what text) returns void language plpgsql as $$
-begin if not ok then raise exception 'CHECK FAILED: %', what; end if; raise notice 'ok: %', what; end; $$;
+begin
+  if ok is null then raise exception 'CHECK WAS NULL (nothing to compare): %', what; end if;
+  if not ok then raise exception 'CHECK FAILED: %', what; end if;
+  raise notice 'ok: %', what;
+end; $$;
 
 -- The owner and the manager each set a PIN.
 set role authenticated;
@@ -3084,6 +3091,283 @@ select pg_temp.expect_error($q$select public.save_emi_plan(null, '{"bank":"X","m
 select pg_temp.check(
   public.price_help('00000000-0000-4000-8000-0000000000a1', :'BRANCH_A') ? 'here',
   'a cashier can see the price help, because that is who it is for');
+
+-- ===========================================================================
+-- 23. WARRANTY LOOKUP AND CLAIMS (P11)
+-- ===========================================================================
+-- The done-when: look up an SSD by serial, open a claim, send it to the
+-- supplier, get a replacement back, deliver it, and the NEW serial carries the
+-- REMAINING warranty of the old one.
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+create table pg_temp.p11 (k text primary key, v uuid);
+
+-- ---- Sell an SSD with a serial, so there is something to claim against ----
+do $$
+declare ser uuid; r jsonb;
+begin
+  perform public.receive_goods('00000000-0000-4000-8000-0000000000b1'::uuid,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a8","qty":2,"unit_cost":5800,
+       "serials":["P11SSD000001","P11SSD000002"]}]');
+  select id into ser from public.serials where serial = 'P11SSD000001';
+  insert into pg_temp.p11 values ('ser', ser);
+  insert into pg_temp.p11 values ('swap', (select id from public.serials where serial = 'P11SSD000002'));
+
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1'::uuid,
+        jsonb_build_array(jsonb_build_object(
+          'product_id', '00000000-0000-4000-8000-0000000000a8', 'qty', 1,
+          'serial_ids', jsonb_build_array(ser))),
+        'cash', 0, null, '01911000777', 7000);
+  insert into pg_temp.p11 values ('sale', (r->>'id')::uuid);
+  raise notice 'ok: SSD sold with serial P11SSD000001, five years of cover';
+end $$;
+
+-- ---- One box: serial, invoice or phone ----
+do $$
+declare hit jsonb;
+begin
+  select x into hit from jsonb_array_elements(public.warranty_lookup('P11SSD000001')) x limit 1;
+  if hit is null then raise exception 'SERIAL LOOKUP FOUND NOTHING'; end if;
+  if not (hit->>'in_warranty')::boolean then raise exception 'SHOULD BE IN WARRANTY: %', hit; end if;
+  if (hit->>'product') not like 'Samsung 980%' then raise exception 'WRONG PRODUCT: %', hit; end if;
+  if (hit->>'branch') <> 'Main branch' then raise exception 'WRONG BRANCH: %', hit; end if;
+  if (hit->>'sold_by') is null then raise exception 'NOBODY SOLD IT: %', hit; end if;
+  -- "8 months left" is what a customer asks; the shop has a date.
+  if (hit->>'days_left')::int <= 0 then raise exception 'NO DAYS LEFT: %', hit; end if;
+  insert into pg_temp.p11 values ('found', null) on conflict do nothing;
+  raise notice 'ok: looked up by serial — % in warranty, % days left',
+    hit->>'product', hit->>'days_left';
+end $$;
+select pg_temp.check(
+  jsonb_array_length(public.warranty_lookup(
+    (select invoice_no from public.sales where id = (select v from pg_temp.p11 where k='sale')))) >= 1,
+  'and the same thing is found by its invoice number');
+select pg_temp.check(
+  jsonb_array_length(public.warranty_lookup('01911000777')) >= 1,
+  'and by the customer''s phone');
+select pg_temp.expect_error($q$select public.warranty_lookup('   ')$q$, 'NOTHING_TO_LOOK_UP');
+
+-- ---- Something sold before the shop switched over ----
+select pg_temp.check(
+  (public.save_manual_warranty(
+    '{"serial":"OLDBMS00001","item_text":"Dell laptop sold under BMS",
+      "customer_phone":"01911000777","sold_on":"2026-01-10","warranty_until":"2027-01-10"}')
+   ->>'serial') = 'OLDBMS00001',
+  'a manager can record a warranty for something sold before the switch');
+select pg_temp.check(
+  (select (x->>'in_warranty')::boolean from jsonb_array_elements(
+     public.warranty_lookup('OLDBMS00001')) x) ,
+  'and it comes up in the same one box, in warranty');
+select pg_temp.expect_error($q$select public.save_manual_warranty('{"serial":"X1"}')$q$, 'ITEM_REQUIRED');
+
+-- ---- Open a claim ----
+do $$
+declare r jsonb;
+begin
+  r := public.open_claim(
+    '00000000-0000-4000-8000-0000000000b1'::uuid,
+    'Not detected by the laptop at all',
+    (select v from pg_temp.p11 where k='ser'),
+    null, null,
+    (select id from public.problem_types where name = 'Not detected'),
+    array['Box', 'Thermal pad'],
+    null, '01911000777', 'Shopno Enterprise');
+  if (r->>'claim_no') not like 'CLA-MB-%' then raise exception 'WRONG CLAIM NUMBER: %', r->>'claim_no'; end if;
+  if not (r->>'in_warranty')::boolean then raise exception 'CLAIM NOT IN WARRANTY: %', r; end if;
+  insert into pg_temp.p11 values ('claim', (r->>'id')::uuid);
+  raise notice 'ok: claim % opened, in warranty until %', r->>'claim_no', r->>'warranty_until';
+end $$;
+-- The unit is in the shop's hands and belongs to someone else: not stock, not sold.
+select pg_temp.check(
+  (select status from public.serials where id = (select v from pg_temp.p11 where k='ser')) = 'rma',
+  'the unit sits in RMA: it is neither stock nor the customer''s while we have it');
+select pg_temp.check(
+  (select count(*) from public.claim_events
+   where claim_id = (select v from pg_temp.p11 where k='claim')) = 1,
+  'and taking it in is the first timed, attributed event');
+-- Two claims on the same laptop is two people chasing the same supplier.
+select pg_temp.expect_error(
+  format($q$select public.open_claim('%s', 'Same fault again', '%s')$q$,
+    :'BRANCH_A', (select v from pg_temp.p11 where k='ser')),
+  'CLAIM_ALREADY_OPEN');
+select pg_temp.expect_error(
+  format($q$select public.open_claim('%s', '   ', '%s')$q$,
+    :'BRANCH_A', (select v from pg_temp.p11 where k='ser')),
+  'PROBLEM_REQUIRED');
+select pg_temp.expect_error(format($q$select public.open_claim('%s', 'A fault')$q$, :'BRANCH_A'), 'ITEM_REQUIRED');
+
+-- ---- Diagnose it, then send it to the supplier ----
+select pg_temp.check(
+  (public.set_claim_status((select v from pg_temp.p11 where k='claim'), 'diagnosed',
+                           'Controller board dead, not repairable here')->>'status') = 'diagnosed',
+  'the technician diagnoses it');
+-- "With the supplier" has to say which supplier, or it means nothing.
+select pg_temp.expect_error(
+  format($q$select public.set_claim_status('%s', 'with_supplier')$q$,
+    (select v from pg_temp.p11 where k='claim')), 'CLAIM_NEEDS_SUPPLIER');
+do $$
+declare r jsonb;
+begin
+  r := public.set_claim_status((select v from pg_temp.p11 where k='claim'), 'with_supplier',
+        'Sent with the week''s RMA batch',
+        (select id from public.suppliers where name = 'Smart Technologies BD'));
+  raise notice 'ok: sent to the supplier';
+end $$;
+select pg_temp.check(
+  (select status from public.serials where id = (select v from pg_temp.p11 where k='ser')) = 'with_supplier',
+  'and the serial says it is out with them, not sitting on our shelf');
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.supplier_rma_list()) x
+   where x->>'serial' = 'P11SSD000001') = 1,
+  'so the supplier RMA list knows what is with whom');
+select pg_temp.check(
+  (select (x->>'days_out')::int from jsonb_array_elements(public.supplier_rma_list()) x
+   where x->>'serial' = 'P11SSD000001') = 0,
+  'and since when');
+
+-- ---- A replacement comes back and is handed over ----
+select pg_temp.check(
+  (public.set_claim_status((select v from pg_temp.p11 where k='claim'), 'back_from_supplier',
+                           'They sent a replacement unit')->>'status') = 'back_from_supplier',
+  'the supplier sends one back');
+select pg_temp.check(
+  (public.set_claim_status((select v from pg_temp.p11 where k='claim'), 'ready',
+                           'Tested, works')->>'status') = 'ready',
+  'it is tested and ready for collection');
+do $$
+declare r jsonb; old_until date; new_until date;
+begin
+  select warranty_until into old_until from public.warranty_claims
+    where id = (select v from pg_temp.p11 where k='claim');
+  r := public.set_claim_status((select v from pg_temp.p11 where k='claim'), 'delivered',
+        'Swapped for a new unit', null, (select v from pg_temp.p11 where k='swap'));
+  if (r->>'replacement_serial') <> 'P11SSD000002' then
+    raise exception 'WRONG REPLACEMENT: %', r;
+  end if;
+  raise notice 'ok: handed over as a swap, with the remaining cover to %', old_until;
+end $$;
+-- THE RULE: the replacement carries what was LEFT of the original cover, not a fresh term.
+select pg_temp.check(
+  (select (x->>'warranty_until')::date from jsonb_array_elements(
+     public.warranty_lookup('P11SSD000002')) x limit 1)
+  = (select warranty_until from public.warranty_claims
+     where id = (select v from pg_temp.p11 where k='claim')),
+  'and the new serial carries the REMAINING warranty of the one it replaced');
+select pg_temp.check(
+  (select status from public.serials where id = (select v from pg_temp.p11 where k='swap')) = 'sold',
+  'the replacement is the customer''s now');
+select pg_temp.check(
+  (select status from public.serials where id = (select v from pg_temp.p11 where k='ser')) = 'rma',
+  'and the dead one stays the shop''s problem, not back on a shelf');
+select pg_temp.check(
+  (select count(*) from public.stock_movements
+   where note like 'CLA-MB-%warranty replacement') = 1,
+  'the replacement leaving the shelf is recorded, because it physically did');
+select pg_temp.check(
+  (select count(*) from public.claim_events
+   where claim_id = (select v from pg_temp.p11 where k='claim')) = 6,
+  'and every step is in the claim''s own history');
+select pg_temp.expect_error(
+  format($q$select public.set_claim_status('%s', 'ready')$q$,
+    (select v from pg_temp.p11 where k='claim')), 'CLAIM_ALREADY_CLOSED');
+
+-- ---- An in-house repair takes parts out of stock ----
+do $$
+declare r jsonb; claim uuid; before_qty integer;
+begin
+  perform public.receive_goods('00000000-0000-4000-8000-0000000000b1'::uuid,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a4","qty":3,"unit_cost":250}]');
+  select coalesce(sum(qty), 0) into before_qty from public.branch_stock
+    where product_id = '00000000-0000-4000-8000-0000000000a4'
+      and branch_id = '00000000-0000-4000-8000-0000000000b1';
+
+  r := public.open_claim('00000000-0000-4000-8000-0000000000b1'::uuid,
+        'Mouse buttons sticking', null, '00000000-0000-4000-8000-0000000000a4',
+        null, null, null, null, '01711000111', 'Walk-in');
+  claim := (r->>'id')::uuid;
+  insert into pg_temp.p11 values ('repair', claim);
+
+  perform public.use_claim_part(claim, '00000000-0000-4000-8000-0000000000a4', 1);
+  if (select coalesce(sum(qty), 0) from public.branch_stock
+      where product_id = '00000000-0000-4000-8000-0000000000a4'
+        and branch_id = '00000000-0000-4000-8000-0000000000b1') <> before_qty - 1 then
+    raise exception 'THE PART DID NOT COME OUT OF STOCK';
+  end if;
+  raise notice 'ok: a part used in an in-house repair comes out of stock';
+end $$;
+select pg_temp.check(
+  (select count(*) from public.stock_movements
+   where reason_detail = 'internal_use' and note like '%part used in repair') = 1,
+  'and the movement says it went into a repair, not out of the door');
+select pg_temp.check(
+  (select (x->>'in_warranty')::boolean from jsonb_array_elements(
+     public.claim_list(null, null, null, null, 'CLA')) x
+   where (x->>'id')::uuid = (select v from pg_temp.p11 where k='repair')) = false,
+  'a claim on something with no sale behind it is recorded as out of warranty');
+
+-- ---- The lists a service counter works from ----
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.claim_list(null, 'open')) x) >= 1,
+  'the open claims are a list of their own');
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.claim_list(null, 'delivered')) x) = 1,
+  'and so are the finished ones');
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.claim_list(null, null, null, 9999)) x) = 0,
+  'and "waiting over 9,999 days" is empty, as it should be');
+select pg_temp.check(
+  (select jsonb_array_length(x->'events') from jsonb_array_elements(public.claim_list()) x
+   where (x->>'id')::uuid = (select v from pg_temp.p11 where k='claim')) = 6,
+  'each claim carries its own timed history');
+select pg_temp.check(
+  (select (x->'accessories'->>0) from jsonb_array_elements(public.claim_list()) x
+   where (x->>'id')::uuid = (select v from pg_temp.p11 where k='claim')) = 'Box',
+  'and what came in with it, so a missing charger has an answer');
+
+-- ---- A shop can make claim steps wait for a manager ----
+select public.save_shop_details('{"claim_approval": true}');
+do $$
+declare r jsonb;
+begin
+  r := public.open_claim('00000000-0000-4000-8000-0000000000b1'::uuid,
+        'Screen flickering', null, '00000000-0000-4000-8000-0000000000aa',
+        null, null, null, null, '01911000777', 'Shopno');
+  if (r->>'needs_approval')::boolean is not true then raise exception 'NOT HELD: %', r; end if;
+  insert into pg_temp.p11 values ('held', (r->>'id')::uuid);
+  raise notice 'ok: with the setting on, a new claim waits for a manager';
+end $$;
+select pg_temp.expect_error(
+  format($q$select public.set_claim_status('%s', 'diagnosed')$q$,
+    (select v from pg_temp.p11 where k='held')), 'CLAIM_NOT_APPROVED');
+select pg_temp.check(
+  (public.approve_claim((select v from pg_temp.p11 where k='held'), true)->>'approval_status') = 'approved',
+  'a manager approves it and the claim can move');
+select pg_temp.check(
+  (public.set_claim_status((select v from pg_temp.p11 where k='held'), 'diagnosed')->>'status') = 'diagnosed',
+  'which it then does');
+select public.save_shop_details('{"claim_approval": false}');
+
+-- ---- Rejecting needs a reason ----
+select pg_temp.expect_error(
+  format($q$select public.set_claim_status('%s', 'rejected')$q$,
+    (select v from pg_temp.p11 where k='held')), 'REJECT_REASON_REQUIRED');
+select pg_temp.check(
+  (public.set_claim_status((select v from pg_temp.p11 where k='held'), 'rejected',
+                           'Physical damage, not covered')->>'status') = 'rejected',
+  'and with one, the claim closes as rejected');
+
+-- ---- Who may do what ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+-- A cashier takes claims in and can answer "where is my laptop?" — that is the job.
+select pg_temp.check(
+  jsonb_array_length(public.warranty_lookup('P11SSD000002')) >= 1,
+  'a cashier can look a warranty up, because that is who the customer asks');
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.claim_list()) x) >= 1,
+  'and can see the claims at their branch');
+select pg_temp.expect_error($q$select public.save_manual_warranty('{"serial":"X","item_text":"Y"}')$q$, 'NOT_MANAGER');
+select pg_temp.expect_error($q$select public.supplier_rma_list()$q$, 'NOT_ALLOWED:view_reports');
+select pg_temp.expect_error($q$select public.save_problem_type(null, 'Invented fault')$q$, 'NOT_MANAGER');
 
 reset role;
 \echo ALL DATABASE CHECKS PASSED

@@ -215,6 +215,19 @@ chains with many branches; CSL's single-branch store is only the first customer.
   price anyone paid, and where the stock is — deliberately **not** cost or margin, which
   stays behind the `see_cost` permission. The on-screen total includes the card and EMI
   charges, because a button saying 72,000 next to a receipt saying 74,880 is a lie.
+- **A replacement carries the REMAINING warranty, not a fresh one** (P11). A customer
+  whose laptop dies in month 22 of 24 gets a machine covered for two more months.
+  A fresh 24 months hands out cover the shop never sold; none at all is what makes
+  people distrust a shop. `set_claim_status()` copies `warranty_until` from the claim
+  onto the swap unit, and `warranty_lookup()` has a third branch for exactly this case —
+  a swap unit left through a claim rather than a till, so it has no sale line of its own
+  and would otherwise look up as unknown. Whether something was in warranty is recorded
+  when the claim is OPENED, not worked out later: a claim opened on the last day of cover
+  is in warranty even if it is settled three weeks after the term ran out.
+  An item in for repair is neither stock nor the customer's — its serial sits at `rma`
+  while the shop has it and `with_supplier` while somebody else does, which is what makes
+  the RMA report answerable. Every status change is timed and attributed, because "how
+  long have you had it?" is the question customers argue about.
 - **Imports upsert by code and never delete** (P4). A shop's export may be partial or
   last week's, so importing one must never remove anything, and re-running the same file
   must change nothing — that is what makes it safe to retry after a timeout. Opening
@@ -289,7 +302,10 @@ The list below is the original short version; BUILD_PROMPTS.md wins where they d
    **Not done:** importing sale lines from Excel for a big corporate order, and the print
    choices (A4 invoice, challan, money receipt, warranty stickers, direct print) which
    belong to P16.
-7. **Warranty lookup** by serial or phone; simple claim log (P11).
+7. ~~**Warranty lookup and claims**~~ — done (P11): one box for serial, invoice or
+   phone; claims with timed steps, technicians, parts out of stock, supplier RMA and a
+   claim slip. **Not done:** photo attachments on a claim (the column is there), and
+   billing an out-of-warranty repair as a sale from the claim itself.
 8. **Owner dashboard** (phone-first), see product decisions above (P12).
 9. **Accounts** (P13 onwards), then SMS receipts and printing.
 10. Before charging other shops: paid Supabase + Vercel plans, backups, error monitoring (Sentry).

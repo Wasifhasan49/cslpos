@@ -13,6 +13,7 @@ import type {
   ApprovalStatus, RefundMethod, ReturnResult, SaleDetail, SaleRow, SaleStatus,
   CustomerGroup, CustomerRow, CustomerStatement, DueRow, PaymentReceipt,
   EmiPlan, PriceHelp, SaleField,
+  ClaimRow, ClaimStatus, ProblemType, SupplierRmaRow, Technician, WarrantyHit,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 
@@ -335,4 +336,52 @@ export interface Backend {
   saveEmiPlan(id: string | null, values: Record<string, unknown>): Promise<void>;
   /** The shop's own extra fields on a sale (BMS "Additional Info"). */
   listSaleFields(): Promise<SaleField[]>;
+
+  // --- Warranty lookup and claims (P11) ---
+  /** One box: a serial, an invoice number or a phone. */
+  warrantyLookup(query: string): Promise<WarrantyHit[]>;
+  /** For something sold before the shop switched over. Manager and owner only. */
+  saveManualWarranty(values: Record<string, unknown>): Promise<void>;
+  /** Take the item in. Whether it was in warranty is recorded at this moment. */
+  openClaim(input: {
+    branchId: string;
+    problem: string;
+    serialId?: string | null;
+    productId?: string | null;
+    itemText?: string | null;
+    problemTypeId?: string | null;
+    accessories?: string[];
+    photoUrls?: string[];
+    customerPhone?: string | null;
+    customerName?: string | null;
+    technicianId?: string | null;
+  }): Promise<{ id: string; claimNo: string; inWarranty: boolean; needsApproval: boolean }>;
+  /** Move the claim along. Every step is timed and attributed. */
+  setClaimStatus(input: {
+    claimId: string;
+    status: ClaimStatus;
+    note?: string | null;
+    supplierId?: string | null;
+    /** A swap: the new unit carries what was left of the old one's cover. */
+    replacementSerialId?: string | null;
+    technicianId?: string | null;
+  }): Promise<{ claimNo: string; status: ClaimStatus; replacementSerial: string | null }>;
+  approveClaim(claimId: string, approve: boolean, reason?: string | null): Promise<void>;
+  /** A part used in an in-house repair. It comes out of stock, because it left it. */
+  useClaimPart(
+    claimId: string, productId: string, qty?: number, serialId?: string | null,
+  ): Promise<void>;
+  listClaims(input?: {
+    branchId?: string | null;
+    status?: ClaimStatus | "open" | null;
+    technicianId?: string | null;
+    waitingOver?: number | null;
+    query?: string | null;
+  }): Promise<ClaimRow[]>;
+  /** What is out with which supplier, and since when. Manager and owner only. */
+  supplierRmaList(): Promise<SupplierRmaRow[]>;
+  listProblemTypes(): Promise<ProblemType[]>;
+  saveProblemType(id: string | null, name: string, active?: boolean): Promise<void>;
+  listTechnicians(): Promise<Technician[]>;
+  saveTechnician(id: string | null, values: Record<string, unknown>): Promise<void>;
 }

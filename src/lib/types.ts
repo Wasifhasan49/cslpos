@@ -323,6 +323,8 @@ export interface ShopDetails {
   approveAllSales: boolean;
   /** Who pays the card company's cut: the shop absorbs it, or it goes on the bill. */
   cardChargeMode: "absorb" | "add";
+  /** Whether a new warranty claim waits for a manager before it can move. */
+  claimApproval: boolean;
 }
 
 /** Which setup list a row belongs to. Matches the tables save_setting_row() allows. */
@@ -1013,4 +1015,105 @@ export interface SaleExtras {
     addToStock?: boolean;
   };
   payments?: SplitPayment[];
+}
+
+// --- P11: warranty lookup and claims ---------------------------------------
+
+export type ClaimStatus =
+  | "received" | "diagnosed" | "with_supplier" | "back_from_supplier"
+  | "repaired" | "ready" | "delivered" | "rejected";
+
+/** One thing the warranty lookup found. */
+export interface WarrantyHit {
+  /** Where it came from: a sale, a warranty swap, or a record typed in by hand. */
+  kind: "sold" | "replacement" | "manual";
+  serialId: string | null;
+  serial: string | null;
+  serialStatus: string | null;
+  productId: string | null;
+  product: string | null;
+  saleId: string | null;
+  saleItemId: string | null;
+  invoiceNo: string | null;
+  soldOn: string | null;
+  branch: string | null;
+  soldBy: string | null;
+  customerId: string | null;
+  customerPhone: string | null;
+  customerName: string | null;
+  warrantyMonths: number | null;
+  warrantyUntil: string | null;
+  /** What the warranty actually covers, in the shop's own words. */
+  warrantyText: string | null;
+  inWarranty: boolean;
+  daysLeft: number | null;
+  saleStatus: string | null;
+  /** The claim already open on this unit, if there is one. */
+  openClaim: string | null;
+}
+
+export interface ClaimEvent {
+  at: string;
+  to: ClaimStatus;
+  note: string | null;
+  who: string | null;
+}
+
+export interface ClaimRow {
+  id: string;
+  claimNo: string;
+  status: ClaimStatus;
+  approvalStatus: ApprovalStatus;
+  branch: string;
+  branchId: string;
+  product: string | null;
+  serial: string | null;
+  serialId: string | null;
+  problem: string;
+  problemType: string | null;
+  /** What came in with it, so a missing charger has an answer. */
+  accessories: string[];
+  inWarranty: boolean;
+  warrantyUntil: string | null;
+  customerPhone: string | null;
+  customerName: string | null;
+  technician: string | null;
+  technicianId: string | null;
+  supplier: string | null;
+  supplierId: string | null;
+  sentAt: string | null;
+  backAt: string | null;
+  createdAt: string;
+  deliveredAt: string | null;
+  takenInBy: string;
+  resolution: string | null;
+  replacementSerial: string | null;
+  /** How long the shop has had it. The figure a customer rings about. */
+  daysWaiting: number;
+  daysWithSupplier: number | null;
+  open: boolean;
+  events: ClaimEvent[];
+  parts: { product: string; qty: number }[];
+}
+
+export interface SupplierRmaRow {
+  supplier: string;
+  supplierId: string;
+  claimNo: string;
+  claimId: string;
+  product: string | null;
+  serial: string | null;
+  sentAt: string;
+  daysOut: number;
+  problem: string;
+  branch: string;
+}
+
+export interface ProblemType { id: string; name: string; active: boolean }
+export interface Technician {
+  id: string;
+  name: string;
+  phone: string | null;
+  staffId: string | null;
+  active: boolean;
 }
