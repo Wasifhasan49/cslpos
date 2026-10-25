@@ -1,13 +1,7 @@
-import { SectionPlaceholder } from "@/components/section-placeholder";
+import { DashboardScreen } from "@/components/dashboard/dashboard-screen";
 import { guardSection } from "@/lib/guard";
 
 export default async function Page() {
   await guardSection("/dashboard");
-  return (
-    <SectionPlaceholder
-      title="Dashboard"
-      what="Today's sales and profit, best sellers, low stock, and whether the cash adds up."
-      comingIn="P12"
-    />
-  );
+  return <DashboardScreen />;
 }

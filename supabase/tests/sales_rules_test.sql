@@ -3369,5 +3369,197 @@ select pg_temp.expect_error($q$select public.save_manual_warranty('{"serial":"X"
 select pg_temp.expect_error($q$select public.supplier_rma_list()$q$, 'NOT_ALLOWED:view_reports');
 select pg_temp.expect_error($q$select public.save_problem_type(null, 'Invented fault')$q$, 'NOT_MANAGER');
 
+-- ===========================================================================
+-- 24. OWNER DASHBOARD (P12)
+-- ===========================================================================
+-- The done-when: today's sales and profit for all branches, switch to one
+-- branch, and tap "Profit" to see the sales behind it.
+--
+-- The thing that has to be right is the PROFIT: it uses the cost as it stood on
+-- the day of the sale, not today's cost. Everything else is arithmetic on top.
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+create table pg_temp.p12 (k text primary key, v uuid);
+
+-- ---- Buy at 300, sell at 500: 200 of profit ----
+-- A brand-new product, so the weighted average cost starts from this delivery and the
+-- figures are the figures in the comment rather than whatever the earlier sections left.
+do $$
+declare r jsonb; prod uuid; branch uuid := '00000000-0000-4000-8000-0000000000b1';
+begin
+  prod := (public.upsert_product(null, '{"code":"P12-WIDGET","name":"P12 Test Widget",
+                                         "price":500,"is_serial":false}')->>'id')::uuid;
+  insert into pg_temp.p12 values ('prod', prod);
+  perform public.set_prices(prod,
+    (select id from public.price_lists where shop_id = '00000000-0000-4000-8000-000000000001'
+     and is_default), 500);
+  perform public.receive_goods(branch,
+    format('[{"product_id":"%s","qty":10,"unit_cost":300}]', prod)::jsonb);
+  r := public.complete_sale(branch,
+    format('[{"product_id":"%s","qty":2}]', prod)::jsonb,
+    'cash', 0, null, null, 1000);
+  insert into pg_temp.p12 values ('sale', (r->>'id')::uuid);
+  raise notice 'ok: 2 widgets bought at 300, sold at 500';
+end $$;
+select pg_temp.check(
+  (select unit_cost from public.sale_item_costs sc
+   join public.sale_items i on i.id = sc.sale_item_id
+   where i.sale_id = (select v from pg_temp.p12 where k='sale')) = 300,
+  'the cost at the time of sale is captured on the line');
+
+-- ---- The cost MOVING afterwards must not change what today earned ----
+-- This is the whole reason the cost is captured rather than looked up.
+do $$
+declare before_profit numeric; after_profit numeric;
+  branch uuid := '00000000-0000-4000-8000-0000000000b1';
+begin
+  before_profit := (public.dashboard(branch)->'today'->>'profit')::numeric;
+  -- The next delivery costs far more, which moves the average cost right up.
+  perform public.receive_goods(branch,
+    format('[{"product_id":"%s","qty":10,"unit_cost":450}]',
+           (select v from pg_temp.p12 where k='prod'))::jsonb);
+  after_profit := (public.dashboard(branch)->'today'->>'profit')::numeric;
+  if after_profit <> before_profit then
+    raise exception 'A LATER DELIVERY CHANGED AN EARLIER SALE''S PROFIT: % then %',
+      before_profit, after_profit;
+  end if;
+  raise notice 'ok: a later, dearer delivery leaves today''s profit exactly where it was';
+end $$;
+
+-- ---- The headline numbers ----
+do $$
+declare d jsonb; branch uuid := '00000000-0000-4000-8000-0000000000b1';
+begin
+  d := public.dashboard(branch);
+  if (d->'today'->>'sale_count')::int < 1 then raise exception 'NO SALES TODAY: %', d->'today'; end if;
+  if (d->'today'->>'sales')::numeric <= 0 then raise exception 'NO TAKINGS: %', d->'today'; end if;
+  if (d->'today'->>'average_sale')::numeric <> round((d->'today'->>'sales')::numeric
+                                                     / (d->'today'->>'sale_count')::int, 2) then
+    raise exception 'AVERAGE DOES NOT DIVIDE: %', d->'today';
+  end if;
+  -- Yesterday and the same day last week are different questions; both are answered.
+  if not (d ? 'before') or not (d ? 'week_before') then
+    raise exception 'NO COMPARISONS: %', d;
+  end if;
+  if (d->'before'->>'from')::date <> public.dhaka_today() - 1 then
+    raise exception 'WRONG COMPARISON WINDOW: %', d->'before';
+  end if;
+  if (d->'week_before'->>'from')::date <> public.dhaka_today() - 7 then
+    raise exception 'WRONG WEEK WINDOW: %', d->'week_before';
+  end if;
+  raise notice 'ok: today %, profit %, % sales, average %',
+    d->'today'->>'sales', d->'today'->>'profit',
+    d->'today'->>'sale_count', d->'today'->>'average_sale';
+end $$;
+
+-- ---- All branches, then one branch ----
+select pg_temp.check(
+  jsonb_array_length(public.dashboard()->'branches') >= 2,
+  'with no branch chosen, every branch is listed on its own');
+select pg_temp.check(
+  (public.dashboard()->'today'->>'sales')::numeric
+  >= (public.dashboard(:'BRANCH_A')->'today'->>'sales')::numeric,
+  'and the whole business is at least what one branch did');
+select pg_temp.check(
+  (public.dashboard(:'BRANCH_A')->>'branch') = 'Main branch',
+  'picking a branch says which one you are looking at');
+select pg_temp.expect_error($q$select public.dashboard(gen_random_uuid())$q$, 'BRANCH_NOT_ALLOWED');
+select pg_temp.expect_error(
+  format($q$select public.dashboard(null, '%s', '%s')$q$,
+    public.dhaka_today(), public.dhaka_today() - 5), 'BAD_DATE_RANGE');
+
+-- ---- Tapping Profit shows the sales behind it ----
+do $$
+declare rows jsonb; total numeric; branch uuid := '00000000-0000-4000-8000-0000000000b1';
+begin
+  rows := public.dashboard_detail('profit', branch);
+  if jsonb_array_length(rows) < 1 then raise exception 'NOTHING BEHIND THE PROFIT: %', rows; end if;
+  select coalesce(sum((x->>'profit')::numeric), 0) into total
+    from jsonb_array_elements(rows) x;
+  -- The sum of what the individual sales earned IS the headline profit. If those two
+  -- disagree, one of them is lying and an owner cannot tell which.
+  if total <> (public.dashboard(branch)->'today'->>'profit')::numeric then
+    raise exception 'THE DETAIL DOES NOT ADD UP TO THE HEADLINE: % vs %',
+      total, (public.dashboard(branch)->'today'->>'profit')::numeric;
+  end if;
+  raise notice 'ok: the sales behind Profit add up to the Profit figure exactly';
+end $$;
+select pg_temp.expect_error($q$select public.dashboard_detail('vibes')$q$, 'BAD_DETAIL_KIND');
+
+-- ---- An uncosted line counts as no profit, and says so ----
+do $$
+declare d jsonb; r jsonb; branch uuid := '00000000-0000-4000-8000-0000000000b1';
+begin
+  -- Received with no cost on the invoice yet — the "receive now, price later" case (P5).
+  perform public.receive_goods(branch,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000ab","qty":2}]');
+  perform public.set_prices('00000000-0000-4000-8000-0000000000ab',
+    (select id from public.price_lists where shop_id = '00000000-0000-4000-8000-000000000001'
+     and is_default), 1050);
+  r := public.complete_sale(branch,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000ab","qty":1}]',
+    'cash', 0, null, null, 1100);
+  d := public.dashboard(branch);
+  if (d->'today'->>'lines_without_cost')::int < 1 then
+    raise exception 'AN UNCOSTED LINE WAS NOT FLAGGED: %', d->'today';
+  end if;
+  raise notice 'ok: a line with no cost counts as no profit and the dashboard says how many';
+end $$;
+
+-- ---- The lists ----
+select pg_temp.check(
+  jsonb_array_length(public.dashboard(:'BRANCH_A')->'best_by_qty') >= 1,
+  'the best sellers by quantity are there');
+select pg_temp.check(
+  jsonb_array_length(public.dashboard(:'BRANCH_A')->'staff') >= 1,
+  'and sales per person');
+select pg_temp.check(
+  (public.dashboard(:'BRANCH_A')->'by_method') ? 'cash',
+  'and the split by payment method');
+select pg_temp.check(
+  jsonb_typeof(public.dashboard(:'BRANCH_A')->'busy_hours') = 'array',
+  'and when the shop is busy');
+select pg_temp.check(
+  (public.dashboard(:'BRANCH_A')->'summary'->>'cash_sales')::numeric > 0,
+  'the BMS-style summary row has the cash sales in it');
+select pg_temp.check(
+  (public.dashboard(:'BRANCH_A')->'summary'->>'credit_sales')::numeric >= 0,
+  'and the credit sales');
+select pg_temp.check(
+  (public.dashboard()->'owed'->>'by_customers')::numeric > 0,
+  'and what customers owe shows at the top level');
+select pg_temp.check(
+  jsonb_typeof(public.dashboard(:'BRANCH_A')->'low_stock') = 'array',
+  'low stock is a list');
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.dashboard(:'BRANCH_A')->'low_stock') x
+   where (x->>'stock')::int > (x->>'reorder_level')::int) = 0,
+  'and only has things at or below their re-order level');
+select pg_temp.check(
+  jsonb_typeof(public.dashboard()->'dusty_stock') = 'array',
+  'and so is the money sitting on a shelf');
+
+-- ---- The watch list ----
+select pg_temp.check(
+  jsonb_array_length(public.dashboard()->'watch') >= 1,
+  'the watch list has the things an owner would want to have been told about');
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.dashboard()->'watch') x
+   where x->>'action' in ('discount_approved', 'price_overridden', 'sale_voided',
+                          'sale_returned', 'price_set', 'bulk_price_change',
+                          'credit_limit_overridden', 'transfer_disputed',
+                          'po_price_overridden', 'stock_corrected', 'shift_closed',
+                          'cash_out', 'opening_balance_set')) =
+  jsonb_array_length(public.dashboard()->'watch'),
+  'and nothing else: it is a watch list, not the whole log');
+
+-- ---- Cost stays out of the counter's hands ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.expect_error($q$select public.dashboard()$q$, 'NOT_ALLOWED:view_reports');
+select pg_temp.expect_error($q$select public.dashboard_detail('profit')$q$, 'NOT_ALLOWED:view_reports');
+select pg_temp.check(
+  (select count(*) from public.sale_item_costs) = 0,
+  'and a cashier cannot read a single captured cost, which is the point of the separate table');
+
 reset role;
 \echo ALL DATABASE CHECKS PASSED

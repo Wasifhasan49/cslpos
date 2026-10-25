@@ -172,8 +172,20 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 
 /** Dhaka "today" as YYYY-MM-DD, independent of the device's timezone. */
 export function dhakaToday(now: Date = new Date()): string {
-  const d = new Date(now.getTime() + 6 * 60 * 60 * 1000);
-  return d.toISOString().slice(0, 10);
+  return dhakaDate(now);
+}
+
+/**
+ * The Dhaka calendar date of a moment.
+ *
+ * An ISO timestamp's first ten characters are its UTC date, and Dhaka is six hours
+ * ahead — so between midnight and 6am local time, slicing the string gives YESTERDAY.
+ * A shop open at 1am would see its night's takings land on the wrong day, which is
+ * exactly the sort of thing nobody notices until the figures are argued about.
+ */
+export function dhakaDate(at: string | Date): string {
+  const t = typeof at === "string" ? new Date(at) : at;
+  return new Date(t.getTime() + 6 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
 export function addMonths(isoDate: string, months: number): string {
@@ -264,6 +276,7 @@ export const SALE_ERROR_CODES = [
   "NOTHING_TO_LOOK_UP", "ITEM_REQUIRED", "PROBLEM_REQUIRED", "CLAIM_ALREADY_OPEN",
   "CLAIM_NOT_FOUND", "CLAIM_NOT_APPROVED", "CLAIM_ALREADY_CLOSED", "BAD_CLAIM_STATUS",
   "CLAIM_NEEDS_SUPPLIER", "REJECT_REASON_REQUIRED", "NAME_REQUIRED",
+  "BAD_DATE_RANGE", "BAD_DETAIL_KIND",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -526,6 +539,8 @@ export function friendlyError(raw: string): string {
     case "REJECT_REASON_REQUIRED":
       return "Say why the claim is being turned down. The customer will ask.";
     case "NAME_REQUIRED": return "Give it a name.";
+    case "BAD_DATE_RANGE": return "The end date is before the start date.";
+    case "BAD_DETAIL_KIND": return "There is nothing to show behind that figure.";
     case "SERIAL_CHANGE_HAS_STOCK":
       return `${detail ?? "This product"} already has stock, so it can't switch between serial-tracked and not. Sell or write off the stock first.`;
     // Keep the raw text so a code we have not seen can still be reported and fixed,

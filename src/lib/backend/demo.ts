@@ -5,7 +5,7 @@
 // the branch switcher, the whole menu, the approval PIN screen — is reachable. Demo
 // mode is also the sales demo. Nothing here names a real shop.
 import {
-  addMonths, dhakaToday, friendlyError, isValidPhone, refundFor, roundTaka,
+  addMonths, dhakaDate, dhakaToday, friendlyError, isValidPhone, refundFor, roundTaka,
 } from "../sale";
 import type {
   ApprovalResult, Approver, BranchAdmin, BulkPriceChange, CatalogueRow, CustomerLookup,
@@ -20,6 +20,7 @@ import type {
   CustomerAging, CustomerGroup, CustomerRow, CustomerStatement, DueRow, PaymentReceipt,
   StatementEntry, EmiPlan, PriceHelp, SaleField,
   ClaimRow, ClaimStatus, ProblemType, SupplierRmaRow, Technician, WarrantyHit,
+  Dashboard, DashboardDetailRow,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import type { Backend } from "./types";
@@ -367,6 +368,8 @@ export function createDemoBackend(): Backend {
     staffId: string; shiftId: string | null; customerId: string | null;
     paidAmount: number; dueAmount: number;
     lineSerialIds: Record<string, string[]>;
+    /** What each line's goods cost when it was sold (P12), by sale-line id. */
+    lineCosts: Record<string, number | null>;
   };
   const sales: DemoSale[] = [];
   let returnCounter = 1;
@@ -715,6 +718,9 @@ export function createDemoBackend(): Backend {
 
       // Keep it, so it can be found by invoice, phone, serial or product name, reprinted
       // and taken back. Each line gets its own id and remembers which units went out.
+      // The cost AT THIS MOMENT, captured per line (P12): working profit out from
+      // today's cost would be wrong by however much costs have moved since.
+      const costAtSale: Record<string, number | null> = {};
       const detailLines: SaleDetailLine[] = items.map((i) => {
         const p = catalogue.find((x) => x.name === i.name);
         return {
@@ -731,6 +737,7 @@ export function createDemoBackend(): Backend {
             .map((x) => ({ id: x.id, serial: x.serial, status: "sold" as string })),
         };
       });
+      for (const l of detailLines) costAtSale[l.id] = costs[l.productId] ?? null;
       const overLimit = shopDetails.approveAllSales
         || (shopDetails.saleApprovalLimit > 0 && totals.total > shopDetails.saleApprovalLimit);
       sales.unshift({
@@ -754,6 +761,7 @@ export function createDemoBackend(): Backend {
         items: detailLines, returns: [],
         lineSerialIds: Object.fromEntries(
           detailLines.map((l) => [l.id, l.serials.map((x) => x.id)])),
+        lineCosts: costAtSale,
       });
 
       return {
@@ -1606,8 +1614,8 @@ export function createDemoBackend(): Backend {
 
     async setOpeningBalance(input) {
       if (staff.role !== "owner") fail("NOT_OWNER");
-      const asOf = input.asOf ?? new Date().toISOString().slice(0, 10);
-      if (asOf > new Date().toISOString().slice(0, 10)) fail("OPENING_DATE_IN_FUTURE");
+      const asOf = input.asOf ?? dhakaToday();
+      if (asOf > dhakaToday()) fail("OPENING_DATE_IN_FUTURE");
       if (input.partyKind === "supplier") {
         const sup = suppliers.find((x) => x.id === input.partyId);
         if (!sup) fail("SUPPLIER_NOT_FOUND");
@@ -1619,6 +1627,260 @@ export function createDemoBackend(): Backend {
       }
       fail("CUSTOMER_NOT_FOUND");
       return { name: "", amount: 0, asOf };
+    },
+
+    // --- The owner dashboard (P12) ---
+
+    async dashboard(branchId, from, to): Promise<Dashboard> {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:view_reports");
+      if (branchId) branchOr404(branchId);
+      const fromDate = from ?? dhakaToday();
+      const toDate = to ?? dhakaToday();
+      if (toDate < fromDate) fail("BAD_DATE_RANGE");
+
+      const days = Math.round(
+        (new Date(toDate).getTime() - new Date(fromDate).getTime()) / 86_400_000) + 1;
+      const shift = (d: string, by: number) =>
+        new Date(new Date(d).getTime() + by * 86_400_000).toISOString().slice(0, 10);
+
+      const inScope = (s: DemoSale) =>
+        s.status === "completed" && (!branchId || s.branchId === branchId);
+      const between = (s: DemoSale, a: string, b: string) =>
+        dhakaDate(s.createdAt) >= a && dhakaDate(s.createdAt) <= b;
+
+      // Profit per line: what was charged after its share of the discount, less what the
+      // goods cost ON THE DAY. A line with no captured cost earns nothing rather than
+      // everything — the mistake that makes every report look wonderful.
+      const lineProfit = (s: DemoSale, l: SaleDetailLine) => {
+        const cost = s.lineCosts[l.id];
+        const charged = Math.round(l.lineTotal * (100 - s.discountPct)) / 100;
+        return cost == null ? null : charged - cost * l.qty;
+      };
+      const totalsFor = (a: string, b: string) => {
+        const mine = sales.filter((s) => inScope(s) && between(s, a, b));
+        const salesTotal = mine.reduce((n, s) => n + s.total, 0);
+        const profit = mine.reduce(
+          (n, s) => n + s.items.reduce((m, l) => m + (lineProfit(s, l) ?? 0), 0), 0);
+        const noCost = mine.reduce(
+          (n, s) => n + s.items.filter((l) => s.lineCosts[l.id] == null).length, 0);
+        return {
+          sales: roundTaka(salesTotal), profit: roundTaka(profit),
+          saleCount: mine.length,
+          averageSale: mine.length > 0 ? roundTaka(salesTotal / mine.length) : 0,
+          linesWithoutCost: noCost,
+        };
+      };
+
+      const today = totalsFor(fromDate, toDate);
+      const before = totalsFor(shift(fromDate, -days), shift(fromDate, -1));
+      const weekBefore = totalsFor(shift(fromDate, -7), shift(toDate, -7));
+      const mine = sales.filter((s) => inScope(s) && between(s, fromDate, toDate));
+
+      const byMethod: Record<string, number> = {};
+      for (const s of mine) byMethod[s.paymentMethod] = (byMethod[s.paymentMethod] ?? 0) + s.total;
+
+      const perProduct = new Map<string, {
+        product: string; qty: number; sales: number; profit: number;
+      }>();
+      for (const s of mine) {
+        for (const l of s.items) {
+          const was = perProduct.get(l.productId)
+            ?? { product: l.name, qty: 0, sales: 0, profit: 0 };
+          was.qty += l.qty;
+          was.sales += Math.round(l.lineTotal * (100 - s.discountPct)) / 100;
+          was.profit += lineProfit(s, l) ?? 0;
+          perProduct.set(l.productId, was);
+        }
+      }
+
+      const perStaff = new Map<string, {
+        staff: string; sales: number; saleCount: number; discountGiven: number; profit: number;
+      }>();
+      for (const s of mine) {
+        const was = perStaff.get(s.staffId)
+          ?? { staff: s.staff, sales: 0, saleCount: 0, discountGiven: 0, profit: 0 };
+        was.sales += s.total;
+        was.saleCount += 1;
+        was.discountGiven += s.discountAmount;
+        was.profit += s.items.reduce((m, l) => m + (lineProfit(s, l) ?? 0), 0);
+        perStaff.set(s.staffId, was);
+      }
+
+      const hours = new Map<number, { sales: number; count: number }>();
+      for (const s of sales) {
+        if (!inScope(s)) continue;
+        if (dhakaDate(s.createdAt) < shift(dhakaToday(), -6)) continue;
+        const h = new Date(s.createdAt).getHours();
+        const was = hours.get(h) ?? { sales: 0, count: 0 };
+        was.sales += s.total;
+        was.count += 1;
+        hours.set(h, was);
+      }
+
+      const branchRows = branches.filter((b) => b.active).map((b) => {
+        const theirs = sales.filter(
+          (s) => s.status === "completed" && s.branchId === b.id && between(s, fromDate, toDate));
+        return {
+          branchId: b.id, branch: b.name,
+          sales: roundTaka(theirs.reduce((n, s) => n + s.total, 0)),
+          profit: roundTaka(theirs.reduce(
+            (n, s) => n + s.items.reduce((m, l) => m + (lineProfit(s, l) ?? 0), 0), 0)),
+          saleCount: theirs.length,
+        };
+      });
+
+      const forBranches = branchId ? [branchId] : branches.filter((b) => b.active).map((b) => b.id);
+      const lowStock = forBranches.flatMap((bid) =>
+        productsAt(bid)
+          .filter((p) => p.stock <= p.reorderLevel)
+          .map((p) => ({
+            productId: p.id, product: p.name, code: p.code,
+            branch: branches.find((b) => b.id === bid)?.name ?? "",
+            branchId: bid, stock: p.stock, reorderLevel: p.reorderLevel,
+            sold30: movements
+              .filter((m) => m.product === p.name && m.reason === "sale")
+              .reduce((n, m) => n - m.change, 0),
+            elsewhere: branches
+              .filter((b) => b.id !== bid && b.active)
+              .map((b) => ({
+                branch: b.name,
+                qty: productsAt(b.id).find((x) => x.id === p.id)?.stock ?? 0,
+              }))
+              .filter((x) => x.qty > 0),
+          })))
+        .slice(0, 25);
+
+      // Money sitting on a shelf: nothing sold in 60 days, valued at what it cost.
+      const soldLately = new Set(
+        sales
+          .filter((s) => dhakaDate(s.createdAt) >= shift(dhakaToday(), -60))
+          .flatMap((s) => s.items.map((l) => l.productId)));
+      const dustyStock = catalogue
+        .map((p) => {
+          const stockHere = forBranches.reduce(
+            (n, bid) => n + (productsAt(bid).find((x) => x.id === p.id)?.stock ?? 0), 0);
+          const cost = costs[p.id] ?? null;
+          return {
+            productId: p.id, product: p.name, code: p.code, stock: stockHere,
+            cost, tiedUp: roundTaka(stockHere * (cost ?? 0)), lastSold: null as string | null,
+          };
+        })
+        .filter((x) => x.stock > 0 && !soldLately.has(x.productId))
+        .sort((a, b) => b.tiedUp - a.tiedUp)
+        .slice(0, 25);
+
+      return {
+        from: fromDate, to: toDate, days,
+        branchId: branchId ?? null,
+        branch: branchId ? branches.find((b) => b.id === branchId)?.name ?? null : null,
+        today,
+        before: {
+          sales: before.sales, profit: before.profit, saleCount: before.saleCount,
+          from: shift(fromDate, -days), to: shift(fromDate, -1),
+        },
+        weekBefore: {
+          sales: weekBefore.sales, profit: weekBefore.profit,
+          from: shift(fromDate, -7), to: shift(toDate, -7),
+        },
+        branches: branchRows.sort((a, b) => b.sales - a.sales),
+        byMethod,
+        summary: {
+          cashSales: roundTaka(mine.filter((s) => s.paymentMethod !== "due")
+            .reduce((n, s) => n + (s.total - s.dueAmount), 0)),
+          creditSales: roundTaka(mine.reduce((n, s) => n + s.dueAmount, 0)),
+          salesReturns: roundTaka(mine.reduce(
+            (n, s) => n + s.returns.reduce((m, r) => m + r.total, 0), 0)),
+          cashPurchases: roundTaka(deliveries.filter((d) => !d.isCredit)
+            .reduce((n, d) => n + d.total, 0)),
+          creditPurchases: roundTaka(deliveries.filter((d) => d.isCredit)
+            .reduce((n, d) => n + d.total, 0)),
+          purchaseReturns: 0,
+          claimsTaken: claims.filter(
+            (c) => dhakaDate(c.createdAt) >= fromDate && dhakaDate(c.createdAt) <= toDate).length,
+          moneyIn: roundTaka(customerPayments
+            .filter((p) => dhakaDate(p.at) >= fromDate && dhakaDate(p.at) <= toDate)
+            .reduce((n, p) => n + p.amount, 0)),
+          moneyOut: 0,
+        },
+        busyHours: [...hours.entries()]
+          .map(([hour, v]) => ({ hour, sales: roundTaka(v.sales), count: v.count }))
+          .sort((a, b) => a.hour - b.hour),
+        bestByProfit: [...perProduct.entries()]
+          .map(([productId, v]) => ({
+            productId, product: v.product, qty: v.qty,
+            sales: roundTaka(v.sales), profit: roundTaka(v.profit),
+          }))
+          .sort((a, b) => (b.profit ?? 0) - (a.profit ?? 0))
+          .slice(0, 10),
+        bestByQty: [...perProduct.entries()]
+          .map(([productId, v]) => ({
+            productId, product: v.product, qty: v.qty, sales: roundTaka(v.sales),
+          }))
+          .sort((a, b) => b.qty - a.qty)
+          .slice(0, 10),
+        staff: [...perStaff.entries()]
+          .map(([staffId, v]) => ({
+            staffId, staff: v.staff, sales: roundTaka(v.sales), saleCount: v.saleCount,
+            discountGiven: roundTaka(v.discountGiven), profit: roundTaka(v.profit),
+          }))
+          .sort((a, b) => b.sales - a.sales),
+        lowStock,
+        dustyStock,
+        owed: {
+          byCustomers: roundTaka(customers.reduce((n, c) => n + Math.max(dueFor(c.id), 0), 0)),
+          toSuppliers: roundTaka(suppliers.filter((s) => !s.isCashOnly)
+            .reduce((n, s) => n + Math.max(s.balance, 0), 0)),
+        },
+        // The demo has no audit log of its own; the real one reads audit_log.
+        watch: [],
+      };
+    },
+
+    async dashboardDetail(kind, branchId, from, to): Promise<DashboardDetailRow[]> {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:view_reports");
+      const kinds = ["sales", "profit", "returns", "dues", "supplier_dues"];
+      if (!kinds.includes(kind)) fail(`BAD_DETAIL_KIND:${kind}`);
+      const fromDate = from ?? dhakaToday();
+      const toDate = to ?? dhakaToday();
+
+      if (kind === "sales" || kind === "profit") {
+        return sales
+          .filter((s) => s.status === "completed"
+            && (!branchId || s.branchId === branchId)
+            && dhakaDate(s.createdAt) >= fromDate
+            && dhakaDate(s.createdAt) <= toDate)
+          .map((s) => ({
+            id: s.id, invoice_no: s.invoiceNo, at: s.createdAt, branch: s.branch,
+            staff: s.staff, customer: s.customerName ?? s.customerPhone,
+            total: s.total, discount: s.discountAmount,
+            payment_method: s.paymentMethod,
+            profit: roundTaka(s.items.reduce((n, l) => {
+              const cost = s.lineCosts[l.id];
+              if (cost == null) return n;
+              return n + Math.round(l.lineTotal * (100 - s.discountPct)) / 100 - cost * l.qty;
+            }, 0)),
+            lines_without_cost: s.items.filter((l) => s.lineCosts[l.id] == null).length,
+            items: s.items.map((l) => l.name).join(", "),
+          }));
+      }
+      if (kind === "returns") {
+        return sales.flatMap((s) => s.returns.map((r) => ({
+          id: r.id, return_no: r.returnNo, at: r.createdAt, branch: r.branch,
+          invoice_no: s.invoiceNo, total: r.total, refund_method: r.refundMethod,
+          reason: r.reason, customer: s.customerName ?? s.customerPhone,
+        })));
+      }
+      if (kind === "dues") {
+        return customers
+          .filter((c) => dueFor(c.id) > 0)
+          .map((c) => ({
+            id: c.id, name: c.name, phone: c.phone, company: c.company,
+            owed: dueFor(c.id), payment_days: c.paymentDays,
+          }));
+      }
+      return suppliers
+        .filter((s) => !s.isCashOnly && s.balance > 0)
+        .map((s) => ({ id: s.id, name: s.name, phone: s.phone, owed: s.balance }));
     },
 
     // --- Warranty lookup and claims (P11) ---
@@ -1643,7 +1905,7 @@ export function createDemoBackend(): Backend {
               serialStatus: sn?.status ?? null,
               productId: line.productId, product: line.name,
               saleId: sale.id, saleItemId: line.id, invoiceNo: sale.invoiceNo,
-              soldOn: sale.createdAt.slice(0, 10),
+              soldOn: dhakaDate(sale.createdAt),
               branch: sale.branch, soldBy: sale.staff,
               customerId: sale.customerId, customerPhone: sale.customerPhone,
               customerName: sale.customerName,
@@ -1675,7 +1937,7 @@ export function createDemoBackend(): Backend {
           productId: sn?.productId ?? null,
           product: catalogue.find((p) => p.id === sn?.productId)?.name ?? null,
           saleId: null, saleItemId: null, invoiceNo: null,
-          soldOn: c.deliveredAt?.slice(0, 10) ?? null,
+          soldOn: c.deliveredAt ? dhakaDate(c.deliveredAt) : null,
           branch: c.branch, soldBy: c.takenInBy,
           customerId: null, customerPhone: c.customerPhone, customerName: c.customerName,
           warrantyMonths: null,
@@ -2014,7 +2276,7 @@ export function createDemoBackend(): Backend {
       return {
         productId,
         lastPriceToCustomer: theirs[0] ? lineFor(theirs[0])!.unitPrice : null,
-        lastPriceToCustomerOn: theirs[0] ? theirs[0].createdAt.slice(0, 10) : null,
+        lastPriceToCustomerOn: theirs[0] ? dhakaDate(theirs[0].createdAt) : null,
         lastPrice: mine[0] ? lineFor(mine[0])!.unitPrice : null,
         here: productsAt(branchId).find((x) => x.id === productId)?.stock ?? 0,
         // Where else it is, so "we haven't got one" can become "the other branch has two".
@@ -2206,7 +2468,7 @@ export function createDemoBackend(): Backend {
               .map((p) => p.at).sort().pop() ?? null,
             oldestDue: sales
               .filter((s) => s.customerId === c.id && s.dueAmount > 0)
-              .map((s) => s.createdAt.slice(0, 10)).sort()[0] ?? null,
+              .map((s) => dhakaDate(s.createdAt)).sort()[0] ?? null,
           };
         })
         .sort((a, b) => b.overdue - a.overdue || b.owed - a.owed);
@@ -2258,7 +2520,7 @@ export function createDemoBackend(): Backend {
         owns: mine
           .filter((s) => s.status === "completed")
           .flatMap((s) => s.items.flatMap((i) => i.serials.map((x) => ({
-            serial: x.serial, product: i.name, bought: s.createdAt.slice(0, 10),
+            serial: x.serial, product: i.name, bought: dhakaDate(s.createdAt),
             invoiceNo: s.invoiceNo, warrantyUntil: i.warrantyUntil,
             inWarranty: i.warrantyUntil != null && i.warrantyUntil >= dhakaToday(),
             status: x.status,
@@ -2303,13 +2565,13 @@ export function createDemoBackend(): Backend {
       const q = (input.query ?? "").trim().toLowerCase();
       return sales
         .filter((s) => (mine ? s.staffId === staff.id : true))
-        .filter((s) => (mine ? s.createdAt.slice(0, 10) === today : true))
+        .filter((s) => (mine ? dhakaDate(s.createdAt) === today : true))
         .filter((s) => (input.branchId ? s.branchId === input.branchId : true))
         .filter((s) => (input.staffId && !mine ? s.staffId === input.staffId : true))
         .filter((s) => (input.method ? s.paymentMethod === input.method : true))
         .filter((s) => (input.status ? s.status === input.status : true))
-        .filter((s) => (input.from ? s.createdAt.slice(0, 10) >= input.from : true))
-        .filter((s) => (input.to ? s.createdAt.slice(0, 10) <= input.to : true))
+        .filter((s) => (input.from ? dhakaDate(s.createdAt) >= input.from : true))
+        .filter((s) => (input.to ? dhakaDate(s.createdAt) <= input.to : true))
         .filter((s) => !q
           || s.invoiceNo.toLowerCase().includes(q)
           || (s.customerPhone ?? "").includes(q)
@@ -2335,7 +2597,7 @@ export function createDemoBackend(): Backend {
       const today = dhakaToday();
       const daysOld = Math.max(
         0,
-        Math.floor((new Date(today).getTime() - new Date(sale!.createdAt.slice(0, 10)).getTime())
+        Math.floor((new Date(today).getTime() - new Date(dhakaDate(sale!.createdAt)).getTime())
           / 86_400_000));
       // The demo's own bookkeeping (who rang it up, which drawer, which serial ids are
       // on which line) is not part of SaleDetail, so it is rebuilt rather than spread.
@@ -2354,7 +2616,7 @@ export function createDemoBackend(): Backend {
         voidReason: sale!.voidReason, refundMethod: sale!.refundMethod,
         customerPhone: sale!.customerPhone, customerName: sale!.customerName,
         items: sale!.items, returns: sale!.returns,
-        sameDay: sale!.createdAt.slice(0, 10) === today,
+        sameDay: dhakaDate(sale!.createdAt) === today,
         daysOld,
         returnDays: shopDetails.returnDays,
       });
@@ -2366,7 +2628,7 @@ export function createDemoBackend(): Backend {
       const sale = sales.find((s) => s.id === input.saleId);
       if (!sale) fail("SALE_NOT_FOUND");
       if (sale!.status === "void") fail("SALE_ALREADY_VOID");
-      if (sale!.createdAt.slice(0, 10) !== dhakaToday()) fail("VOID_TOO_LATE");
+      if (dhakaDate(sale!.createdAt) !== dhakaToday()) fail("VOID_TOO_LATE");
       if (sale!.items.some((i) => i.returnedQty > 0)) fail("SALE_PARTLY_RETURNED");
 
       for (const line of sale!.items) {

@@ -14,6 +14,7 @@ import type {
   CustomerGroup, CustomerRow, CustomerStatement, DueRow, PaymentReceipt,
   EmiPlan, PriceHelp, SaleField,
   ClaimRow, ClaimStatus, ProblemType, SupplierRmaRow, Technician, WarrantyHit,
+  Dashboard, DashboardDetailKind, DashboardDetailRow,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 
@@ -384,4 +385,14 @@ export interface Backend {
   saveProblemType(id: string | null, name: string, active?: boolean): Promise<void>;
   listTechnicians(): Promise<Technician[]>;
   saveTechnician(id: string | null, values: Record<string, unknown>): Promise<void>;
+
+  // --- The owner dashboard (P12) ---
+  /** Everything the dashboard shows, in ONE round trip. Dates default to today. */
+  dashboard(branchId?: string | null, from?: string | null, to?: string | null): Promise<Dashboard>;
+  /** What is behind a tapped figure — a number an owner can't open is one they have
+   *  to take on trust. */
+  dashboardDetail(
+    kind: DashboardDetailKind, branchId?: string | null,
+    from?: string | null, to?: string | null,
+  ): Promise<DashboardDetailRow[]>;
 }

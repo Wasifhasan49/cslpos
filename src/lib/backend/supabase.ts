@@ -15,12 +15,90 @@ import type {
   CustomerAging, CustomerGroup, CustomerRow, CustomerStatement, DueRow, PaymentReceipt,
   StatementEntry, EmiPlan, PriceHelp, SaleField,
   ClaimEvent, ClaimRow, ClaimStatus, ProblemType, SupplierRmaRow, Technician, WarrantyHit,
+  Dashboard, DashboardDetailRow,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
 import type { Backend } from "./types";
 
 const num = (v: unknown) => (v == null ? 0 : Number(v));
+
+/** The dashboard arrives snake_cased in one object. */
+function readDashboard(v: unknown): Dashboard {
+  const d = (v ?? {}) as Record<string, unknown>;
+  const t = (d.today ?? {}) as Record<string, unknown>;
+  const b = (d.before ?? {}) as Record<string, unknown>;
+  const w = (d.week_before ?? {}) as Record<string, unknown>;
+  const sm = (d.summary ?? {}) as Record<string, unknown>;
+  const owed = (d.owed ?? {}) as Record<string, unknown>;
+  const rows = (k: string) => ((d[k] as Record<string, unknown>[] | null) ?? []);
+  return {
+    from: String(d.from), to: String(d.to), days: num(d.days),
+    branchId: (d.branch_id as string | null) ?? null,
+    branch: (d.branch as string | null) ?? null,
+    today: {
+      sales: num(t.sales), profit: num(t.profit), saleCount: num(t.sale_count),
+      averageSale: num(t.average_sale), linesWithoutCost: num(t.lines_without_cost),
+    },
+    before: {
+      sales: num(b.sales), profit: num(b.profit), saleCount: num(b.sale_count),
+      from: String(b.from), to: String(b.to),
+    },
+    weekBefore: {
+      sales: num(w.sales), profit: num(w.profit),
+      from: String(w.from), to: String(w.to),
+    },
+    branches: rows("branches").map((x) => ({
+      branchId: String(x.branch_id), branch: String(x.branch),
+      sales: num(x.sales), profit: num(x.profit), saleCount: num(x.sale_count),
+    })),
+    byMethod: (d.by_method as Record<string, number> | null) ?? {},
+    summary: {
+      cashSales: num(sm.cash_sales), creditSales: num(sm.credit_sales),
+      salesReturns: num(sm.sales_returns), cashPurchases: num(sm.cash_purchases),
+      creditPurchases: num(sm.credit_purchases), purchaseReturns: num(sm.purchase_returns),
+      claimsTaken: num(sm.claims_taken), moneyIn: num(sm.money_in),
+      moneyOut: num(sm.money_out),
+    },
+    busyHours: rows("busy_hours").map((x) => ({
+      hour: num(x.hour), sales: num(x.sales), count: num(x.count),
+    })),
+    bestByProfit: rows("best_by_profit").map((x) => ({
+      productId: String(x.product_id), product: String(x.product),
+      qty: num(x.qty), sales: num(x.sales), profit: numOrNull(x.profit),
+    })),
+    bestByQty: rows("best_by_qty").map((x) => ({
+      productId: String(x.product_id), product: String(x.product),
+      qty: num(x.qty), sales: num(x.sales),
+    })),
+    staff: rows("staff").map((x) => ({
+      staffId: String(x.staff_id), staff: String(x.staff), sales: num(x.sales),
+      saleCount: num(x.sale_count), discountGiven: num(x.discount_given),
+      profit: num(x.profit),
+    })),
+    lowStock: rows("low_stock").map((x) => ({
+      productId: String(x.product_id), product: String(x.product), code: String(x.code),
+      branch: String(x.branch), branchId: String(x.branch_id),
+      stock: num(x.stock), reorderLevel: num(x.reorder_level), sold30: num(x.sold_30),
+      elsewhere: ((x.elsewhere as Record<string, unknown>[] | null) ?? []).map((e) => ({
+        branch: String(e.branch), qty: num(e.qty),
+      })),
+    })),
+    dustyStock: rows("dusty_stock").map((x) => ({
+      productId: String(x.product_id), product: String(x.product), code: String(x.code),
+      stock: num(x.stock), cost: numOrNull(x.cost), tiedUp: num(x.tied_up),
+      lastSold: (x.last_sold as string | null) ?? null,
+    })),
+    owed: { byCustomers: num(owed.by_customers), toSuppliers: num(owed.to_suppliers) },
+    watch: rows("watch").map((x) => ({
+      at: String(x.at), action: String(x.action), entity: String(x.entity),
+      entityId: (x.entity_id as string | null) ?? null,
+      branch: (x.branch as string | null) ?? null,
+      who: (x.who as string | null) ?? null,
+      details: (x.details as Record<string, unknown> | null) ?? null,
+    })),
+  };
+}
 
 /** Claims come back from two functions in the same shape. */
 function readClaim(c: Record<string, unknown>): ClaimRow {
@@ -1035,6 +1113,27 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         supplier: String(r.supplier), amount: num(r.amount), balance: num(r.balance),
         aging: readAging(r.aging),
       };
+    },
+
+    // --- The owner dashboard (P12) ---
+
+    async dashboard(branchId, from, to): Promise<Dashboard> {
+      const { data, error } = await sb.rpc("dashboard", {
+        p_branch_id: branchId ?? null, p_from: from ?? null, p_to: to ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return readDashboard(data);
+    },
+
+    async dashboardDetail(kind, branchId, from, to): Promise<DashboardDetailRow[]> {
+      const { data, error } = await sb.rpc("dashboard_detail", {
+        p_kind: kind, p_branch_id: branchId ?? null,
+        p_from: from ?? null, p_to: to ?? null, p_limit: 100,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      // Each kind lists different things, so the rows stay as they came; the screen
+      // knows which columns a kind has.
+      return (data as DashboardDetailRow[] | null) ?? [];
     },
 
     // --- Warranty lookup and claims (P11) ---

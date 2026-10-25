@@ -1117,3 +1117,73 @@ export interface Technician {
   staffId: string | null;
   active: boolean;
 }
+
+// --- P12: the owner dashboard ----------------------------------------------
+
+export interface DashboardTotals {
+  sales: number;
+  profit: number;
+  saleCount: number;
+  averageSale: number;
+  /** Lines the shop has no cost for. Shown, not hidden: the profit is short by them. */
+  linesWithoutCost: number;
+}
+
+export interface Dashboard {
+  from: string;
+  to: string;
+  days: number;
+  branchId: string | null;
+  branch: string | null;
+  today: DashboardTotals;
+  /** The same length of time immediately before. */
+  before: { sales: number; profit: number; saleCount: number; from: string; to: string };
+  /** The same days a week earlier — a different question from "yesterday". */
+  weekBefore: { sales: number; profit: number; from: string; to: string };
+  branches: {
+    branchId: string; branch: string; sales: number; profit: number; saleCount: number;
+  }[];
+  byMethod: Record<string, number>;
+  /** The row an owner coming from BMS expects to see. */
+  summary: {
+    cashSales: number;
+    creditSales: number;
+    salesReturns: number;
+    cashPurchases: number;
+    creditPurchases: number;
+    purchaseReturns: number;
+    claimsTaken: number;
+    moneyIn: number;
+    moneyOut: number;
+  };
+  busyHours: { hour: number; sales: number; count: number }[];
+  bestByProfit: {
+    productId: string; product: string; qty: number; sales: number; profit: number | null;
+  }[];
+  bestByQty: { productId: string; product: string; qty: number; sales: number }[];
+  staff: {
+    staffId: string; staff: string; sales: number; saleCount: number;
+    discountGiven: number; profit: number;
+  }[];
+  lowStock: {
+    productId: string; product: string; code: string; branch: string; branchId: string;
+    stock: number; reorderLevel: number; sold30: number;
+    elsewhere: { branch: string; qty: number }[];
+  }[];
+  dustyStock: {
+    productId: string; product: string; code: string; stock: number;
+    cost: number | null; tiedUp: number; lastSold: string | null;
+  }[];
+  owed: { byCustomers: number; toSuppliers: number };
+  watch: {
+    at: string; action: string; entity: string; entityId: string | null;
+    branch: string | null; who: string | null;
+    details: Record<string, unknown> | null;
+  }[];
+}
+
+export type DashboardDetailKind =
+  | "sales" | "profit" | "returns" | "dues" | "supplier_dues";
+
+/** One row behind a tapped figure. Deliberately loose: each kind lists different things. */
+export type DashboardDetailRow = Record<string, unknown>;

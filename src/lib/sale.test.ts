@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDemoBackend } from "./backend/demo";
 import {
-  addMonths, computeTotals, dhakaToday, friendlyError, isSessionExpired, pinScreenError, quickCashAmounts, refundFor, SALE_ERROR_CODES, saleBlocker, searchProducts, type CheckoutState,
+  addMonths, computeTotals, dhakaDate, dhakaToday, friendlyError, isSessionExpired, pinScreenError, quickCashAmounts, refundFor, SALE_ERROR_CODES, saleBlocker, searchProducts, type CheckoutState,
 } from "./sale";
 
 // Stock is per branch now, so the product map comes from a branch.
@@ -220,5 +220,26 @@ describe("the partial-return rule", () => {
 
   it("refunds nothing for a quantity of nothing", () => {
     expect(refundFor(keyboard, 0, 10)).toBe(0);
+  });
+});
+
+describe("the Dhaka date of a moment", () => {
+  // Dhaka is UTC+6, so an ISO string's first ten characters are the WRONG date for the
+  // six hours after local midnight. A shop open at 1am would otherwise see its takings
+  // land on the day before.
+  it("rolls over at Dhaka midnight, not at UTC midnight", () => {
+    // 2026-10-26 01:30 in Dhaka is 2026-10-25 19:30 UTC.
+    expect(dhakaDate("2026-10-25T19:30:00.000Z")).toBe("2026-10-26");
+    // And 2026-10-25 23:30 Dhaka is still the 25th.
+    expect(dhakaDate("2026-10-25T17:30:00.000Z")).toBe("2026-10-25");
+  });
+
+  it("agrees with dhakaToday for the same moment", () => {
+    const at = new Date("2026-10-25T19:30:00.000Z");
+    expect(dhakaDate(at)).toBe(dhakaToday(at));
+  });
+
+  it("takes a Date or an ISO string", () => {
+    expect(dhakaDate(new Date("2026-03-01T20:00:00.000Z"))).toBe("2026-03-02");
   });
 });

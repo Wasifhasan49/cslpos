@@ -228,6 +228,25 @@ chains with many branches; CSL's single-branch store is only the first customer.
   while the shop has it and `with_supplier` while somebody else does, which is what makes
   the RMA report answerable. Every status change is timed and attributed, because "how
   long have you had it?" is the question customers argue about.
+- **Profit needs the cost at the time of sale** (P12). A product's average cost moves
+  every time stock is received, so working out last month's profit from today's cost is
+  wrong by however much prices have moved — and always in the flattering direction when
+  costs are rising. `sale_item_costs` captures it per line as the sale happens, via a
+  trigger on `sale_items` rather than a ninth copy of `complete_sale()`. It is a separate
+  table, not a column on `sale_items`, because cashiers can read `sale_items` to print a
+  receipt and a cost column there would hand every cashier the shop's margins. A line
+  with no captured cost counts as **no profit**, not as pure profit, and the dashboard
+  says how many such lines there are — a profit figure built on half-costed lines is
+  worse than no figure. The whole dashboard comes back from ONE `dashboard()` call: on 4G
+  in a shop, six round trips is six chances to be slow. Every headline figure can be
+  tapped (`dashboard_detail()`), because a number an owner cannot open is one they have
+  to take on trust, which is the whole complaint about BMS.
+- **Dhaka dates, not UTC slices.** `dhakaDate()` in `src/lib/sale.ts` turns a moment into
+  its Dhaka calendar date. An ISO string's first ten characters are its UTC date, and
+  Dhaka is six hours ahead, so between midnight and 6am slicing the string gives
+  YESTERDAY — a shop open at 1am would see its night's takings land on the wrong day.
+  The database already did this right (`at time zone 'Asia/Dhaka'`); the demo backend
+  did not, until P12.
 - **Imports upsert by code and never delete** (P4). A shop's export may be partial or
   last week's, so importing one must never remove anything, and re-running the same file
   must change nothing — that is what makes it safe to retry after a timeout. Opening
@@ -306,7 +325,11 @@ The list below is the original short version; BUILD_PROMPTS.md wins where they d
    phone; claims with timed steps, technicians, parts out of stock, supplier RMA and a
    claim slip. **Not done:** photo attachments on a claim (the column is there), and
    billing an out-of-warranty repair as a sale from the claim itself.
-8. **Owner dashboard** (phone-first), see product decisions above (P12).
+8. ~~**Owner dashboard**~~ — done (P12): today's sales and profit against yesterday and
+   last week, per branch, the BMS-style summary row, busy hours, best sellers, low and
+   dusty stock, sales per person, money owed, and a watch list — all in one round trip,
+   with every headline figure tappable. **Not done:** charts beyond the busy-hours bars,
+   and staff attendance (waiting on P14b).
 9. **Accounts** (P13 onwards), then SMS receipts and printing.
 10. Before charging other shops: paid Supabase + Vercel plans, backups, error monitoring (Sentry).
 
