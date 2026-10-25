@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDemoBackend } from "./backend/demo";
 import {
-  SALE_ERROR_CODES, addMonths, computeTotals, dhakaToday, friendlyError, isSessionExpired,
-  pinScreenError, quickCashAmounts, saleBlocker, searchProducts, type CheckoutState,
+  addMonths, computeTotals, dhakaToday, friendlyError, isSessionExpired, pinScreenError, quickCashAmounts, refundFor, SALE_ERROR_CODES, saleBlocker, searchProducts, type CheckoutState,
 } from "./sale";
 
 // Stock is per branch now, so the product map comes from a branch.
@@ -188,5 +187,38 @@ describe("demo backend follows the same rules as the database", () => {
     const ssd = (await b.listProducts(B1)).find((p) => p.id === "a8")!;
     expect(ssd.stock).toBe(2);
     expect(ssd.serials.map((s) => s.serial)).not.toContain("S64DNX0T41822");
+  });
+});
+
+describe("the partial-return rule", () => {
+  // The same figures as supabase/tests/sales_rules_test.sql, so the screen and the
+  // database cannot drift apart on the one piece of arithmetic a customer will check.
+  const keyboard = { qty: 2, lineTotal: 1700, vatAmount: 0, vatInclusive: true };
+
+  it("gives back the share of the discount the line actually carried", () => {
+    // 2 keyboards at 850 with 10% off the whole sale: one back is 765, not 850.
+    expect(refundFor(keyboard, 1, 10)).toBe(765);
+    expect(refundFor(keyboard, 2, 10)).toBe(1530);
+  });
+
+  it("refunds the full price when there was no discount", () => {
+    expect(refundFor(keyboard, 1, 0)).toBe(850);
+  });
+
+  it("adds back VAT that was charged on top, and not VAT already in the price", () => {
+    const exclusive = { qty: 2, lineTotal: 1700, vatAmount: 153, vatInclusive: false };
+    // 765 charged + 76.50 of the 153 VAT.
+    expect(refundFor(exclusive, 1, 10)).toBe(841.5);
+    const inclusive = { qty: 2, lineTotal: 1700, vatAmount: 153, vatInclusive: true };
+    // The tax is inside the 765 already; adding it again would refund it twice.
+    expect(refundFor(inclusive, 1, 10)).toBe(765);
+  });
+
+  it("refunds nothing for a gift line, which went out at nothing", () => {
+    expect(refundFor({ qty: 1, lineTotal: 0 }, 1, 0)).toBe(0);
+  });
+
+  it("refunds nothing for a quantity of nothing", () => {
+    expect(refundFor(keyboard, 0, 10)).toBe(0);
   });
 });

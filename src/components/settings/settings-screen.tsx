@@ -150,6 +150,8 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
     invoice_prefix: s.invoicePrefix, ait_pct: String(s.aitPct),
     po_approval_limit: String(s.poApprovalLimit),
     cash_short_limit: String(s.cashShortLimit),
+    return_days: String(s.returnDays),
+    sale_approval_limit: String(s.saleApprovalLimit),
   });
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm({ ...form, [k]: e.target.value });
@@ -164,6 +166,8 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
           ait_pct: Number(form.ait_pct) || 0,
           po_approval_limit: Number(form.po_approval_limit) || 0,
           cash_short_limit: Number(form.cash_short_limit) || 0,
+          return_days: Number(form.return_days) || 0,
+          sale_approval_limit: Number(form.sale_approval_limit) || 0,
         }), true);
       }}
     >
@@ -220,6 +224,30 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
           onChange={set("cash_short_limit")} disabled={readOnly} className="num"
         />
       </Field>
+      <div className="flex flex-wrap gap-3">
+        <div className="flex-[1_1_180px]">
+          <Field
+            label="Returns are routine for (days)"
+            hint="Past this a manager has to approve the return. 0 means every return needs one."
+          >
+            <Input
+              inputMode="numeric" value={form.return_days}
+              onChange={set("return_days")} disabled={readOnly} className="num"
+            />
+          </Field>
+        </div>
+        <div className="flex-[1_1_180px]">
+          <Field
+            label="Sales over this wait for approval"
+            hint="0 means never. The goods still go out; what waits is the posting to the books."
+          >
+            <Input
+              inputMode="numeric" value={form.sale_approval_limit}
+              onChange={set("sale_approval_limit")} disabled={readOnly} className="num"
+            />
+          </Field>
+        </div>
+      </div>
       <Field label="Receipt footer" hint="The last line on every receipt.">
         <Input value={form.receipt_footer} onChange={set("receipt_footer")} disabled={readOnly} />
       </Field>

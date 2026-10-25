@@ -276,6 +276,12 @@ export interface ShopDetails {
   poApprovalLimit: number;
   /** How far out the cash drawer can be before it is flagged. */
   cashShortLimit: number;
+  /** How long after a sale a return is routine. Past it, a manager approves. */
+  returnDays: number;
+  /** Sales over this wait for approval before posting. 0 means no threshold. */
+  saleApprovalLimit: number;
+  /** Every sale waits for approval, whatever it is worth. */
+  approveAllSales: boolean;
 }
 
 /** Which setup list a row belongs to. Matches the tables save_setting_row() allows. */
@@ -671,4 +677,110 @@ export interface ShiftClosed {
   counted?: number;
   difference?: number;
   overLimit?: boolean;
+}
+
+// --- P9: sales history, void and returns -----------------------------------
+
+export type SaleStatus = "completed" | "void";
+export type ApprovalStatus = "approved" | "awaiting_approval" | "cancelled";
+export type RefundMethod =
+  | "cash" | "bkash" | "nagad" | "card" | "store_credit" | "reduce_due";
+
+/** One row in the sales list. */
+export interface SaleRow {
+  id: string;
+  invoiceNo: string;
+  createdAt: string;
+  branch: string;
+  branchId: string;
+  staff: string;
+  total: number;
+  discountAmount: number;
+  paymentMethod: string;
+  status: SaleStatus;
+  approvalStatus: ApprovalStatus;
+  customerPhone: string | null;
+  customerName: string | null;
+  itemCount: number;
+  /** What the lines were, in one line, so the list is scannable. */
+  summary: string | null;
+  /** How many units have already come back, so nothing is refunded twice. */
+  returned: number;
+}
+
+export interface SaleDetailLine {
+  id: string;
+  productId: string;
+  name: string;
+  qty: number;
+  unitPrice: number;
+  lineTotal: number;
+  vatPct: number;
+  vatAmount: number;
+  vatInclusive: boolean;
+  isGift: boolean;
+  warrantyUntil: string | null;
+  returnedQty: number;
+  /** What one unit is worth back, after its share of the sale's discount. */
+  refundEach: number;
+  isSerial: boolean;
+  serials: { id: string; serial: string; status: string }[];
+}
+
+export interface SaleDetail {
+  id: string;
+  invoiceNo: string;
+  createdAt: string;
+  branch: string;
+  branchId: string;
+  branchAddress: string | null;
+  branchPhone: string | null;
+  shopName: string;
+  receiptFooter: string | null;
+  binVat: string | null;
+  staff: string;
+  subtotal: number;
+  discountPct: number;
+  discountAmount: number;
+  vatAmount: number;
+  chargesAmount: number;
+  total: number;
+  paymentMethod: string;
+  cashReceived: number | null;
+  changeGiven: number | null;
+  paymentRef: string | null;
+  status: SaleStatus;
+  approvalStatus: ApprovalStatus;
+  voidReason: string | null;
+  refundMethod: string | null;
+  customerPhone: string | null;
+  customerName: string | null;
+  /** Same day means it can still be voided rather than returned. */
+  sameDay: boolean;
+  daysOld: number;
+  /** The shop's return window, in days. */
+  returnDays: number;
+  items: SaleDetailLine[];
+  returns: {
+    id: string;
+    returnNo: string;
+    createdAt: string;
+    branch: string;
+    total: number;
+    reason: string | null;
+    refundMethod: string;
+    approvalStatus: ApprovalStatus;
+  }[];
+}
+
+export interface ReturnResult {
+  returnNo: string;
+  total: number;
+  subtotal: number;
+  vatAmount: number;
+  chargesBack: number;
+  refundMethod: RefundMethod;
+  lines: { name: string; qty: number; refund: number; faulty: boolean }[];
+  /** True when the last unit came back, which is when charges are refunded too. */
+  wholeSaleReturned: boolean;
 }

@@ -24,6 +24,32 @@ export function parseDiscount(raw: string): number {
   return Math.min(n, 100);
 }
 
+/**
+ * What a returned quantity is actually worth back, mirroring `refund_for()` in the
+ * database so the counter can show the figure before anything is confirmed.
+ *
+ * A sale's discount was spread over every line, so refunding a line at its shelf price
+ * gives back more than the customer handed over — every time there was a discount. VAT
+ * that was charged on top comes back too; VAT that was already inside the price does
+ * not, because it is inside the figure being refunded already.
+ */
+export function refundFor(
+  line: {
+    qty: number; lineTotal: number;
+    vatAmount?: number; vatInclusive?: boolean;
+  },
+  qty: number,
+  saleDiscountPct: number,
+): number {
+  if (qty <= 0 || line.qty <= 0) return 0;
+  const share = (line.lineTotal * qty) / line.qty;
+  const charged = (share * (100 - saleDiscountPct)) / 100;
+  const vatBack = line.vatInclusive === false
+    ? ((line.vatAmount ?? 0) * qty) / line.qty
+    : 0;
+  return Math.round((charged + vatBack) * 100) / 100;
+}
+
 export interface Totals {
   itemCount: number;
   subtotal: number;
@@ -192,6 +218,11 @@ export const SALE_ERROR_CODES = [
   "BAD_RESOLUTION", "RESOLUTION_NOTE_REQUIRED", "TRANSFER_NOT_DISPUTED", "SAME_LOCATION",
   "BAD_CASH_AMOUNT", "SHIFT_ALREADY_OPEN", "BAD_CASH_DIRECTION", "BAD_CASH_REASON",
   "EXPENSE_CATEGORY_REQUIRED", "SHIFT_NOT_FOUND", "SHIFT_ALREADY_CLOSED", "NO_OPEN_SHIFT",
+  "SALE_NOT_FOUND", "NOT_YOUR_SALE", "VOID_REASON_REQUIRED", "SALE_ALREADY_VOID",
+  "VOID_TOO_LATE", "SALE_PARTLY_RETURNED", "BAD_REFUND_METHOD", "SALE_IS_VOID",
+  "RETURN_TOO_LATE", "SALE_LINE_NOT_FOUND", "MORE_THAN_SOLD", "SERIAL_NOT_ON_THIS_SALE",
+  "CREDIT_NEEDS_CUSTOMER", "BAD_APPROVAL_ACTION", "BAD_APPROVAL_KIND",
+  "NOT_AWAITING_APPROVAL",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -382,6 +413,30 @@ export function friendlyError(raw: string): string {
     case "SHIFT_ALREADY_CLOSED": return "This drawer has already been closed.";
     case "NO_OPEN_SHIFT":
       return "Open the drawer before selling. Counter → Open the till, with what is in it now.";
+    case "SALE_NOT_FOUND": return "That sale no longer exists. Search for it again.";
+    case "NOT_YOUR_SALE":
+      return "That sale was rung up by someone else. Ask a manager to open it.";
+    case "VOID_REASON_REQUIRED": return "Say why the sale is being voided.";
+    case "SALE_ALREADY_VOID": return "This sale has already been voided.";
+    case "VOID_TOO_LATE":
+      return "A sale can only be voided on the day it was made. Take it back as a return instead.";
+    case "SALE_PARTLY_RETURNED":
+      return "Part of this sale has already come back on its own document, so it can't be voided too. Return the rest instead.";
+    case "BAD_REFUND_METHOD": return "Pick how the money is going back.";
+    case "SALE_IS_VOID": return "This sale was voided, so there is nothing to take back.";
+    case "RETURN_TOO_LATE":
+      return `This sale is older than the shop's ${detail ?? "return"} day window, so a manager has to approve the return.`;
+    case "SALE_LINE_NOT_FOUND": return "That line isn't on this sale. Reload and try again.";
+    case "MORE_THAN_SOLD":
+      return `More ${detail ?? "of this"} is being returned than was sold. Check what has already come back.`;
+    case "SERIAL_NOT_ON_THIS_SALE":
+      return `One of the serials isn't on this sale, or has already come back. Check it.`;
+    case "CREDIT_NEEDS_CUSTOMER":
+      return "Store credit needs a customer to give it to. Take the phone number first, or refund another way.";
+    case "BAD_APPROVAL_ACTION": return "Say whether it is being approved or cancelled.";
+    case "BAD_APPROVAL_KIND": return "That isn't something that can be approved.";
+    case "NOT_AWAITING_APPROVAL":
+      return `This isn't waiting for approval. It is ${detail ?? "already decided"}.`;
     case "SERIAL_CHANGE_HAS_STOCK":
       return `${detail ?? "This product"} already has stock, so it can't switch between serial-tracked and not. Sell or write off the stock first.`;
     // Keep the raw text so a code we have not seen can still be reported and fixed,

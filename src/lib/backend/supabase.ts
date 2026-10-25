@@ -11,6 +11,7 @@ import type {
   InTransitRow, TransferReceived, TransferRequestRow, TransferRequestStatus, TransferRoute,
   TransferRow, TransferSent, TransferStatus,
   CashReason, ShiftClosed, ShiftRow, ShiftState,
+  ApprovalStatus, RefundMethod, ReturnResult, SaleDetail, SaleRow, SaleStatus,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
@@ -298,7 +299,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         "transaction_categories",
       ];
       const [shopRes, featRes, keysRes, roleRes, staffPermRes, docRes, ...listRes] = await Promise.all([
-        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct, po_approval_limit, cash_short_limit").limit(1).maybeSingle(),
+        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct, po_approval_limit, cash_short_limit, return_days, sale_approval_limit, approve_all_sales").limit(1).maybeSingle(),
         sb.from("shop_features").select("feature, enabled"),
         sb.from("permission_keys").select("key, label, area, has_limit").order("sort"),
         sb.from("role_permissions").select("role, perm, allowed, num_limit"),
@@ -321,6 +322,9 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
           invoicePrefix: shop.invoice_prefix, currency: shop.currency, aitPct: num(shop.ait_pct),
           poApprovalLimit: num(shop.po_approval_limit),
           cashShortLimit: num(shop.cash_short_limit),
+          returnDays: num(shop.return_days),
+          saleApprovalLimit: num(shop.sale_approval_limit),
+          approveAllSales: Boolean(shop.approve_all_sales),
         },
         features: Object.fromEntries((featRes.data ?? []).map((r) => [r.feature, r.enabled])),
         lists,
@@ -893,6 +897,139 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         supplier: String(r.supplier), amount: num(r.amount), balance: num(r.balance),
         aging: readAging(r.aging),
       };
+    },
+
+    // --- Sales history, void and returns (P9) ---
+
+    async saleHistory(input): Promise<SaleRow[]> {
+      const { data, error } = await sb.rpc("sale_history", {
+        p_branch_id: input.branchId ?? null,
+        p_query: input.query ?? null,
+        p_from: input.from ?? null,
+        p_to: input.to ?? null,
+        p_staff_id: input.staffId ?? null,
+        p_method: input.method ?? null,
+        p_status: input.status ?? null,
+        p_limit: input.limit ?? 50,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((r) => ({
+        id: String(r.id), invoiceNo: String(r.invoice_no), createdAt: String(r.created_at),
+        branch: String(r.branch), branchId: String(r.branch_id), staff: String(r.staff),
+        total: num(r.total), discountAmount: num(r.discount_amount),
+        paymentMethod: String(r.payment_method), status: r.status as SaleStatus,
+        approvalStatus: r.approval_status as ApprovalStatus,
+        customerPhone: (r.customer_phone as string | null) ?? null,
+        customerName: (r.customer_name as string | null) ?? null,
+        itemCount: num(r.item_count), summary: (r.summary as string | null) ?? null,
+        returned: num(r.returned),
+      }));
+    },
+
+    async saleDetail(saleId: string): Promise<SaleDetail> {
+      const { data, error } = await sb.rpc("sale_detail", { p_sale_id: saleId });
+      if (error) throw new Error(friendlyError(error.message));
+      const d = (data ?? {}) as Record<string, unknown>;
+      return {
+        id: String(d.id), invoiceNo: String(d.invoice_no), createdAt: String(d.created_at),
+        branch: String(d.branch), branchId: String(d.branch_id),
+        branchAddress: (d.branch_address as string | null) ?? null,
+        branchPhone: (d.branch_phone as string | null) ?? null,
+        shopName: String(d.shop_name),
+        receiptFooter: (d.receipt_footer as string | null) ?? null,
+        binVat: (d.bin_vat as string | null) ?? null,
+        staff: String(d.staff),
+        subtotal: num(d.subtotal), discountPct: num(d.discount_pct),
+        discountAmount: num(d.discount_amount), vatAmount: num(d.vat_amount),
+        chargesAmount: num(d.charges_amount), total: num(d.total),
+        paymentMethod: String(d.payment_method),
+        cashReceived: numOrNull(d.cash_received), changeGiven: numOrNull(d.change_given),
+        paymentRef: (d.payment_ref as string | null) ?? null,
+        status: d.status as SaleStatus,
+        approvalStatus: d.approval_status as ApprovalStatus,
+        voidReason: (d.void_reason as string | null) ?? null,
+        refundMethod: (d.refund_method as string | null) ?? null,
+        customerPhone: (d.customer_phone as string | null) ?? null,
+        customerName: (d.customer_name as string | null) ?? null,
+        sameDay: Boolean(d.same_day), daysOld: num(d.days_old),
+        returnDays: num(d.return_days),
+        items: ((d.items as Record<string, unknown>[] | null) ?? []).map((i) => ({
+          id: String(i.id), productId: String(i.product_id), name: String(i.name),
+          qty: num(i.qty), unitPrice: num(i.unit_price), lineTotal: num(i.line_total),
+          vatPct: num(i.vat_pct), vatAmount: num(i.vat_amount),
+          vatInclusive: Boolean(i.vat_inclusive), isGift: Boolean(i.is_gift),
+          warrantyUntil: (i.warranty_until as string | null) ?? null,
+          returnedQty: num(i.returned_qty), refundEach: num(i.refund_each),
+          isSerial: Boolean(i.is_serial),
+          serials: ((i.serials as Record<string, unknown>[] | null) ?? []).map((x) => ({
+            id: String(x.id), serial: String(x.serial), status: String(x.status),
+          })),
+        })),
+        returns: ((d.returns as Record<string, unknown>[] | null) ?? []).map((r) => ({
+          id: String(r.id), returnNo: String(r.return_no), createdAt: String(r.created_at),
+          branch: String(r.branch), total: num(r.total),
+          reason: (r.reason as string | null) ?? null,
+          refundMethod: String(r.refund_method),
+          approvalStatus: r.approval_status as ApprovalStatus,
+        })),
+      };
+    },
+
+    async voidSale(input) {
+      const { data, error } = await sb.rpc("void_sale", {
+        p_sale_id: input.saleId,
+        p_reason: input.reason,
+        p_approval_id: input.approvalId ?? null,
+        p_refund_method: input.refundMethod ?? null,
+        p_refund_ref: input.refundRef ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return {
+        invoiceNo: String(r.invoice_no), status: String(r.status), refunded: num(r.refunded),
+      };
+    },
+
+    async returnSale(input): Promise<ReturnResult> {
+      const { data, error } = await sb.rpc("return_sale", {
+        p_sale_id: input.saleId,
+        p_branch_id: input.branchId,
+        p_lines: input.lines.map((l) => ({
+          sale_item_id: l.saleItemId,
+          qty: l.qty ?? 0,
+          serial_ids: l.serialIds ?? [],
+          is_faulty: l.isFaulty ?? false,
+        })),
+        p_refund_method: input.refundMethod,
+        p_reason: input.reason ?? null,
+        p_refund_ref: input.refundRef ?? null,
+        p_approval_id: input.approvalId ?? null,
+        p_courier_name: input.courierName ?? null,
+        p_courier_tracking: input.courierTracking ?? null,
+        p_photo_urls: input.photoUrls ?? null,
+        p_location_id: null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return {
+        returnNo: String(r.return_no), total: num(r.total), subtotal: num(r.subtotal),
+        vatAmount: num(r.vat_amount), chargesBack: num(r.charges_back),
+        refundMethod: r.refund_method as RefundMethod,
+        lines: ((r.lines as Record<string, unknown>[] | null) ?? []).map((l) => ({
+          name: String(l.name), qty: num(l.qty), refund: num(l.refund),
+          faulty: Boolean(l.faulty),
+        })),
+        wholeSaleReturned: Boolean(r.whole_sale_returned),
+      };
+    },
+
+    async setSaleApproval(kind, id, action, reason) {
+      const { data, error } = await sb.rpc("set_sale_approval", {
+        p_kind: kind, p_id: id, p_action: action, p_reason: reason ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = data as Record<string, unknown>;
+      return { number: String(r.number), approvalStatus: r.approval_status as ApprovalStatus };
     },
 
     // --- Shifts and the cash check (P8) ---

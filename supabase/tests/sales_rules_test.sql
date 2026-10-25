@@ -2193,5 +2193,356 @@ select pg_temp.check(
   (public.current_shift((select v from pg_temp.p8 where k='branch'))->>'last_close')::numeric = 2700,
   'the next person to open sees what the last close counted');
 
+-- ===========================================================================
+-- 20. SALES HISTORY, VOID AND RETURNS (P9)
+-- ===========================================================================
+-- The done-when: find an SSD sale by serial at another branch, return it as
+-- faulty, the serial becomes 'rma' at the branch where it was handed in, and the
+-- owner sees it in the audit log.
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+create table pg_temp.p9 (k text primary key, v uuid);
+create table pg_temp.p9n (k text primary key, v numeric);
+
+-- ---- The partial-return rule, with a discount and exclusive VAT on it ----
+-- Two keyboards at 850 and two mice at 450 = 2,600, less 10% = 2,340. Returning one
+-- keyboard must give back 850 - 10% = 765, not 850.
+select public.set_feature('vat', false);
+-- Pin the two prices, so the arithmetic below is the arithmetic in the comment and not
+-- whatever the bulk-price section earlier left behind.
+select public.set_prices('00000000-0000-4000-8000-0000000000a5',
+  (select id from public.price_lists where shop_id = :'SHOP' and is_default), 850);
+select public.set_prices('00000000-0000-4000-8000-0000000000a4',
+  (select id from public.price_lists where shop_id = :'SHOP' and is_default), 450);
+do $$
+declare r jsonb; sale uuid; item uuid;
+begin
+  perform public.receive_goods('00000000-0000-4000-8000-0000000000b1'::uuid,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":5,"unit_cost":500},
+      {"product_id":"00000000-0000-4000-8000-0000000000a4","qty":5,"unit_cost":250}]');
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1'::uuid,
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":2},
+          {"product_id":"00000000-0000-4000-8000-0000000000a4","qty":2}]',
+        'cash', 10, null, null, 5000);
+  sale := (r->>'id')::uuid;
+  insert into pg_temp.p9 values ('sale1', sale);
+  insert into pg_temp.p9n values ('sale1_total', (r->>'total')::numeric);
+  raise notice 'ok: sold 2 keyboards and 2 mice with 10%% off, total %', r->>'total';
+end $$;
+select pg_temp.check(
+  (select v from pg_temp.p9n where k = 'sale1_total') = 2340,
+  'the sale came to 2,340 after 10% off 2,600');
+-- One keyboard back: 850 less its share of the discount.
+select pg_temp.check(
+  public.refund_for(
+    (select id from public.sale_items where sale_id = (select v from pg_temp.p9 where k='sale1')
+     and name like 'Logitech K120%'), 1) = 765,
+  'returning one keyboard refunds 765, not the 850 on the shelf');
+select pg_temp.check(
+  public.refund_for(
+    (select id from public.sale_items where sale_id = (select v from pg_temp.p9 where k='sale1')
+     and name like 'Logitech K120%'), 2) = 1530,
+  'and both of them refund 1,530');
+
+-- ---- Exclusive VAT is added back, inclusive VAT is not added twice ----
+select public.set_feature('vat', true);
+-- The setup lists have no insert policy either, so a new rate goes through the saver.
+select public.save_setting_row('vat_rates', null,
+  '{"name": "VAT 10% (exclusive)", "pct": 10, "inclusive": false}');
+do $$
+declare rate uuid; r jsonb; keyboard uuid := '00000000-0000-4000-8000-0000000000a5';
+begin
+  select id into rate from public.vat_rates where name = 'VAT 10% (exclusive)';
+  perform public.upsert_product(keyboard, jsonb_build_object('vat_rate_id', rate));
+  perform public.receive_goods('00000000-0000-4000-8000-0000000000b1'::uuid,
+    format('[{"product_id":"%s","qty":4,"unit_cost":500}]', keyboard)::jsonb);
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1'::uuid,
+        format('[{"product_id":"%s","qty":2}]', keyboard)::jsonb, 'cash', 10, null, null, 5000);
+  insert into pg_temp.p9 values ('vatsale', (r->>'id')::uuid);
+  -- 2 x 850 = 1,700, less 10% = 1,530, plus 10% VAT = 1,683.
+  if (r->>'total')::numeric <> 1683 then raise exception 'WRONG VAT TOTAL: %', r; end if;
+  raise notice 'ok: 1,530 after discount plus 10%% VAT on top = 1,683';
+end $$;
+select pg_temp.check(
+  public.refund_for(
+    (select id from public.sale_items where sale_id = (select v from pg_temp.p9 where k='vatsale')), 1)
+  = 841.50,
+  'returning one gives back 765 plus the 76.50 VAT that was charged on top');
+select public.set_feature('vat', false);
+
+-- ---- Finding a sale ----
+-- A serial SSD sale at Branch A, looked for from Branch B by its serial.
+do $$
+declare r jsonb; ser uuid;
+begin
+  perform public.receive_goods('00000000-0000-4000-8000-0000000000b1'::uuid,
+    '[{"product_id":"00000000-0000-4000-8000-0000000000a8","qty":1,"unit_cost":5800,
+       "serials":["SSDP9RETURN01"]}]');
+  select id into ser from public.serials where serial = 'SSDP9RETURN01';
+  insert into pg_temp.p9 values ('ssd_serial', ser);
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1'::uuid,
+        jsonb_build_array(jsonb_build_object(
+          'product_id', '00000000-0000-4000-8000-0000000000a8', 'qty', 1,
+          'serial_ids', jsonb_build_array(ser))),
+        'cash', 0, null, '01711000111', 7000);
+  insert into pg_temp.p9 values ('ssd_sale', (r->>'id')::uuid);
+  raise notice 'ok: sold the SSD at Branch A as %', r->>'invoice_no';
+end $$;
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.sale_history(null, 'SSDP9RETURN01')) x) = 1,
+  'the sale is found by the serial on it');
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.sale_history(null, '01711000111')) x) >= 1,
+  'and by the customer''s phone');
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.sale_history(null, 'Samsung 980')) x) >= 1,
+  'and by the product name');
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.sale_history(null, 'NOTHINGLIKETHIS')) x) = 0,
+  'and not by something that was never sold');
+select pg_temp.check(
+  (public.sale_detail((select v from pg_temp.p9 where k='ssd_sale'))->>'invoice_no') like 'DEMO-MB-%',
+  'the detail view opens for the reprint');
+
+-- ---- Return it as faulty, at the OTHER branch ----
+insert into pg_temp.p9n
+  select 'ssd_at_b_before', coalesce(sum(qty), 0) from public.branch_stock
+  where product_id = '00000000-0000-4000-8000-0000000000a8' and branch_id = :'BRANCH_B';
+do $$
+declare r jsonb; item uuid;
+begin
+  select id into item from public.sale_items
+    where sale_id = (select v from pg_temp.p9 where k='ssd_sale');
+  r := public.return_sale(
+        (select v from pg_temp.p9 where k='ssd_sale'),
+        '00000000-0000-4000-8000-0000000000b2'::uuid,
+        jsonb_build_array(jsonb_build_object(
+          'sale_item_id', item, 'is_faulty', true,
+          'serial_ids', jsonb_build_array((select v from pg_temp.p9 where k='ssd_serial')))),
+        'cash', 'Dead on arrival', null, null, 'Sundarban Courier', 'SC-99120');
+  if (r->>'return_no') not like 'RET-SB-%' then raise exception 'WRONG RETURN NUMBER: %', r->>'return_no'; end if;
+  insert into pg_temp.p9n values ('ssd_refund', (r->>'total')::numeric);
+  raise notice 'ok: taken back at Branch B as %, refunded %', r->>'return_no', r->>'total';
+end $$;
+select pg_temp.check(
+  (select v from pg_temp.p9n where k='ssd_refund') = 6200,
+  'the full 6,200 went back, because there was no discount on it');
+select pg_temp.check(
+  (select status from public.serials where id = (select v from pg_temp.p9 where k='ssd_serial')) = 'rma',
+  'the faulty serial is in RMA, not back on a shelf');
+select pg_temp.check(
+  (select l.branch_id from public.serials s join public.stock_locations l on l.id = s.location_id
+   where s.id = (select v from pg_temp.p9 where k='ssd_serial')) = '00000000-0000-4000-8000-0000000000b2'::uuid,
+  'and it sits at Branch B, where the customer handed it in');
+select pg_temp.check(
+  (select coalesce(sum(qty), 0) from public.branch_stock
+   where product_id = '00000000-0000-4000-8000-0000000000a8' and branch_id = :'BRANCH_B')
+  = (select v from pg_temp.p9n where k = 'ssd_at_b_before'),
+  'nothing sellable was added at Branch B: a faulty unit is not stock');
+select pg_temp.check(
+  (select count(*) from public.audit_log where action = 'sale_returned'
+   and details->>'courier' = 'Sundarban Courier') = 1,
+  'and the owner sees it in the audit log, with the courier it came back by');
+select pg_temp.check(
+  (select jsonb_array_length(public.sale_detail((select v from pg_temp.p9 where k='ssd_sale'))->'returns')) = 1,
+  'the sale now shows the return against it');
+
+-- ---- Nothing goes back twice ----
+-- The same serial, a second time. A serial item cannot be returned without saying
+-- which unit, so that is checked first, and then that it has not already gone back.
+select pg_temp.expect_error(
+  format($q$select public.return_sale('%s', '%s',
+    jsonb_build_array(jsonb_build_object('sale_item_id',
+      (select id from public.sale_items where sale_id = '%s'), 'qty', 1)), 'cash')$q$,
+    (select v from pg_temp.p9 where k='ssd_sale'), :'BRANCH_B',
+    (select v from pg_temp.p9 where k='ssd_sale')),
+  'SERIAL_REQUIRED');
+select pg_temp.expect_error(
+  format($q$select public.return_sale('%s', '%s',
+    jsonb_build_array(jsonb_build_object('sale_item_id',
+      (select id from public.sale_items where sale_id = '%s'),
+      'serial_ids', jsonb_build_array('%s'))), 'cash')$q$,
+    (select v from pg_temp.p9 where k='ssd_sale'), :'BRANCH_B',
+    (select v from pg_temp.p9 where k='ssd_sale'),
+    (select v from pg_temp.p9 where k='ssd_serial')),
+  'MORE_THAN_SOLD');
+select pg_temp.expect_error(
+  format($q$select public.return_sale('%s', '%s', '[]', 'cash')$q$,
+    (select v from pg_temp.p9 where k='ssd_sale'), :'BRANCH_B'), 'NOTHING_RETURNED');
+select pg_temp.expect_error(
+  format($q$select public.return_sale('%s', '%s',
+    jsonb_build_array(jsonb_build_object('sale_item_id',
+      (select id from public.sale_items where sale_id = '%s'), 'qty', 1)), 'bitcoin')$q$,
+    (select v from pg_temp.p9 where k='ssd_sale'), :'BRANCH_B',
+    (select v from pg_temp.p9 where k='ssd_sale')),
+  'BAD_REFUND_METHOD');
+
+-- ---- A good item goes back on the shelf, a faulty one does not ----
+do $$
+declare r jsonb; item uuid; before_qty integer;
+begin
+  select id into item from public.sale_items
+    where sale_id = (select v from pg_temp.p9 where k='sale1') and name like 'Logitech M90%';
+  select coalesce(sum(qty), 0) into before_qty from public.branch_stock
+    where product_id = '00000000-0000-4000-8000-0000000000a4' and branch_id = '00000000-0000-4000-8000-0000000000b1'::uuid;
+  r := public.return_sale((select v from pg_temp.p9 where k='sale1'), '00000000-0000-4000-8000-0000000000b1'::uuid,
+        jsonb_build_array(jsonb_build_object('sale_item_id', item, 'qty', 1)),
+        'cash', 'Changed their mind');
+  if (r->>'total')::numeric <> 405 then raise exception 'WRONG MOUSE REFUND: %', r; end if;
+  if (select coalesce(sum(qty), 0) from public.branch_stock
+      where product_id = '00000000-0000-4000-8000-0000000000a4' and branch_id = '00000000-0000-4000-8000-0000000000b1'::uuid)
+     <> before_qty + 1 then
+    raise exception 'THE MOUSE DID NOT GO BACK ON THE SHELF';
+  end if;
+  raise notice 'ok: a working mouse refunds 405 (450 less 10%%) and goes back on the shelf';
+end $$;
+select pg_temp.check(
+  (select (x->>'returned')::int from jsonb_array_elements(
+     public.sale_history(:'BRANCH_A', (select invoice_no from public.sales
+                                       where id = (select v from pg_temp.p9 where k='sale1')))) x) = 1,
+  'and the sale is marked in the list as partly returned, so it is not refunded twice');
+
+-- ---- Extra charges come back only on a whole-sale return ----
+select pg_temp.check(
+  (select charges_back from public.sale_returns
+   where sale_id = (select v from pg_temp.p9 where k='sale1')) = 0,
+  'a partial return pays back no delivery charge: the van still drove');
+
+-- ---- Void: same day, with a reason ----
+do $$
+declare r jsonb; before_qty integer;
+begin
+  select coalesce(sum(qty), 0) into before_qty from public.branch_stock
+    where product_id = '00000000-0000-4000-8000-0000000000a1' and branch_id = '00000000-0000-4000-8000-0000000000b1'::uuid;
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1'::uuid,
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]', 'cash', 0, null, null, 1000);
+  insert into pg_temp.p9 values ('voidme', (r->>'id')::uuid);
+  perform public.void_sale((r->>'id')::uuid, 'Rang up twice by mistake', null, 'cash');
+  if (select coalesce(sum(qty), 0) from public.branch_stock
+      where product_id = '00000000-0000-4000-8000-0000000000a1' and branch_id = '00000000-0000-4000-8000-0000000000b1'::uuid)
+     <> before_qty then
+    raise exception 'VOIDING DID NOT PUT THE STOCK BACK';
+  end if;
+  raise notice 'ok: a void puts the stock back exactly where it was';
+end $$;
+select pg_temp.check(
+  (select status from public.sales where id = (select v from pg_temp.p9 where k='voidme')) = 'void',
+  'the sale is marked void');
+select pg_temp.check(
+  (select count(*) from public.sales where id = (select v from pg_temp.p9 where k='voidme')) = 1,
+  'and the invoice number stays burnt, so the sequence has no hole to explain');
+select pg_temp.check(
+  (select count(*) from public.audit_log where action = 'sale_voided') = 1,
+  'and it is logged with the reason');
+select pg_temp.expect_error($q$select public.void_sale((select v from pg_temp.p9 where k='voidme'), 'again')$q$, 'SALE_ALREADY_VOID');
+select pg_temp.expect_error($q$select public.void_sale((select v from pg_temp.p9 where k='sale1'), '')$q$, 'VOID_REASON_REQUIRED');
+-- A sale with a return against it must not also be voided: the goods would come back twice.
+select pg_temp.expect_error($q$select public.void_sale((select v from pg_temp.p9 where k='sale1'), 'undo the lot')$q$, 'SALE_PARTLY_RETURNED');
+
+-- ---- Returning a voided sale is refused ----
+select pg_temp.expect_error(
+  format($q$select public.return_sale('%s', '%s',
+    jsonb_build_array(jsonb_build_object('sale_item_id',
+      (select id from public.sale_items where sale_id = '%s'), 'qty', 1)), 'cash')$q$,
+    (select v from pg_temp.p9 where k='voidme'), :'BRANCH_A',
+    (select v from pg_temp.p9 where k='voidme')),
+  'SALE_IS_VOID');
+
+-- ---- Store credit is recorded, not promised ----
+-- A walk-in with no phone number cannot be given store credit: there would be nobody to
+-- give it back to, and the shop would be out of pocket with no record of who is owed.
+select pg_temp.expect_error(
+  format($q$select public.return_sale('%s', '%s',
+    jsonb_build_array(jsonb_build_object('sale_item_id',
+      (select id from public.sale_items where sale_id = '%s' and name like 'Logitech K120%%'),
+      'qty', 1)), 'store_credit')$q$,
+    (select v from pg_temp.p9 where k='sale1'), :'BRANCH_A',
+    (select v from pg_temp.p9 where k='sale1')),
+  'CREDIT_NEEDS_CUSTOMER');
+do $$
+declare r jsonb; item uuid;
+begin
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1'::uuid,
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a4","qty":1}]',
+        'cash', 0, null, '01711000222', 500);
+  select id into item from public.sale_items where sale_id = (r->>'id')::uuid;
+  r := public.return_sale((r->>'id')::uuid, '00000000-0000-4000-8000-0000000000b1'::uuid,
+        jsonb_build_array(jsonb_build_object('sale_item_id', item, 'qty', 1)),
+        'store_credit', 'Wants to swap it later');
+  if (r->>'total')::numeric <> 450 then raise exception 'WRONG CREDIT: %', r; end if;
+  raise notice 'ok: 450 given back to a known customer as store credit';
+end $$;
+select pg_temp.check(
+  (select amount from public.customer_credits
+   join public.customers c on c.id = customer_credits.customer_id
+   where c.phone = '01711000222') = 450,
+  'and it is written down against that customer, not just promised');
+
+-- ---- A shop can make big sales wait for approval ----
+select public.save_shop_details('{"sale_approval_limit": 1000}');
+do $$
+declare r jsonb;
+begin
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1'::uuid,
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a5","qty":2}]', 'cash', 0, null, null, 5000);
+  insert into pg_temp.p9 values ('bigsale', (r->>'id')::uuid);
+  if (select approval_status from public.sales where id = (r->>'id')::uuid) <> 'awaiting_approval' then
+    raise exception 'BIG SALE NOT HELD';
+  end if;
+  raise notice 'ok: a sale over the shop''s limit waits for approval';
+end $$;
+-- The goods still went out of the door; what waits is the posting.
+select pg_temp.check(
+  (select status from public.sales where id = (select v from pg_temp.p9 where k='bigsale')) = 'completed',
+  'the sale itself is completed: the customer walked out with the goods');
+select pg_temp.check(
+  (public.set_sale_approval('sale', (select v from pg_temp.p9 where k='bigsale'), 'approve')
+   ->>'approval_status') = 'approved',
+  'and a manager approves it on the document itself');
+select pg_temp.expect_error($q$select public.set_sale_approval('sale', (select v from pg_temp.p9 where k='bigsale'), 'approve')$q$, 'NOT_AWAITING_APPROVAL');
+select pg_temp.expect_error($q$select public.set_sale_approval('sale', (select v from pg_temp.p9 where k='bigsale'), 'eat')$q$, 'BAD_APPROVAL_ACTION');
+select public.save_shop_details('{"sale_approval_limit": 0}');
+
+-- ---- A cash refund comes out of the drawer ----
+-- expected_cash() is not callable from outside the functions, so the figure is read
+-- the way the owner reads it: off the drawer screen.
+do $$
+declare sh uuid; drawer numeric; r jsonb; item uuid;
+  branch uuid := '00000000-0000-4000-8000-0000000000b1';
+begin
+  sh := (public.open_shift(branch, 1000)->>'shift_id')::uuid;
+  r := public.complete_sale(branch,
+        '[{"product_id":"00000000-0000-4000-8000-0000000000a1","qty":1}]', 'cash', 0, null, null, 500);
+  select (x->>'expected_cash')::numeric into drawer
+    from jsonb_array_elements(public.shift_list(branch)) x where (x->>'id')::uuid = sh;
+  if drawer <> 1500 then raise exception 'DRAWER SHOULD HOLD 1,500 AFTER A 500 SALE: %', drawer; end if;
+
+  select id into item from public.sale_items where sale_id = (r->>'id')::uuid;
+  perform public.return_sale((r->>'id')::uuid, branch,
+    jsonb_build_array(jsonb_build_object('sale_item_id', item, 'qty', 1)), 'cash', 'Wrong item');
+
+  select (x->>'expected_cash')::numeric into drawer
+    from jsonb_array_elements(public.shift_list(branch)) x where (x->>'id')::uuid = sh;
+  if drawer <> 1000 then
+    raise exception 'THE REFUND DID NOT COME OUT OF THE DRAWER: %', drawer;
+  end if;
+  raise notice 'ok: a 500 cash refund takes 500 back out of the expected drawer';
+end $$;
+
+-- ---- Who may do what ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+-- A cashier sees their own sales today at their own branch, and nothing else — asking
+-- for somebody else's is not refused, it is simply narrowed.
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(
+     public.sale_history(null, null, null, null,
+       (select id from public.staff where name = 'Owner'))) x
+   where x->>'staff' <> 'Ovi') = 0,
+  'a cashier asking for the owner''s sales gets only their own');
+select pg_temp.expect_error($q$select public.void_sale((select v from pg_temp.p9 where k='sale1'), 'nope')$q$, 'NOT_ALLOWED:void_sale');
+select pg_temp.expect_error($q$select public.set_sale_approval('sale', (select v from pg_temp.p9 where k='sale1'), 'approve')$q$, 'NOT_ALLOWED:approve');
+select pg_temp.check((select count(*) from public.customer_credits) = 0,
+  'and a cashier cannot see what any customer is owed');
+
 reset role;
 \echo ALL DATABASE CHECKS PASSED

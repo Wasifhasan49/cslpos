@@ -4,7 +4,9 @@
 // The demo person is an OWNER with two branches, so everything a shop would be shown —
 // the branch switcher, the whole menu, the approval PIN screen — is reachable. Demo
 // mode is also the sales demo. Nothing here names a real shop.
-import { addMonths, dhakaToday, friendlyError, isValidPhone, roundTaka } from "../sale";
+import {
+  addMonths, dhakaToday, friendlyError, isValidPhone, refundFor, roundTaka,
+} from "../sale";
 import type {
   ApprovalResult, Approver, BranchAdmin, BulkPriceChange, CatalogueRow, CustomerLookup,
   CountDifference, FeatureKey, GoodsReceivedRow, PriceList, Product, Receipt, ReceiptLine,
@@ -14,6 +16,7 @@ import type {
   SupplierAging, TransferLine, TransferReceived, TransferRequestRow, TransferRoute,
   TransferRow, TransferSent,
   CashMovementRow, ShiftRow,
+  ReturnResult, SaleDetail, SaleDetailLine, SaleRow,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import type { Backend } from "./types";
@@ -73,7 +76,7 @@ export function createDemoBackend(): Backend {
     email: null as string | null, logoUrl: null as string | null, binVat: null as string | null,
     receiptFooter: "Thank you. Keep this receipt for warranty claims.",
     invoicePrefix: "DEMO", currency: "BDT", aitPct: 0, poApprovalLimit: 0,
-    cashShortLimit: 50,
+    cashShortLimit: 50, returnDays: 7, saleApprovalLimit: 0, approveAllSales: false,
   };
   // `active` defaults to true in every setup table, so the demo rows have to say so
   // too or the whole list reads as switched off.
@@ -227,6 +230,14 @@ export function createDemoBackend(): Backend {
   let trqCounter = 1;
   // The cash drawer (P8). Nothing open to start: the demo opens its own till.
   const shifts: (ShiftRow & { branchId: string; staffId: string })[] = [];
+  // Past sales (P9). The demo keeps them so they can be found, reprinted and returned,
+  // with the serial ids on each line: a return has to name the actual unit.
+  type DemoSale = SaleDetail & {
+    staffId: string; shiftId: string | null;
+    lineSerialIds: Record<string, string[]>;
+  };
+  const sales: DemoSale[] = [];
+  let returnCounter = 1;
   const costs: Record<string, number> = { a1: 250 };
 
   const noteMovement = (m: StockMovementRow) => movements.unshift(m);
@@ -435,8 +446,52 @@ export function createDemoBackend(): Backend {
 
       // Numbering is per branch, with the branch's code in it.
       const invoiceNo = `DEMO-${branch.code}-${today.slice(0, 4)}${String(nextInvoice[branch.id]++).padStart(6, "0")}`;
+      const saleId = crypto.randomUUID();
+      const createdAt = new Date().toISOString();
+
+      // Keep it, so it can be found by invoice, phone, serial or product name, reprinted
+      // and taken back. Each line gets its own id and remembers which units went out.
+      const detailLines: SaleDetailLine[] = items.map((i) => {
+        const p = catalogue.find((x) => x.name === i.name);
+        return {
+          id: crypto.randomUUID(), productId: p?.id ?? "", name: i.name, qty: i.qty,
+          unitPrice: i.unitPrice, lineTotal: i.lineTotal, vatPct: 0, vatAmount: 0,
+          vatInclusive: true, isGift: Boolean(i.isGift), warrantyUntil: i.warrantyUntil,
+          returnedQty: 0,
+          refundEach: refundFor(
+            { qty: i.qty, lineTotal: i.lineTotal, vatAmount: 0, vatInclusive: true },
+            1, totals.discountPct),
+          isSerial: Boolean(p?.isSerial),
+          serials: serials
+            .filter((x) => i.serials.includes(x.serial))
+            .map((x) => ({ id: x.id, serial: x.serial, status: "sold" as string })),
+        };
+      });
+      const overLimit = shopDetails.approveAllSales
+        || (shopDetails.saleApprovalLimit > 0 && totals.total > shopDetails.saleApprovalLimit);
+      sales.unshift({
+        id: saleId, invoiceNo, createdAt,
+        branch: branch.name, branchId: branch.id, branchAddress: branch.address,
+        branchPhone: branch.phone, shopName: staff.shopName,
+        receiptFooter: shopDetails.receiptFooter, binVat: shopDetails.binVat,
+        staff: staff.name, staffId: staff.id, shiftId: openShift?.id ?? null,
+        subtotal: totals.subtotal, discountPct: totals.discountPct,
+        discountAmount: totals.discountAmount, vatAmount: 0, chargesAmount: 0,
+        total: totals.total, paymentMethod: input.paymentMethod,
+        cashReceived: input.paymentMethod === "cash" ? input.cashReceived ?? null : null,
+        changeGiven: change, paymentRef: input.paymentRef ?? null,
+        status: "completed",
+        approvalStatus: overLimit ? "awaiting_approval" : "approved",
+        voidReason: null, refundMethod: null,
+        customerPhone: input.customerPhone ?? null, customerName: customer?.name ?? null,
+        sameDay: true, daysOld: 0, returnDays: shopDetails.returnDays,
+        items: detailLines, returns: [],
+        lineSerialIds: Object.fromEntries(
+          detailLines.map((l) => [l.id, l.serials.map((x) => x.id)])),
+      });
+
       return {
-        id: crypto.randomUUID(), invoiceNo, createdAt: new Date().toISOString(),
+        id: saleId, invoiceNo, createdAt,
         staffName: staff.name, shopName: staff.shopName, shopAddress: branch.address,
         branchName: branch.name, branchAddress: branch.address, branchPhone: branch.phone,
         subtotal: totals.subtotal, discountPct: totals.discountPct, discountAmount: totals.discountAmount, total: totals.total,
@@ -568,6 +623,12 @@ export function createDemoBackend(): Backend {
           ? Number(values.po_approval_limit) || 0 : shopDetails.poApprovalLimit,
         cashShortLimit: values.cash_short_limit !== undefined
           ? Number(values.cash_short_limit) || 0 : shopDetails.cashShortLimit,
+        returnDays: values.return_days !== undefined
+          ? Number(values.return_days) || 0 : shopDetails.returnDays,
+        saleApprovalLimit: values.sale_approval_limit !== undefined
+          ? Number(values.sale_approval_limit) || 0 : shopDetails.saleApprovalLimit,
+        approveAllSales: values.approve_all_sales !== undefined
+          ? Boolean(values.approve_all_sales) : shopDetails.approveAllSales,
       });
       staff.shopName = shopDetails.name;
     },
@@ -1266,6 +1327,224 @@ export function createDemoBackend(): Backend {
       }
       fail("CUSTOMER_NOT_FOUND");
       return { name: "", amount: 0, asOf };
+    },
+
+    // --- Sales history, void and returns (P9) ---
+
+    async saleHistory(input): Promise<SaleRow[]> {
+      // A cashier gets their own sales, today, at their own branch. Narrowed here, not
+      // asked for by the screen — the database narrows it the same way.
+      const mine = staff.role === "cashier";
+      const today = dhakaToday();
+      const q = (input.query ?? "").trim().toLowerCase();
+      return sales
+        .filter((s) => (mine ? s.staffId === staff.id : true))
+        .filter((s) => (mine ? s.createdAt.slice(0, 10) === today : true))
+        .filter((s) => (input.branchId ? s.branchId === input.branchId : true))
+        .filter((s) => (input.staffId && !mine ? s.staffId === input.staffId : true))
+        .filter((s) => (input.method ? s.paymentMethod === input.method : true))
+        .filter((s) => (input.status ? s.status === input.status : true))
+        .filter((s) => (input.from ? s.createdAt.slice(0, 10) >= input.from : true))
+        .filter((s) => (input.to ? s.createdAt.slice(0, 10) <= input.to : true))
+        .filter((s) => !q
+          || s.invoiceNo.toLowerCase().includes(q)
+          || (s.customerPhone ?? "").includes(q)
+          || s.items.some((i) => i.name.toLowerCase().includes(q))
+          || s.items.some((i) => i.serials.some((x) => x.serial.toLowerCase().includes(q))))
+        .slice(0, input.limit ?? 50)
+        .map((s) => ({
+          id: s.id, invoiceNo: s.invoiceNo, createdAt: s.createdAt, branch: s.branch,
+          branchId: s.branchId, staff: s.staff, total: s.total,
+          discountAmount: s.discountAmount, paymentMethod: s.paymentMethod,
+          status: s.status, approvalStatus: s.approvalStatus,
+          customerPhone: s.customerPhone, customerName: s.customerName,
+          itemCount: s.items.reduce((n, i) => n + i.qty, 0),
+          summary: s.items.map((i) => i.name).join(", "),
+          returned: s.items.reduce((n, i) => n + i.returnedQty, 0),
+        }));
+    },
+
+    async saleDetail(saleId) {
+      const sale = sales.find((s) => s.id === saleId);
+      if (!sale) fail("SALE_NOT_FOUND");
+      if (staff.role === "cashier" && sale!.staffId !== staff.id) fail("NOT_YOUR_SALE");
+      const today = dhakaToday();
+      const daysOld = Math.max(
+        0,
+        Math.floor((new Date(today).getTime() - new Date(sale!.createdAt.slice(0, 10)).getTime())
+          / 86_400_000));
+      // The demo's own bookkeeping (who rang it up, which drawer, which serial ids are
+      // on which line) is not part of SaleDetail, so it is rebuilt rather than spread.
+      return structuredClone({
+        id: sale!.id, invoiceNo: sale!.invoiceNo, createdAt: sale!.createdAt,
+        branch: sale!.branch, branchId: sale!.branchId,
+        branchAddress: sale!.branchAddress, branchPhone: sale!.branchPhone,
+        shopName: sale!.shopName, receiptFooter: sale!.receiptFooter,
+        binVat: sale!.binVat, staff: sale!.staff,
+        subtotal: sale!.subtotal, discountPct: sale!.discountPct,
+        discountAmount: sale!.discountAmount, vatAmount: sale!.vatAmount,
+        chargesAmount: sale!.chargesAmount, total: sale!.total,
+        paymentMethod: sale!.paymentMethod, cashReceived: sale!.cashReceived,
+        changeGiven: sale!.changeGiven, paymentRef: sale!.paymentRef,
+        status: sale!.status, approvalStatus: sale!.approvalStatus,
+        voidReason: sale!.voidReason, refundMethod: sale!.refundMethod,
+        customerPhone: sale!.customerPhone, customerName: sale!.customerName,
+        items: sale!.items, returns: sale!.returns,
+        sameDay: sale!.createdAt.slice(0, 10) === today,
+        daysOld,
+        returnDays: shopDetails.returnDays,
+      });
+    },
+
+    async voidSale(input) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:void_sale");
+      if (!input.reason.trim()) fail("VOID_REASON_REQUIRED");
+      const sale = sales.find((s) => s.id === input.saleId);
+      if (!sale) fail("SALE_NOT_FOUND");
+      if (sale!.status === "void") fail("SALE_ALREADY_VOID");
+      if (sale!.createdAt.slice(0, 10) !== dhakaToday()) fail("VOID_TOO_LATE");
+      if (sale!.items.some((i) => i.returnedQty > 0)) fail("SALE_PARTLY_RETURNED");
+
+      for (const line of sale!.items) {
+        if (line.isSerial) {
+          for (const id of sale!.lineSerialIds[line.id] ?? []) {
+            const sx = serials.find((x) => x.id === id);
+            if (sx) { sx.sold = false; sx.branchId = sale!.branchId; }
+          }
+        } else {
+          stock[sale!.branchId][line.productId] =
+            (stock[sale!.branchId][line.productId] ?? 0) + line.qty;
+        }
+        noteMovement({
+          at: new Date().toISOString(), product: line.name,
+          code: catalogue.find((p) => p.id === line.productId)?.code ?? "",
+          change: line.qty, reason: "return", why: null,
+          note: `${sale!.invoiceNo}: sale voided`, who: staff.name, location: null,
+        });
+      }
+
+      sale!.status = "void";
+      sale!.voidReason = input.reason;
+      sale!.refundMethod = input.refundMethod ?? null;
+      return { invoiceNo: sale!.invoiceNo, status: "void", refunded: sale!.total };
+    },
+
+    async returnSale(input): Promise<ReturnResult> {
+      // Same check the database makes: a per-person override can let one cashier take
+      // returns without making them a manager.
+      const mayReturn = staffPermissions.find(
+        (x) => x.staffId === staff.id && x.perm === "return_sale")?.allowed
+        ?? rolePermissions.find((r) => r.role === staff.role && r.perm === "return_sale")?.allowed
+        ?? false;
+      if (!mayReturn) fail("NOT_ALLOWED:return_sale");
+      const branch = branchOr404(input.branchId);
+      if (input.lines.length === 0) fail("NOTHING_RETURNED");
+      const methods = ["cash", "bkash", "nagad", "card", "store_credit", "reduce_due"];
+      if (!methods.includes(input.refundMethod)) fail(`BAD_REFUND_METHOD:${input.refundMethod}`);
+      const sale = sales.find((s) => s.id === input.saleId);
+      if (!sale) fail("SALE_NOT_FOUND");
+      if (sale!.status === "void") fail("SALE_IS_VOID");
+
+      let subtotal = 0;
+      const out: ReturnResult["lines"] = [];
+      for (const l of input.lines) {
+        const line = sale!.items.find((x) => x.id === l.saleItemId);
+        if (!line) fail("SALE_LINE_NOT_FOUND");
+        const ids = l.serialIds ?? [];
+        const qty = line!.isSerial ? ids.length : (l.qty ?? 0);
+        if (line!.isSerial && qty === 0) fail(`SERIAL_REQUIRED:${line!.name}`);
+        if (qty <= 0) fail(`BAD_QTY:${line!.name}`);
+        if (line!.returnedQty + qty > line!.qty) fail(`MORE_THAN_SOLD:${line!.name}`);
+
+        const onThis = new Set(sale!.lineSerialIds[line!.id] ?? []);
+        for (const id of ids) {
+          if (!onThis.has(id)) fail(`SERIAL_NOT_ON_THIS_SALE:${line!.name}`);
+        }
+
+        const refund = refundFor(
+          { qty: line!.qty, lineTotal: line!.lineTotal,
+            vatAmount: line!.vatAmount, vatInclusive: line!.vatInclusive },
+          qty, sale!.discountPct);
+        subtotal += refund;
+
+        // A faulty unit comes back but never reaches a shelf: it is in RMA, waiting to
+        // go to the supplier.
+        for (const id of ids) {
+          const sx = serials.find((x) => x.id === id);
+          if (!sx) continue;
+          if (l.isFaulty) { sx.sold = true; }
+          else { sx.sold = false; sx.branchId = branch.id; }
+        }
+        if (!l.isFaulty && !line!.isSerial) {
+          stock[branch.id][line!.productId] = (stock[branch.id][line!.productId] ?? 0) + qty;
+        }
+        line!.returnedQty += qty;
+        for (const id of ids) {
+          const st = line!.serials.find((x) => x.id === id);
+          if (st) st.status = l.isFaulty ? "rma" : "in_stock";
+        }
+
+        noteMovement({
+          at: new Date().toISOString(), product: line!.name,
+          code: catalogue.find((p) => p.id === line!.productId)?.code ?? "",
+          change: l.isFaulty ? 0 : qty, reason: "return",
+          why: l.isFaulty ? "damaged" : null,
+          note: `Against ${sale!.invoiceNo}${l.isFaulty ? " (faulty, sent to RMA)" : ""}`,
+          who: staff.name, location: branch.locations[0]?.name ?? null,
+        });
+        out.push({ name: line!.name, qty, refund, faulty: Boolean(l.isFaulty) });
+      }
+
+      // Extra charges come back only when the whole sale does.
+      const allBack = sale!.items.every((i) => i.returnedQty >= i.qty);
+      const chargesBack = allBack ? sale!.chargesAmount : 0;
+      const total = subtotal + chargesBack;
+
+      if (input.refundMethod === "store_credit" && !sale!.customerPhone) {
+        fail("CREDIT_NEEDS_CUSTOMER");
+      }
+
+      const returnNo = `RET-${branch.code}-${new Date().getFullYear()}${String(returnCounter++).padStart(6, "0")}`;
+      sale!.returns.push({
+        id: crypto.randomUUID(), returnNo, createdAt: new Date().toISOString(),
+        branch: branch.name, total, reason: input.reason ?? null,
+        refundMethod: input.refundMethod, approvalStatus: "approved",
+      });
+
+      // A cash refund comes out of the drawer it was paid from.
+      if (input.refundMethod === "cash") {
+        const open = shifts.find(
+          (sh) => sh.branchId === branch.id && sh.staffId === staff.id && !sh.closedAt);
+        if (open) open.cashOut += total;
+      }
+
+      return {
+        returnNo, total, subtotal, vatAmount: 0, chargesBack,
+        refundMethod: input.refundMethod, lines: out, wholeSaleReturned: allBack,
+      };
+    },
+
+    async setSaleApproval(kind, id, action, reason) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:approve");
+      if (!["approve", "cancel"].includes(action)) fail(`BAD_APPROVAL_ACTION:${action}`);
+      if (action === "cancel" && !reason?.trim()) fail("CANCEL_REASON_REQUIRED");
+      if (kind === "sale") {
+        const sale = sales.find((s) => s.id === id);
+        if (!sale) fail("SALE_NOT_FOUND");
+        if (sale!.approvalStatus !== "awaiting_approval") {
+          fail(`NOT_AWAITING_APPROVAL:${sale!.approvalStatus}`);
+        }
+        sale!.approvalStatus = action === "approve" ? "approved" : "cancelled";
+        return { number: sale!.invoiceNo, approvalStatus: sale!.approvalStatus };
+      }
+      const owner = sales.find((s) => s.returns.some((r) => r.id === id));
+      const ret = owner?.returns.find((r) => r.id === id);
+      if (!ret) fail("SALE_NOT_FOUND");
+      if (ret!.approvalStatus !== "awaiting_approval") {
+        fail(`NOT_AWAITING_APPROVAL:${ret!.approvalStatus}`);
+      }
+      ret!.approvalStatus = action === "approve" ? "approved" : "cancelled";
+      return { number: ret!.returnNo, approvalStatus: ret!.approvalStatus };
     },
 
     // --- Shifts and the cash check (P8) ---

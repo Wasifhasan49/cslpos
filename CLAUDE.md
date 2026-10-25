@@ -167,6 +167,23 @@ chains with many branches; CSL's single-branch store is only the first customer.
   copy of `complete_sale()`, because the rule belongs to the sale row wherever it is
   inserted from. Owners are let through with a warning on screen: an owner locked out of
   their own till at 9pm stops using the app.
+- **The partial-return rule** (P9), because a sale is not a list of independent lines.
+  A whole-sale discount was spread over all of them, so refunding a line at its shelf
+  price gives back MORE than the customer handed over, every time there was a discount.
+  Returning q of a line sold as `qty` for `line_total` therefore refunds
+  `line_total × q / qty × (100 − discount_pct) / 100`, plus `vat_amount × q / qty` **only
+  when the VAT was exclusive** — inclusive VAT is already inside that figure, and adding
+  it again refunds the tax twice. Extra charges (delivery, installation) come back only
+  on a whole-sale return: on a partial one the van still drove. `refund_for()` in the
+  database and `refundFor()` in `src/lib/sale.ts` are the same arithmetic, tested with
+  the same numbers in both places, so the screen shows what will actually go back.
+  A faulty item never reaches a shelf: its serial goes to `rma` at the branch where it
+  was handed in (returns are accepted at any branch — that is where the box is).
+- **Void is not return** (P9). A void says the sale should never have existed: same day
+  only, with a manager's PIN, stock and serials back, and the invoice number stays burnt
+  because a sequence with holes needs explaining to an auditor. A return is a real event
+  with its own document (`RET-<branch>-<year><6 digits>`), and a sale that has been
+  partly returned can no longer be voided or the goods would come back twice.
 - **Imports upsert by code and never delete** (P4). A shop's export may be partial or
   last week's, so importing one must never remove anything, and re-running the same file
   must change nothing — that is what makes it safe to retry after a timeout. Opening
@@ -229,7 +246,9 @@ The list below is the original short version; BUILD_PROMPTS.md wins where they d
    disputed shortages, moves inside a branch, and transfer routes.
 5. ~~**Shifts and the cash check**~~ — done (P8): open and close the drawer, cash in and
    out with reasons, and the owner's drawer check per branch at `/cash`.
-6. **Sales history, reprint, void and returns** (P9), then **credit sales and customers**
+6. ~~**Sales history, reprint, void and returns**~~ — done (P9): one search box for
+   invoice, phone, serial or product; a COPY-marked reprint; void; and partial returns
+   with the discount and VAT shares worked out. Next: **credit sales and customers**
    (P10) and the **full counter** (P10a).
 7. **Warranty lookup** by serial or phone; simple claim log (P11).
 8. **Owner dashboard** (phone-first), see product decisions above (P12).

@@ -10,6 +10,7 @@ import type {
   InTransitRow, TransferRequestRow, TransferRequestStatus, TransferReceived, TransferRoute,
   TransferRow, TransferSent,
   CashReason, ShiftClosed, ShiftRow, ShiftState,
+  ApprovalStatus, RefundMethod, ReturnResult, SaleDetail, SaleRow, SaleStatus,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 
@@ -264,4 +265,44 @@ export interface Backend {
   listShifts(branchId: string, limit?: number): Promise<ShiftRow[]>;
   /** The shop's expense categories, for a cash-out. */
   listExpenseCategories(): Promise<{ id: string; name: string }[]>;
+
+  // --- Sales history, void and returns (P9) ---
+  /** One search box: invoice, phone, serial or product name all go in `query`.
+   *  A cashier is narrowed to their own sales, today, at their own branch. */
+  saleHistory(input: {
+    branchId?: string | null;
+    query?: string | null;
+    from?: string | null;
+    to?: string | null;
+    staffId?: string | null;
+    method?: string | null;
+    status?: SaleStatus | null;
+    limit?: number;
+  }): Promise<SaleRow[]>;
+  /** The whole sale, for the detail view and the reprint. */
+  saleDetail(saleId: string): Promise<SaleDetail>;
+  /** Same day only, with a reason. Puts the stock and serials back. */
+  voidSale(input: {
+    saleId: string; reason: string; approvalId?: string | null;
+    refundMethod?: string | null; refundRef?: string | null;
+  }): Promise<{ invoiceNo: string; status: string; refunded: number }>;
+  /** Taken back at any branch; the stock goes back where it was handed in. */
+  returnSale(input: {
+    saleId: string;
+    branchId: string;
+    lines: {
+      saleItemId: string; qty?: number; serialIds?: string[]; isFaulty?: boolean;
+    }[];
+    refundMethod: RefundMethod;
+    reason?: string | null;
+    refundRef?: string | null;
+    approvalId?: string | null;
+    courierName?: string | null;
+    courierTracking?: string | null;
+    photoUrls?: string[] | null;
+  }): Promise<ReturnResult>;
+  /** Approve or cancel a held sale or return, on the document itself. */
+  setSaleApproval(
+    kind: "sale" | "return", id: string, action: "approve" | "cancel", reason?: string | null,
+  ): Promise<{ number: string; approvalStatus: ApprovalStatus }>;
 }
