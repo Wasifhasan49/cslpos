@@ -11,11 +11,20 @@ One line per prompt from docs/BUILD_PROMPTS.md, newest at the bottom.
 
 | P3 | **mostly done** | Price lists (Retail default + any the shop adds), a price per product per list with MRP and a min–max **band**, optional per-branch override. At the till the price comes from the customer's list (branch override first); a seller may move it inside the band, below it needs a manager PIN, and every override is logged with list price, charged price and the money given away. Customers carry a price list and a standing discount that applies with no approval. Non-inventory items (services) sell with no stock. Buy-X-get-Y gifts go on at ৳0 and still leave stock. `/products` with search, category and quick filters, add/edit, per-list price + band editing, bulk price change with a preview, and category merging (for BMS typos like "Convarter"). Cost and margin are **absent** from the data a cashier receives, not just hidden. 166 database checks. **Not done: screens for product attributes, gifts, purchase-price fixing, the printable price view, and price-list add/rename** (all exist in the database and are tested). | Products → switch the price list to Dealer: the keyboard should become 750, floor 700. At the counter, add the keyboard, type 01811000000: the price should drop to 750 with a "Dealer prices are being used" banner. Tap "change price", try 650 — it should refuse below 700 and name the manager requirement; 700 should be accepted. As a cashier, confirm no cost or margin appears on /products at all. |
 
+| P4 | done, **needs re-check with real BMS files** | Import wizard at Settings → Import for products, prices, opening stock, serials, customers and suppliers. Four steps: upload (.xlsx or .csv, read in the browser so the shop's data never leaves the machine) → map columns (auto-guesses BMS's own names like "Model No/Caption" and "Product Group"; the mapping is remembered per shop) → review (every row as add / update / ignored / problem, in plain words, with spelling fixes suggested — "Convarter" → "Converter") → import in batches. Everything upserts by code, **never deletes**, and re-running the same file changes nothing. Opening stock lands as an `adjust_in` movement noted "Opening stock from import"; customer and supplier dues become `opening_balances` ready for P13. Practice-run toggle on by default. 42 import tests + 30-odd database checks. | Settings → Import → Products, pick `bms-export/samples/bms-products.csv`: it should find the header on row 4, skip the blank row, map "Model No/Caption" to the product name, suggest three spelling fixes, and ignore the duplicated code. Do a practice run, then the real one, then run the **same file again** — it should add nothing. |
+
 ## Waiting on Wasif
 
 - Supabase: the old test project no longer resolves (paused or deleted). Create a new
   one, update .env.local, apply all migrations in order, then run `pnpm check`.
   Everything below is tested against a local Postgres instead; only real sign-in and
   live RLS are unverified.
+- **P4 was built against synthetic samples, not the real export.** The real BMS files
+  were not available, so `bms-export/samples/` holds reconstructions with the same
+  column names and quirks (title row above the header, "Convarter", blank rows, codes
+  with spaces, numbers as text, a duplicate code). The column names are a best guess
+  from the BMS screenshots. **When the real export exists: put it in `bms-export/`, run
+  the wizard, and check the auto-mapping actually matches.** Anything it misses is one
+  line in `src/lib/import/schema.ts`.
 - Before P14: Claude (chat) reviews reports_samples/ (~100 BMS report PDFs + 5 images)
   and writes docs/BMS_REPORTS.md. P14 and P16 should use that file, not the PDFs.

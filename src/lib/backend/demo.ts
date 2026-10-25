@@ -10,6 +10,7 @@ import type {
   FeatureKey, PriceList, Product, Receipt, ReceiptLine, Role, SaleInput, SerialUnit,
   SettingRow, SettingTable, SettingsBundle, Staff, StaffLookup, StaffMember,
 } from "../types";
+import type { ImportKind } from "../import/schema";
 import type { Backend } from "./types";
 import {
   DEFAULT_SERIAL_BRANCH, DEMO_BRANCHES, DEMO_CATEGORIES, DEMO_PIN, DEMO_SERIAL_BRANCH,
@@ -179,6 +180,8 @@ export function createDemoBackend(): Backend {
     const base = onList ?? { price: catalogue.find((p) => p.id === productId)?.price ?? 0, mrp: null, min: null, max: null };
     return { ...base, min: base.min ?? base.price };
   };
+
+  let importMapping: Record<string, string> | null = null;
 
   let pin = DEMO_PIN;
   let failedPinTries = 0;
@@ -657,6 +660,36 @@ export function createDemoBackend(): Backend {
       priceLists.push({ id: newId, name: name.trim(), isDefault: Boolean(isDefault), active: true });
       prices[newId] = {};
       for (const p of catalogue) prices[newId][p.id] = { price: p.price, mrp: null, min: null, max: null };
+    },
+
+    // --- Import. Demo mode has no database, so an import reports what it would do
+    // and changes nothing: a prospective buyer can walk the whole wizard safely. ---
+
+    async existingKeys(kind: ImportKind) {
+      if (kind === "customers") return new Set(customers.map((c) => c.phone));
+      if (kind === "serials") return new Set(serials.map((s) => s.serial));
+      if (kind === "suppliers") return new Set<string>();
+      return new Set(catalogue.map((p) => p.code));
+    },
+
+    async loadImportMapping() { return importMapping; },
+    async saveImportMapping(_kind: ImportKind, mapping: Record<string, string>) {
+      importMapping = mapping;
+    },
+
+    async runImport({ kind, rows, dryRun }) {
+      const keys = kind === "customers" ? new Set(customers.map((c) => c.phone))
+        : kind === "serials" ? new Set(serials.map((s) => s.serial))
+        : new Set(catalogue.map((p) => p.code));
+      const keyOf = kind === "customers" ? "phone" : kind === "serials" ? "serial" : "code";
+      let added = 0;
+      let updated = 0;
+      for (const r of rows) {
+        if (keys.has(String(r[keyOf] ?? ""))) updated += 1; else added += 1;
+      }
+      // Always reported as if it were a dry run, because nothing is stored.
+      void dryRun;
+      return { added, updated, skipped: 0 };
     },
 
     async setDocumentNextNumber(branchId, docType, next) {

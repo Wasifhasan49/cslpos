@@ -3,6 +3,7 @@ import type {
   CustomerLookup, FeatureKey, PriceList, Product, Receipt, Role, SaleInput, SettingRow,
   SettingTable, SettingsBundle, StaffLookup, StaffMember,
 } from "../types";
+import type { ImportKind } from "../import/schema";
 
 /** Everything the screens need from "the server". Demo mode and Supabase both implement this. */
 export interface Backend {
@@ -76,4 +77,21 @@ export interface Backend {
   }): Promise<BulkPriceChange[]>;
   mergeCategories(fromId: string, intoId: string): Promise<{ productsMoved: number }>;
   savePriceList(id: string | null, name: string, isDefault?: boolean, active?: boolean): Promise<void>;
+
+  // --- Import from BMS (P4) ---
+  /** Codes/phones/names the shop already has, so the review step can say "update"
+   *  rather than "add". */
+  existingKeys(kind: ImportKind): Promise<Set<string>>;
+  /** The column mapping this shop used last time, so a repeat import is one click. */
+  loadImportMapping(kind: ImportKind): Promise<Record<string, string> | null>;
+  saveImportMapping(kind: ImportKind, mapping: Record<string, string>): Promise<void>;
+  /** Sends the rows in batches. `dryRun` reports what would happen and writes nothing. */
+  runImport(input: {
+    kind: ImportKind;
+    rows: Record<string, string | number | boolean | null>[];
+    dryRun: boolean;
+    fileName: string;
+    branchId?: string;
+    priceListId?: string;
+  }): Promise<Record<string, number>>;
 }

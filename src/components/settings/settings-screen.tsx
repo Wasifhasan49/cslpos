@@ -76,9 +76,14 @@ export function SettingsScreen() {
     <Shell>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h1 className="text-xl font-semibold">Settings</h1>
-        <Link href="/settings/branches" className="text-sm text-ink-soft underline">
-          Branches and staff →
-        </Link>
+        <span className="flex flex-wrap gap-4">
+          <Link href="/settings/branches" className="text-sm text-ink-soft underline">
+            Branches and staff →
+          </Link>
+          <Link href="/settings/import" className="text-sm text-ink-soft underline">
+            Import from BMS →
+          </Link>
+        </span>
       </div>
 
       {readOnly && (

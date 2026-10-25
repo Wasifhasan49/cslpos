@@ -173,7 +173,7 @@ export const SALE_ERROR_CODES = [
   "BAD_PRICE", "BAD_PRICE_BAND", "BAD_PRICE_MODE", "PRODUCT_NAME_REQUIRED",
   "PRODUCT_CODE_REQUIRED", "PRICE_LIST_NOT_FOUND", "PRICE_LIST_NAME_REQUIRED",
   "LAST_PRICE_LIST", "NO_PRODUCTS_PICKED", "CATEGORY_NOT_FOUND", "SAME_CATEGORY",
-  "SERIAL_CHANGE_HAS_STOCK",
+  "SERIAL_CHANGE_HAS_STOCK", "NOTHING_TO_IMPORT",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -277,6 +277,7 @@ export function friendlyError(raw: string): string {
     case "NO_PRODUCTS_PICKED": return "Pick some products first.";
     case "CATEGORY_NOT_FOUND": return "That category isn't in this shop.";
     case "SAME_CATEGORY": return "Pick two different categories to merge.";
+    case "NOTHING_TO_IMPORT": return "There are no rows to import.";
     case "SERIAL_CHANGE_HAS_STOCK":
       return `${detail ?? "This product"} already has stock, so it can't switch between serial-tracked and not. Sell or write off the stock first.`;
     // Keep the raw text so a code we have not seen can still be reported and fixed,

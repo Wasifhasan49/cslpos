@@ -864,5 +864,250 @@ select pg_temp.expect_error($q$select public.merge_categories(
 select pg_temp.check((select count(*) from public.attribute_types where shop_id = :'SHOP' and enabled) = 2, 'Group and Brand are on by default');
 select pg_temp.check((select count(*) from public.attribute_types where shop_id = :'SHOP') = 7, 'and five more are there to switch on');
 
+
+-- ===========================================================================
+-- 15. IMPORT FROM BMS (P4)
+-- ===========================================================================
+-- The done-when: a real export goes into a fresh shop, re-running it changes
+-- nothing, and the counter finds products by their BMS codes.
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+
+\set IMPORT_ROWS '[{"code":"BMS-NEW-1","name":"Imported cable","category":"Convarter","brand":"Vention","unit":"Pcs","price":320,"mrp":400,"warranty":12},{"code":"BMS-NEW-2","name":"Imported mouse","category":"Accesories","brand":"Logitach","unit":"Pcs","price":480,"warranty":12},{"code":"VEN-AUD-35","name":"Vention Audio 3.5mm to 2 Female 3.5mm","category":"Cables & adapters","price":520,"warranty":12}]'
+
+-- First run: two new, one update of a product the shop already had.
+do $$
+declare r jsonb;
+begin
+  r := public.import_products('[{"code":"BMS-NEW-1","name":"Imported cable","category":"Convarter","brand":"Vention","unit":"Pcs","price":320,"mrp":400,"warranty":12},{"code":"BMS-NEW-2","name":"Imported mouse","category":"Accesories","brand":"Logitach","unit":"Pcs","price":480,"warranty":12},{"code":"VEN-AUD-35","name":"Vention Audio 3.5mm to 2 Female 3.5mm","category":"Cables & adapters","price":520,"warranty":12}]'::jsonb,
+        false, 'bms-products.csv');
+  if (r->>'added')::int <> 2 then raise exception 'WRONG ADDED COUNT: %', r; end if;
+  if (r->>'updated')::int <> 1 then raise exception 'WRONG UPDATED COUNT: %', r; end if;
+  raise notice 'ok: the import added 2 products and updated 1';
+end $$;
+
+-- Categories and units named in the file were created, so a shop does not have to
+-- pre-build its own lists before it can move in.
+select pg_temp.check((select count(*) from public.categories where shop_id = :'SHOP' and name = 'Convarter') = 1, 'a category named in the file is created');
+select pg_temp.check((select count(*) from public.units where shop_id = :'SHOP' and name = 'Pcs') = 1, 'and so is a unit');
+
+-- The counter can find an imported product by its BMS code, with its price.
+select pg_temp.check(
+  (select (x->>'price')::numeric from jsonb_array_elements(public.branch_products(:'BRANCH_A')) x
+   where x->>'code' = 'BMS-NEW-1') = 320,
+  'the counter finds the imported product by its BMS code, at its imported price');
+select pg_temp.check(
+  (select price from public.products where shop_id = :'SHOP' and code = 'VEN-AUD-35') = 520,
+  'and the existing product took the new price');
+
+-- ---- Re-running the same file changes nothing ----
+do $$
+declare before_count int; after_count int; r jsonb; before_price numeric; after_price numeric;
+begin
+  select count(*) into before_count from public.products where shop_id = '00000000-0000-4000-8000-000000000001';
+  select price into before_price from public.products where code = 'BMS-NEW-1';
+
+  r := public.import_products('[{"code":"BMS-NEW-1","name":"Imported cable","category":"Convarter","brand":"Vention","unit":"Pcs","price":320,"mrp":400,"warranty":12},{"code":"BMS-NEW-2","name":"Imported mouse","category":"Accesories","brand":"Logitach","unit":"Pcs","price":480,"warranty":12},{"code":"VEN-AUD-35","name":"Vention Audio 3.5mm to 2 Female 3.5mm","category":"Cables & adapters","price":520,"warranty":12}]'::jsonb,
+        false, 'bms-products.csv');
+
+  select count(*) into after_count from public.products where shop_id = '00000000-0000-4000-8000-000000000001';
+  select price into after_price from public.products where code = 'BMS-NEW-1';
+
+  if (r->>'added')::int <> 0 then raise exception 'RE-RUN ADDED SOMETHING: %', r; end if;
+  if after_count <> before_count then raise exception 'RE-RUN CHANGED THE PRODUCT COUNT: % -> %', before_count, after_count; end if;
+  if after_price <> before_price then raise exception 'RE-RUN CHANGED A PRICE'; end if;
+  raise notice 'ok: re-running the same file adds nothing and changes nothing';
+end $$;
+
+-- An import never deletes: a partial export must not wipe the catalogue.
+do $$
+declare before_count int; after_count int;
+begin
+  select count(*) into before_count from public.products where shop_id = '00000000-0000-4000-8000-000000000001';
+  perform public.import_products('[{"code":"BMS-NEW-1","name":"Imported cable","price":320}]'::jsonb, false, 'partial.csv');
+  select count(*) into after_count from public.products where shop_id = '00000000-0000-4000-8000-000000000001';
+  if after_count <> before_count then raise exception 'A PARTIAL IMPORT DELETED SOMETHING: % -> %', before_count, after_count; end if;
+  raise notice 'ok: a one-row export leaves the rest of the catalogue alone';
+end $$;
+
+-- A dry run writes nothing but reports the same counts.
+do $$
+declare r jsonb; before_count int; after_count int;
+begin
+  select count(*) into before_count from public.products where shop_id = '00000000-0000-4000-8000-000000000001';
+  r := public.import_products('[{"code":"DRY-1","name":"Never saved","price":100}]'::jsonb, true, 'dry.csv');
+  select count(*) into after_count from public.products where shop_id = '00000000-0000-4000-8000-000000000001';
+  if (r->>'added')::int <> 1 then raise exception 'DRY RUN DID NOT REPORT: %', r; end if;
+  if after_count <> before_count then raise exception 'DRY RUN WROTE SOMETHING'; end if;
+  raise notice 'ok: a dry run reports 1 add and writes nothing';
+end $$;
+
+-- Rows that cannot be imported are counted, not fatal: one bad line must not stop 600
+-- good ones.
+do $$
+declare r jsonb;
+begin
+  r := public.import_products('[{"code":"","name":"No code"},{"code":"OK-1","name":"Fine","price":10},{"code":"NO-NAME","name":""}]'::jsonb, false, 'messy.csv');
+  if (r->>'skipped')::int <> 2 then raise exception 'BAD ROWS NOT COUNTED: %', r; end if;
+  if (r->>'added')::int <> 1 then raise exception 'GOOD ROW NOT IMPORTED: %', r; end if;
+  raise notice 'ok: two unusable rows are skipped and the good one still goes in';
+end $$;
+
+-- One audit entry per run, with the counts in it.
+select pg_temp.check((select count(*) from public.audit_log where action = 'import_run') = 4, 'one audit entry per real import run');
+select pg_temp.check((select count(*) from public.audit_log where action = 'import_dry_run') = 1, 'and a dry run is logged as a dry run');
+select pg_temp.check(
+  (select (details->>'added')::int from public.audit_log
+   where action = 'import_run' and details->>'file' = 'bms-products.csv' order by created_at limit 1) = 2,
+  'and the entry carries the counts, not 600 separate lines');
+
+-- ---- Opening stock ----
+do $$
+declare r jsonb;
+begin
+  r := public.import_opening_stock('00000000-0000-4000-8000-0000000000b1',
+        '[{"code":"BMS-NEW-1","qty":25},{"code":"BMS-NEW-2","qty":0},{"code":"NOT-A-PRODUCT","qty":5}]'::jsonb,
+        false, 'bms-stock.csv');
+  if (r->>'set')::int <> 1 then raise exception 'WRONG SET COUNT: %', r; end if;
+  if (r->>'missing')::int <> 1 then raise exception 'UNKNOWN CODE NOT FLAGGED: %', r; end if;
+  raise notice 'ok: opening stock set for 1, and the unknown code counted as missing';
+end $$;
+select pg_temp.check(
+  (select qty from public.branch_stock bs join public.products p on p.id = bs.product_id
+   where p.code = 'BMS-NEW-1' and bs.branch_id = :'BRANCH_A') = 25,
+  'the shelf figure is what the report said');
+select pg_temp.check(
+  (select count(*) from public.stock_movements sm join public.products p on p.id = sm.product_id
+   where p.code = 'BMS-NEW-1' and sm.note = 'Opening stock from import') = 1,
+  'and the history says where it came from');
+
+-- Re-running the stock report SETS rather than adds, so the shelf does not double.
+do $$
+declare r jsonb; q int;
+begin
+  r := public.import_opening_stock('00000000-0000-4000-8000-0000000000b1',
+        '[{"code":"BMS-NEW-1","qty":25}]'::jsonb, false, 'bms-stock.csv');
+  select bs.qty into q from public.branch_stock bs join public.products p on p.id = bs.product_id
+    where p.code = 'BMS-NEW-1' and bs.branch_id = '00000000-0000-4000-8000-0000000000b1';
+  if q <> 25 then raise exception 'RE-IMPORTED STOCK DOUBLED: %', q; end if;
+  if (r->>'unchanged')::int <> 1 then raise exception 'UNCHANGED NOT REPORTED: %', r; end if;
+  raise notice 'ok: re-running the stock report leaves 25 on the shelf, not 50';
+end $$;
+
+-- Opening stock goes into the branch it was imported for, not into every branch.
+select pg_temp.check(
+  coalesce((select qty from public.branch_stock bs join public.products p on p.id = bs.product_id
+            where p.code = 'BMS-NEW-1' and bs.branch_id = :'BRANCH_B'), 0) = 0,
+  'and the other branch got none of it');
+
+-- ---- Serials ----
+do $$
+declare r jsonb;
+begin
+  r := public.import_serials('00000000-0000-4000-8000-0000000000b1',
+        '[{"code":"SAM-980-500","serial":"IMPORTED-001"},{"code":"SAM-980-500","serial":"S64DNX0T41907"},{"code":"NOPE","serial":"X"}]'::jsonb,
+        false, 'bms-serials.csv');
+  if (r->>'added')::int <> 1 then raise exception 'WRONG SERIAL ADD COUNT: %', r; end if;
+  if (r->>'already_there')::int <> 1 then raise exception 'EXISTING SERIAL NOT RECOGNISED: %', r; end if;
+  if (r->>'missing')::int <> 1 then raise exception 'UNKNOWN PRODUCT NOT COUNTED: %', r; end if;
+  raise notice 'ok: 1 serial added, 1 already there, 1 for an unknown product';
+end $$;
+
+-- A serial that has been SOLD since the export must not come back as available.
+select pg_temp.check(
+  (select status from public.serials where serial = 'S64DNX0T41822') = 'sold',
+  'a serial sold since the export is still sold');
+do $$
+declare r jsonb;
+begin
+  r := public.import_serials('00000000-0000-4000-8000-0000000000b1',
+        '[{"code":"SAM-980-500","serial":"S64DNX0T41822"}]'::jsonb, false, 'bms-serials.csv');
+  if (r->>'added')::int <> 0 then raise exception 'A SOLD SERIAL WAS RE-ADDED: %', r; end if;
+  if (select status from public.serials where serial = 'S64DNX0T41822') <> 'sold' then
+    raise exception 'RE-IMPORT RESURRECTED A SOLD SERIAL';
+  end if;
+  raise notice 'ok: re-importing a sold serial leaves it sold, not back on the shelf';
+end $$;
+
+-- ---- Customers and suppliers, with their dues as opening balances ----
+do $$
+declare r jsonb;
+begin
+  r := public.import_customers('[{"phone":"01555000001","name":"Imported Customer","due":12500},{"phone":"2026-01-01","name":"Cash Customer","due":0},{"phone":"01555000002","name":"No Due","due":0}]'::jsonb,
+        false, 'bms-customers.csv');
+  if (r->>'added')::int <> 2 then raise exception 'WRONG CUSTOMER ADD COUNT: %', r; end if;
+  -- BMS gives every walk-in the same placeholder mobile; importing those would create a
+  -- fictional customer per sale.
+  if (r->>'skipped')::int <> 1 then raise exception 'PLACEHOLDER PHONE NOT SKIPPED: %', r; end if;
+  if (r->>'opening_dues')::int <> 1 then raise exception 'DUE NOT RECORDED: %', r; end if;
+  raise notice 'ok: 2 customers in, the fake mobile skipped, 1 opening due recorded';
+end $$;
+select pg_temp.check(
+  (select amount from public.opening_balances ob join public.customers c on c.id = ob.customer_id
+   where c.phone = '01555000001') = 12500,
+  'the customer''s old due is kept as an opening balance, ready for the accounts');
+select pg_temp.check(
+  (select count(*) from public.opening_balances where party_kind = 'customer' and amount = 0) = 0,
+  'and a customer who owes nothing gets no opening balance at all');
+
+do $$
+declare r jsonb;
+begin
+  r := public.import_suppliers('[{"name":"Smart Technologies BD","phone":"01811999001","due":45000},{"name":"","due":1}]'::jsonb,
+        false, 'bms-suppliers.csv');
+  if (r->>'added')::int <> 1 then raise exception 'WRONG SUPPLIER COUNT: %', r; end if;
+  if (r->>'skipped')::int <> 1 then raise exception 'NAMELESS SUPPLIER NOT SKIPPED: %', r; end if;
+  raise notice 'ok: a supplier and its 45,000 due came in; the nameless row was skipped';
+end $$;
+select pg_temp.check(
+  (select amount from public.opening_balances ob join public.suppliers s on s.id = ob.supplier_id
+   where s.name = 'Smart Technologies BD') = 45000,
+  'what the shop owes a supplier is an opening balance too');
+
+-- Re-importing the dues updates them rather than stacking a second one.
+do $$
+declare n int;
+begin
+  perform public.import_customers('[{"phone":"01555000001","name":"Imported Customer","due":9000}]'::jsonb, false, 'again.csv');
+  select count(*) into n from public.opening_balances ob join public.customers c on c.id = ob.customer_id
+    where c.phone = '01555000001';
+  if n <> 1 then raise exception 'DUPLICATE OPENING BALANCE: %', n; end if;
+  if (select amount from public.opening_balances ob join public.customers c on c.id = ob.customer_id
+      where c.phone = '01555000001') <> 9000 then
+    raise exception 'OPENING BALANCE NOT UPDATED';
+  end if;
+  raise notice 'ok: re-importing a due updates it instead of adding a second one';
+end $$;
+
+-- ---- Prices ----
+do $$
+declare r jsonb;
+begin
+  r := public.import_prices('00000000-0000-4000-8000-0000000000f2',
+        '[{"code":"BMS-NEW-1","price":280,"min_price":260},{"code":"NOPE","price":10}]'::jsonb,
+        false, 'bms-prices.csv');
+  if (r->>'set')::int <> 1 then raise exception 'WRONG PRICE COUNT: %', r; end if;
+  if (r->>'missing')::int <> 1 then raise exception 'UNKNOWN CODE NOT COUNTED: %', r; end if;
+  raise notice 'ok: a dealer price imported for 1 product, 1 unknown code counted';
+end $$;
+select pg_temp.check(
+  (public.resolve_price((select id from public.products where code = 'BMS-NEW-1'), :'BRANCH_A', '00000000-0000-4000-8000-0000000000f2')->>'price')::numeric = 280,
+  'and the dealer list really has it');
+
+-- ---- Column mappings are remembered per shop ----
+select public.save_import_mapping('products', '{"code":"Product Code","name":"Model No/Caption"}');
+select pg_temp.check(
+  (select mapping->>'name' from public.import_mappings where shop_id = :'SHOP' and kind = 'products') = 'Model No/Caption',
+  'the shop''s column mapping is remembered, so the next import is one click');
+
+-- ---- Importing is owner/manager work; a cashier cannot ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.expect_error($q$select public.import_products('[{"code":"X","name":"X"}]'::jsonb)$q$, 'NOT_ALLOWED');
+select pg_temp.expect_error($q$select public.import_customers('[{"phone":"01555000009"}]'::jsonb)$q$, 'NOT_ALLOWED');
+select pg_temp.expect_error(format($q$select public.import_opening_stock('%s', '[{"code":"BMS-NEW-1","qty":1}]'::jsonb)$q$, :'BRANCH_A'), 'NOT_ALLOWED');
+-- And a cashier cannot read what customers owe.
+select pg_temp.check((select count(*) from public.opening_balances) = 0, 'a cashier cannot see what anyone owes');
+select pg_temp.check((select count(*) from public.import_runs) = 0, 'nor the import history');
+
 reset role;
 \echo ALL DATABASE CHECKS PASSED

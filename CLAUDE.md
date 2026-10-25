@@ -117,6 +117,14 @@ chains with many branches; CSL's single-branch store is only the first customer.
   here) does not change what the customer pays; exclusive is added on top. A discount
   reduces the taxable amount, so inclusive VAT is recalculated on the discounted line —
   doing it on the total overstates the tax on every discounted sale.
+- **Imports upsert by code and never delete** (P4). A shop's export may be partial or
+  last week's, so importing one must never remove anything, and re-running the same file
+  must change nothing — that is what makes it safe to retry after a timeout. Opening
+  stock SETS the figure rather than adding to it (re-importing would otherwise double the
+  shelf) and records the difference as the movement. One audit entry per run with counts,
+  not one per row. Files are parsed in the BROWSER with exceljs, so the shop's customer
+  list never leaves their machine except as the rows they confirm. `xlsx` (SheetJS) was
+  rejected: npm is stuck at 0.18.5 from 2022 with open advisories.
 - **The Bangladesh area list** (divisions → districts → upazilas) is national reference
   data with no `shop_id`, generated into a migration by `scripts/gen-areas.mts` from
   github.com/nuhil/bangladesh-geocode. Re-run the generator rather than hand-editing.
@@ -160,7 +168,8 @@ The list below is the original short version; BUILD_PROMPTS.md wins where they d
    list means adding a spec there, not writing a screen.
    **Products and price lists** — mostly done (P3); attributes, gifts, purchase-price
    fixing, the printable price view and price-list add/rename have no screens yet.
-3. **Import from BMS**: CSV/Excel import of products and serials (P4).
+3. ~~**Import from BMS**~~ — done (P4), but built against synthetic samples: the real
+   export still needs checking against the auto-mapping in `src/lib/import/schema.ts`.
 4. **Owner dashboard** (phone-first), see product decisions above.
 5. **Shifts + cash check**: open with opening cash, close with counted cash; flag shortfalls.
    Tables exist (`shifts`); `complete_sale()` already links sales to the open shift.

@@ -45,3 +45,8 @@ next-env.d.ts
 
 # local sample data from BMS (screenshots, report exports)
 reports_samples/
+
+# The shop's real BMS exports stay out of git. The synthetic samples do not.
+bms-export/*
+!bms-export/README.md
+!bms-export/samples/

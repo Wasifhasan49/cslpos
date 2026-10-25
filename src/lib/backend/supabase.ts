@@ -6,6 +6,7 @@ import type {
   CustomerLookup, FeatureKey, PaymentMethod, PriceList, Product, Receipt, Role, SaleInput,
   SettingRow, SettingTable, SettingsBundle, StaffLookup, StaffMember,
 } from "../types";
+import type { ImportKind } from "../import/schema";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
 import type { Backend } from "./types";
 
@@ -437,6 +438,64 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         p_id: id, p_name: name, p_is_default: isDefault ?? null, p_active: active ?? null,
       });
       if (error) throw new Error(friendlyError(error.message));
+    },
+
+    // --- Import ---
+
+    async existingKeys(kind: ImportKind): Promise<Set<string>> {
+      if (kind === "customers") {
+        const { data } = await sb.from("customers").select("phone");
+        return new Set((data ?? []).map((r) => r.phone));
+      }
+      if (kind === "suppliers") {
+        const { data } = await sb.from("suppliers").select("name");
+        return new Set((data ?? []).map((r) => r.name));
+      }
+      if (kind === "serials") {
+        const { data } = await sb.from("serials").select("serial");
+        return new Set((data ?? []).map((r) => r.serial));
+      }
+      const { data } = await sb.from("products").select("code");
+      return new Set((data ?? []).map((r) => r.code));
+    },
+
+    async loadImportMapping(kind: ImportKind) {
+      const { data } = await sb
+        .from("import_mappings").select("mapping").eq("kind", kind).maybeSingle();
+      return (data?.mapping as Record<string, string> | undefined) ?? null;
+    },
+
+    async saveImportMapping(kind: ImportKind, mapping: Record<string, string>): Promise<void> {
+      const { error } = await sb.rpc("save_import_mapping", { p_kind: kind, p_mapping: mapping });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async runImport({ kind, rows, dryRun, fileName, branchId, priceListId }): Promise<Record<string, number>> {
+      // Batched, because a catalogue of several thousand rows in one call risks a
+      // statement timeout and leaves the owner with no idea how far it got.
+      const BATCH = 200;
+      const totals: Record<string, number> = {};
+      for (let i = 0; i < rows.length; i += BATCH) {
+        const batch = rows.slice(i, i + BATCH);
+        const fn =
+          kind === "products" ? "import_products"
+          : kind === "stock" ? "import_opening_stock"
+          : kind === "serials" ? "import_serials"
+          : kind === "customers" ? "import_customers"
+          : kind === "suppliers" ? "import_suppliers"
+          : "import_prices";
+
+        const args: Record<string, unknown> = { p_rows: batch, p_dry_run: dryRun, p_file: fileName };
+        if (kind === "stock" || kind === "serials") args.p_branch_id = branchId;
+        if (kind === "prices") args.p_price_list_id = priceListId;
+
+        const { data, error } = await sb.rpc(fn, args);
+        if (error) throw new Error(friendlyError(error.message));
+        for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
+          if (typeof v === "number") totals[k] = (totals[k] ?? 0) + v;
+        }
+      }
+      return totals;
     },
   };
 }
