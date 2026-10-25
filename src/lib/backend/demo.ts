@@ -7,8 +7,9 @@
 import { addMonths, dhakaToday, friendlyError, isValidPhone, roundTaka } from "../sale";
 import type {
   ApprovalResult, Approver, BranchAdmin, BulkPriceChange, CatalogueRow, CustomerLookup,
-  FeatureKey, PriceList, Product, Receipt, ReceiptLine, Role, SaleInput, SerialUnit,
-  SettingRow, SettingTable, SettingsBundle, Staff, StaffLookup, StaffMember,
+  CountDifference, FeatureKey, GoodsReceivedRow, PriceList, Product, Receipt, ReceiptLine,
+  ReceiveResult, Role, SaleInput, SerialUnit, SettingRow, SettingTable, SettingsBundle,
+  Staff, StaffLookup, StaffMember, StockMovementRow, Supplier, SupplierGroup,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import type { Backend } from "./types";
@@ -182,6 +183,21 @@ export function createDemoBackend(): Backend {
   };
 
   let importMapping: Record<string, string> | null = null;
+
+  // Suppliers, deliveries and movements, so the stock screens have something real to
+  // show without a database.
+  const supplierGroups: SupplierGroup[] = [{ id: "sg1", name: "Local distributor" }];
+  const suppliers: Supplier[] = [
+    { id: "sup1", name: "Smart Technologies BD", phone: "01811999001", address: "Motijheel, Dhaka", groupId: "sg1", groupName: "Local distributor", isCashOnly: false, note: null, active: true, balance: 45000 },
+    { id: "sup2", name: "Ryans Computers", phone: "01811999003", address: "Elephant Road, Dhaka", groupId: null, groupName: null, isCashOnly: false, note: null, active: true, balance: 8750 },
+    { id: "sup3", name: "One-off seller", phone: "01700111222", address: null, groupId: null, groupName: null, isCashOnly: true, note: "Cash only, no account", active: true, balance: 0 },
+  ];
+  const movements: StockMovementRow[] = [];
+  const deliveries: GoodsReceivedRow[] = [];
+  let grnCounter = 1;
+  const costs: Record<string, number> = { a1: 250 };
+
+  const noteMovement = (m: StockMovementRow) => movements.unshift(m);
 
   let pin = DEMO_PIN;
   let failedPinTries = 0;
@@ -690,6 +706,241 @@ export function createDemoBackend(): Backend {
       // Always reported as if it were a dry run, because nothing is stored.
       void dryRun;
       return { added, updated, skipped: 0 };
+    },
+
+    // --- Suppliers and stock ---
+
+    async listSuppliers() { return structuredClone(suppliers); },
+    async listSupplierGroups() { return structuredClone(supplierGroups); },
+
+    async saveSupplier(input) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:receive_stock");
+      if (!input.name.trim()) fail("SUPPLIER_NAME_REQUIRED");
+      if (input.id) {
+        const sup = suppliers.find((x) => x.id === input.id);
+        if (!sup) fail("SUPPLIER_NOT_FOUND");
+        Object.assign(sup!, {
+          name: input.name.trim(),
+          phone: input.phone ?? sup!.phone,
+          address: input.address ?? sup!.address,
+          groupId: input.groupId ?? null,
+          groupName: supplierGroups.find((g) => g.id === input.groupId)?.name ?? null,
+          isCashOnly: input.isCashOnly ?? sup!.isCashOnly,
+          note: input.note ?? sup!.note,
+          active: input.active ?? sup!.active,
+        });
+        return;
+      }
+      suppliers.push({
+        id: crypto.randomUUID(), name: input.name.trim(),
+        phone: input.phone ?? null, address: input.address ?? null,
+        groupId: input.groupId ?? null,
+        groupName: supplierGroups.find((g) => g.id === input.groupId)?.name ?? null,
+        isCashOnly: input.isCashOnly ?? false, note: input.note ?? null,
+        active: true, balance: 0,
+      });
+    },
+
+    async receiveGoods(input): Promise<ReceiveResult> {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:receive_stock");
+      const branch = branchOr404(input.branchId);
+      if (input.lines.length === 0) fail("NOTHING_RECEIVED");
+      const supplier = suppliers.find((x) => x.id === input.supplierId);
+      if (input.isCredit && !supplier) fail("CREDIT_NEEDS_SUPPLIER");
+      if (input.isCredit && supplier?.isCashOnly) fail("CASH_SUPPLIER_NO_CREDIT");
+
+      let subtotal = 0;
+      let costMissing = false;
+      const out: ReceiveResult["lines"] = [];
+
+      for (const l of input.lines) {
+        const p = catalogue.find((x) => x.id === l.productId);
+        if (!p) fail("PRODUCT_NOT_FOUND");
+        const serialTexts = (l.serials ?? []).map((x) => x.trim()).filter((x) => x !== "");
+        const qty = p!.isSerial ? serialTexts.length : l.qty;
+        if (p!.isSerial && qty === 0) fail(`SERIAL_REQUIRED:${p!.name}`);
+        if (qty <= 0) fail(`BAD_QTY:${p!.name}`);
+        if (new Set(serialTexts).size !== serialTexts.length) fail(`DUPLICATE_SERIAL_IN_LINE:${p!.name}`);
+        for (const t of serialTexts) {
+          if (serials.some((x) => x.serial === t)) fail(`SERIAL_ALREADY_KNOWN:${t}`);
+        }
+        if (l.unitCost == null) costMissing = true;
+        const lineTotal = Math.max((l.unitCost ?? 0) * qty - (l.lineDiscount ?? 0), 0);
+        subtotal += lineTotal;
+
+        if (p!.isSerial) {
+          for (const t of serialTexts) {
+            serials.push({ id: crypto.randomUUID(), serial: t, productId: p!.id, branchId: input.branchId, sold: false });
+          }
+        } else {
+          stock[input.branchId][p!.id] = (stock[input.branchId][p!.id] ?? 0) + qty;
+        }
+        out.push({ name: p!.name, qty, unitCost: l.unitCost, landedCost: null, averageCost: null });
+        noteMovement({
+          at: new Date().toISOString(), product: p!.name, code: p!.code, change: qty,
+          reason: "purchase", why: null, note: `Received on GRN-${branch.code}`, who: staff.name,
+          location: branch.locations[0]?.name ?? null,
+        });
+      }
+
+      // Spread the extra costs by value and move each average cost, the same way
+      // receive_goods() does it.
+      const spread = (input.extraCosts ?? 0) - (input.discount ?? 0);
+      for (const [i, l] of input.lines.entries()) {
+        const p = catalogue.find((x) => x.id === l.productId)!;
+        const qty = p.isSerial ? (l.serials ?? []).filter((x) => x.trim() !== "").length : l.qty;
+        const lineTotal = Math.max((l.unitCost ?? 0) * qty - (l.lineDiscount ?? 0), 0);
+        if (l.unitCost == null) continue;
+        const share = subtotal > 0 ? Math.round(((lineTotal / subtotal) * spread) * 100) / 100 : 0;
+        const landed = Math.round(((lineTotal + share) / qty) * 100) / 100;
+        out[i].landedCost = landed;
+
+        const onHand = Object.values(stock).reduce((n, byP) => n + (byP[p.id] ?? 0), 0)
+          + serials.filter((x) => x.productId === p.id && !x.sold).length - qty;
+        const old = costs[p.id];
+        const next = old == null || onHand <= 0
+          ? landed
+          : Math.round(((onHand * old + qty * landed) / (onHand + qty)) * 100) / 100;
+        costs[p.id] = next;
+        out[i].averageCost = next;
+      }
+
+      const total = Math.max(subtotal - (input.discount ?? 0), 0)
+        + (input.extraCosts ?? 0) + (input.vat ?? 0) + (input.ait ?? 0);
+      if (input.isCredit && supplier) supplier.balance += total;
+      if (input.payAmount && supplier) supplier.balance -= input.payAmount;
+
+      const grnNo = `GRN-${branch.code}-${new Date().getFullYear()}${String(grnCounter++).padStart(6, "0")}`;
+      deliveries.unshift({
+        id: crypto.randomUUID(), grnNo, supplierName: supplier?.name ?? null,
+        supplierInvoiceNo: input.supplierInvoiceNo ?? null, isCredit: input.isCredit ?? false,
+        total, costMissing, createdAt: new Date().toISOString(),
+        lines: out.map((l) => ({
+          id: crypto.randomUUID(), product: l.name, qty: l.qty,
+          unitCost: l.unitCost, landedCost: l.landedCost,
+        })),
+      });
+
+      return { grnNo, subtotal, total, costMissing, supplierDue: supplier?.balance ?? null, lines: out };
+    },
+
+    async amendGrnCost(grnItemId: string, unitCost: number) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:receive_stock");
+      if (unitCost < 0) fail("BAD_COST");
+      for (const d of deliveries) {
+        const line = d.lines.find((l) => l.id === grnItemId);
+        if (line) {
+          line.unitCost = unitCost;
+          line.landedCost = unitCost;
+          d.costMissing = d.lines.some((l) => l.unitCost == null);
+          return;
+        }
+      }
+      fail("GRN_LINE_NOT_FOUND");
+    },
+
+    async listGoodsReceived() { return structuredClone(deliveries); },
+
+    async returnToSupplier(input) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:adjust_stock");
+      const branch = branchOr404(input.branchId);
+      if (input.lines.length === 0) fail("NOTHING_RETURNED");
+      const supplier = suppliers.find((x) => x.id === input.supplierId);
+      let total = 0;
+      for (const l of input.lines) {
+        const p = catalogue.find((x) => x.id === l.productId);
+        if (!p) fail("PRODUCT_NOT_FOUND");
+        const ids = l.serialIds ?? [];
+        const qty = p!.isSerial ? ids.length : l.qty;
+        if (p!.isSerial && qty === 0) fail(`SERIAL_REQUIRED:${p!.name}`);
+        if (p!.isSerial) {
+          const picked = serials.filter((x) => ids.includes(x.id) && !x.sold && x.branchId === input.branchId);
+          if (picked.length !== ids.length) fail(`SERIAL_NOT_AVAILABLE:${p!.name}`);
+          for (const x of picked) x.sold = true;
+        } else {
+          if ((stock[input.branchId][p!.id] ?? 0) < qty) fail(`OUT_OF_STOCK:${p!.name}`);
+          stock[input.branchId][p!.id] -= qty;
+        }
+        total += (costs[p!.id] ?? 0) * qty;
+        noteMovement({
+          at: new Date().toISOString(), product: p!.name, code: p!.code, change: -qty,
+          reason: "return_to_supplier", why: null, note: input.reason ?? null,
+          who: staff.name, location: branch.locations[0]?.name ?? null,
+        });
+      }
+      if (supplier) supplier.balance -= total;
+      return {
+        returnNo: `RET-${branch.code}-${new Date().getFullYear()}000001`,
+        total, supplierDue: supplier?.balance ?? null,
+      };
+    },
+
+    async correctStock(input) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:adjust_stock");
+      const branch = branchOr404(input.branchId);
+      if (!["damaged", "lost", "found_in_count", "internal_use", "expired", "other"].includes(input.reason)) {
+        fail(`BAD_STOCK_REASON:${input.reason}`);
+      }
+      if (input.reason === "other" && !input.note?.trim()) fail("REASON_NOTE_REQUIRED");
+      if (input.change === 0) fail("NOTHING_TO_CORRECT");
+      const p = catalogue.find((x) => x.id === input.productId);
+      if (!p) fail("PRODUCT_NOT_FOUND");
+      if (p!.isSerial && (input.serials ?? []).length !== Math.abs(input.change)) {
+        fail(`SERIAL_COUNT_MISMATCH:${p!.name}`);
+      }
+      const now = stock[input.branchId][p!.id] ?? 0;
+      if (!p!.isSerial) {
+        if (now + input.change < 0) fail(`WOULD_GO_NEGATIVE:${p!.name}`);
+        stock[input.branchId][p!.id] = now + input.change;
+      } else if (input.change < 0) {
+        for (const id of input.serials ?? []) {
+          const sx = serials.find((x) => x.id === id && !x.sold);
+          if (!sx) fail(`SERIAL_NOT_AVAILABLE:${p!.name}`);
+          sx!.sold = true;
+        }
+      } else {
+        for (const t of input.serials ?? []) {
+          if (serials.some((x) => x.serial === t)) fail(`SERIAL_ALREADY_KNOWN:${t}`);
+          serials.push({ id: crypto.randomUUID(), serial: t, productId: p!.id, branchId: input.branchId, sold: false });
+        }
+      }
+      noteMovement({
+        at: new Date().toISOString(), product: p!.name, code: p!.code, change: input.change,
+        reason: input.change > 0 ? "adjust_in" : "adjust_out", why: input.reason,
+        note: input.note ?? null, who: staff.name, location: branch.locations[0]?.name ?? null,
+      });
+    },
+
+    async applyStockCount(input) {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:adjust_stock");
+      const branch = branchOr404(input.branchId);
+      const differences: CountDifference[] = [];
+      let alreadyRight = 0;
+      for (const c of input.counted) {
+        const p = catalogue.find((x) => x.id === c.productId);
+        if (!p || p.isSerial) continue;
+        const expected = stock[input.branchId][p.id] ?? 0;
+        if (expected === c.counted) { alreadyRight += 1; continue; }
+        differences.push({ productId: p.id, name: p.name, expected, counted: c.counted, change: c.counted - expected });
+        if (!input.dryRun) {
+          stock[input.branchId][p.id] = c.counted;
+          noteMovement({
+            at: new Date().toISOString(), product: p.name, code: p.code,
+            change: c.counted - expected, reason: "count",
+            why: c.counted > expected ? "found_in_count" : "lost",
+            note: input.note ?? "Stock count", who: staff.name,
+            location: branch.locations[0]?.name ?? null,
+          });
+        }
+      }
+      return { corrected: differences.length, alreadyRight, differences };
+    },
+
+    async stockHistory(_branchId: string, productId?: string | null, limit = 100) {
+      const name = productId ? catalogue.find((p) => p.id === productId)?.name : null;
+      return structuredClone(
+        movements.filter((m) => !name || m.product === name).slice(0, limit),
+      );
     },
 
     async setDocumentNextNumber(branchId, docType, next) {

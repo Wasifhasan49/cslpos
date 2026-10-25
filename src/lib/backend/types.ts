@@ -1,7 +1,9 @@
 import type {
   ApprovalResult, Approver, BranchAdmin, BulkPriceChange, CatalogueRow, Category,
-  CustomerLookup, FeatureKey, PriceList, Product, Receipt, Role, SaleInput, SettingRow,
-  SettingTable, SettingsBundle, StaffLookup, StaffMember,
+  CountDifference, CustomerLookup, FeatureKey, GoodsReceivedRow, PriceList, Product,
+  Receipt, ReceiveLine, ReceiveResult, Role, SaleInput, SettingRow, SettingTable,
+  SettingsBundle, StaffLookup, StaffMember, StockMovementRow, StockReason, Supplier,
+  SupplierGroup,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 
@@ -94,4 +96,52 @@ export interface Backend {
     branchId?: string;
     priceListId?: string;
   }): Promise<Record<string, number>>;
+
+  // --- Suppliers and stock (P5) ---
+  listSuppliers(): Promise<Supplier[]>;
+  listSupplierGroups(): Promise<SupplierGroup[]>;
+  saveSupplier(input: {
+    id?: string; name: string; phone?: string | null; address?: string | null;
+    groupId?: string | null; isCashOnly?: boolean; note?: string | null; active?: boolean;
+  }): Promise<void>;
+  /** One transaction: the document, the stock, the serials, the costs and the payment. */
+  receiveGoods(input: {
+    branchId: string;
+    lines: ReceiveLine[];
+    supplierId?: string | null;
+    supplierInvoiceNo?: string | null;
+    invoiceDate?: string | null;
+    isCredit?: boolean;
+    discount?: number;
+    extraCosts?: number;
+    vat?: number;
+    ait?: number;
+    note?: string | null;
+    locationId?: string | null;
+    payAmount?: number | null;
+    payMethod?: string | null;
+    payReference?: string | null;
+  }): Promise<ReceiveResult>;
+  /** Fill in or correct a delivery line's cost after the fact. */
+  amendGrnCost(grnItemId: string, unitCost: number): Promise<void>;
+  listGoodsReceived(branchId: string, limit?: number): Promise<GoodsReceivedRow[]>;
+  returnToSupplier(input: {
+    branchId: string;
+    lines: { productId: string; qty: number; serialIds?: string[] }[];
+    supplierId?: string | null;
+    reason?: string | null;
+  }): Promise<{ returnNo: string; total: number; supplierDue: number | null }>;
+  correctStock(input: {
+    branchId: string; productId: string; change: number; reason: StockReason;
+    note?: string | null; serials?: string[];
+  }): Promise<void>;
+  /** `dryRun` returns the differences without moving anything. */
+  applyStockCount(input: {
+    branchId: string;
+    counted: { productId: string; counted: number }[];
+    categoryId?: string | null;
+    note?: string | null;
+    dryRun: boolean;
+  }): Promise<{ corrected: number; alreadyRight: number; differences: CountDifference[] }>;
+  stockHistory(branchId: string, productId?: string | null, limit?: number): Promise<StockMovementRow[]>;
 }

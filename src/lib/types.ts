@@ -322,3 +322,82 @@ export interface SettingsBundle {
   staffPermissions: StaffPermission[];
   documentSequences: DocumentSequence[];
 }
+
+
+// --- P5: suppliers, goods in, corrections ----------------------------------
+
+export interface SupplierGroup { id: string; name: string }
+
+export interface Supplier {
+  id: string;
+  name: string;
+  phone: string | null;
+  address: string | null;
+  groupId: string | null;
+  groupName: string | null;
+  /** A one-off seller with no account, who can never be given credit. */
+  isCashOnly: boolean;
+  note: string | null;
+  active: boolean;
+  /** Opening balance plus credit purchases, less payments and returns. Computed, so it
+   *  cannot drift away from the documents behind it. */
+  balance: number;
+}
+
+export interface ReceiveLine {
+  productId: string;
+  qty: number;
+  unitCost: number | null;
+  lineDiscount?: number;
+  /** Serial text for a serial-tracked product. */
+  serials?: string[];
+}
+
+export interface ReceiveResult {
+  grnNo: string;
+  subtotal: number;
+  total: number;
+  costMissing: boolean;
+  supplierDue: number | null;
+  lines: { name: string; qty: number; unitCost: number | null; landedCost: number | null; averageCost: number | null }[];
+}
+
+export type StockReason = "damaged" | "lost" | "found_in_count" | "internal_use" | "expired" | "other";
+
+export interface StockMovementRow {
+  at: string;
+  product: string;
+  code: string;
+  change: number;
+  reason: string;
+  why: StockReason | null;
+  note: string | null;
+  who: string | null;
+  location: string | null;
+}
+
+export interface CountDifference {
+  productId: string;
+  name: string;
+  expected: number;
+  counted: number;
+  change: number;
+}
+
+export interface GoodsReceivedRow {
+  id: string;
+  grnNo: string;
+  supplierName: string | null;
+  supplierInvoiceNo: string | null;
+  isCredit: boolean;
+  total: number;
+  costMissing: boolean;
+  createdAt: string;
+  lines: {
+    id: string;
+    product: string;
+    qty: number;
+    unitCost: number | null;
+    landedCost: number | null;
+  }[];
+}

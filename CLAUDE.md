@@ -117,6 +117,19 @@ chains with many branches; CSL's single-branch store is only the first customer.
   here) does not change what the customer pays; exclusive is added on top. A discount
   reduces the taxable amount, so inclusive VAT is recalculated on the discounted line —
   doing it on the total overstates the tax on every discounted sale.
+- **Weighted average cost** (P5). A shop buys the same SSD at 6,000 one month and 6,400
+  the next. Overwriting the cost makes every unit already on the shelf retrospectively
+  cost 6,400 and the margin on the cheap ones vanishes; leaving it alone makes the new
+  ones look more profitable than they are. So the cost moves to the average of what is
+  there: `(on hand x current average + received qty x received cost) / (on hand +
+  received qty)`. On hand is the WHOLE SHOP, because a product's cost is a buying fact
+  rather than a shelf fact. `apply_avg_cost()` subtracts the received quantity back off,
+  because the caller has already put it on the shelf by then — forgetting that counts the
+  new stock at the old cost as well and drags the average the wrong way.
+- **Extra costs are spread by value, not evenly** (P5): a 72,000 laptop carries more of
+  the delivery charge than a 350 adapter. The result is the landed cost, and that is what
+  the average cost uses — otherwise the margin looks better than it is by exactly the
+  cost of getting the goods there.
 - **Imports upsert by code and never delete** (P4). A shop's export may be partial or
   last week's, so importing one must never remove anything, and re-running the same file
   must change nothing — that is what makes it safe to retry after a timeout. Opening
@@ -170,6 +183,8 @@ The list below is the original short version; BUILD_PROMPTS.md wins where they d
    fixing, the printable price view and price-list add/rename have no screens yet.
 3. ~~**Import from BMS**~~ — done (P4), but built against synthetic samples: the real
    export still needs checking against the auto-mapping in `src/lib/import/schema.ts`.
+   ~~**Stock in and corrections**~~ — mostly done (P5); supplier groups, line discounts,
+   packing-list import, invoice attachments and the GRN print view have no screens yet.
 4. **Owner dashboard** (phone-first), see product decisions above.
 5. **Shifts + cash check**: open with opening cash, close with counted cash; flag shortfalls.
    Tables exist (`shifts`); `complete_sale()` already links sales to the open shift.

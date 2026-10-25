@@ -174,6 +174,12 @@ export const SALE_ERROR_CODES = [
   "PRODUCT_CODE_REQUIRED", "PRICE_LIST_NOT_FOUND", "PRICE_LIST_NAME_REQUIRED",
   "LAST_PRICE_LIST", "NO_PRODUCTS_PICKED", "CATEGORY_NOT_FOUND", "SAME_CATEGORY",
   "SERIAL_CHANGE_HAS_STOCK", "NOTHING_TO_IMPORT",
+  "NOTHING_RECEIVED", "NOTHING_RETURNED", "NOTHING_TO_CORRECT", "NOT_A_STOCK_ITEM",
+  "SUPPLIER_NOT_FOUND", "CREDIT_NEEDS_SUPPLIER", "CASH_SUPPLIER_NO_CREDIT",
+  "PAYMENT_NEEDS_SUPPLIER", "PAYMENT_METHOD_REQUIRED", "BAD_COST", "GRN_LINE_NOT_FOUND",
+  "DUPLICATE_SERIAL_IN_LINE", "SERIAL_ALREADY_KNOWN", "SERIAL_WRONG_LENGTH",
+  "SERIAL_WRONG_SHAPE", "SERIAL_COUNT_MISMATCH", "BAD_STOCK_REASON",
+  "REASON_NOTE_REQUIRED", "WOULD_GO_NEGATIVE",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -278,6 +284,29 @@ export function friendlyError(raw: string): string {
     case "CATEGORY_NOT_FOUND": return "That category isn't in this shop.";
     case "SAME_CATEGORY": return "Pick two different categories to merge.";
     case "NOTHING_TO_IMPORT": return "There are no rows to import.";
+    case "NOTHING_RECEIVED": return "Add what came in first.";
+    case "NOTHING_RETURNED": return "Pick what is going back first.";
+    case "NOTHING_TO_CORRECT": return "A correction has to be up or down by something.";
+    case "NOT_A_STOCK_ITEM":
+      return `${detail ?? "That"} is a service, so there is no stock to receive or correct.`;
+    case "SUPPLIER_NOT_FOUND": return "That supplier isn't in this shop.";
+    case "CREDIT_NEEDS_SUPPLIER": return "A credit purchase has to be owed to a supplier. Pick one, or mark it paid in cash.";
+    case "CASH_SUPPLIER_NO_CREDIT": return "This supplier is cash only, so they can't be owed anything. Pay now, or give them an account first.";
+    case "PAYMENT_NEEDS_SUPPLIER": return "Pick who is being paid.";
+    case "PAYMENT_METHOD_REQUIRED": return "Say how they were paid.";
+    case "BAD_COST": return "A cost can't be less than nothing.";
+    case "GRN_LINE_NOT_FOUND": return "That delivery line no longer exists. Reload and try again.";
+    case "DUPLICATE_SERIAL_IN_LINE":
+      return `The same serial was scanned twice for ${detail ?? "this item"}. Check the list.`;
+    case "SERIAL_ALREADY_KNOWN": return `Serial ${detail ?? ""} is already in the shop.`;
+    case "SERIAL_WRONG_LENGTH": return `Serial ${detail ?? ""} is the wrong length for this product. Scan it again.`;
+    case "SERIAL_WRONG_SHAPE": return `Serial ${detail ?? ""} doesn't look like this product's serials. Scan it again.`;
+    case "SERIAL_COUNT_MISMATCH":
+      return `${detail ?? "This product"} is serial tracked, so pick exactly which units to correct.`;
+    case "BAD_STOCK_REASON": return "Pick a reason from the list.";
+    case "REASON_NOTE_REQUIRED": return 'Say what happened, since the reason is "Other".';
+    case "WOULD_GO_NEGATIVE":
+      return `That would leave less than nothing of ${detail ?? "this product"}. Check the figure.`;
     case "SERIAL_CHANGE_HAS_STOCK":
       return `${detail ?? "This product"} already has stock, so it can't switch between serial-tracked and not. Sell or write off the stock first.`;
     // Keep the raw text so a code we have not seen can still be reported and fixed,

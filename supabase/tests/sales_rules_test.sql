@@ -564,12 +564,14 @@ select pg_temp.check(
   'and the reason is in the audit log the owner reads');
 
 -- Document numbering: per branch, per type, forward only, logged.
-select pg_temp.check(public.next_document_number(:'BRANCH_A', 'grn') = 'GRN-MB-' || to_char(public.dhaka_today(), 'YYYY') || '000001', 'the first GRN at Branch A');
-select pg_temp.check(public.next_document_number(:'BRANCH_A', 'grn') = 'GRN-MB-' || to_char(public.dhaka_today(), 'YYYY') || '000002', 'and the next one follows');
-select pg_temp.check(public.next_document_number(:'BRANCH_B', 'grn') = 'GRN-SB-' || to_char(public.dhaka_today(), 'YYYY') || '000001', 'Branch B numbers its own GRNs from 1');
-select public.set_document_next_number(:'BRANCH_A', 'grn', 500);
-select pg_temp.check(public.next_document_number(:'BRANCH_A', 'grn') = 'GRN-MB-' || to_char(public.dhaka_today(), 'YYYY') || '000500', 'the owner can skip ahead to match a paper book');
-select pg_temp.expect_error(format($q$select public.set_document_next_number('%s', 'grn', 2)$q$, :'BRANCH_A'), 'NUMBER_GOES_BACKWARDS');
+-- Uses purchase orders, because goods-received numbers are consumed by the receive
+-- tests above and this check is about the numbering, not about GRNs.
+select pg_temp.check(public.next_document_number(:'BRANCH_A', 'po') = 'PO-MB-' || to_char(public.dhaka_today(), 'YYYY') || '000001', 'the first purchase order at Branch A');
+select pg_temp.check(public.next_document_number(:'BRANCH_A', 'po') = 'PO-MB-' || to_char(public.dhaka_today(), 'YYYY') || '000002', 'and the next one follows');
+select pg_temp.check(public.next_document_number(:'BRANCH_B', 'po') = 'PO-SB-' || to_char(public.dhaka_today(), 'YYYY') || '000001', 'Branch B numbers its own from 1');
+select public.set_document_next_number(:'BRANCH_A', 'po', 500);
+select pg_temp.check(public.next_document_number(:'BRANCH_A', 'po') = 'PO-MB-' || to_char(public.dhaka_today(), 'YYYY') || '000500', 'the owner can skip ahead to match a paper book');
+select pg_temp.expect_error(format($q$select public.set_document_next_number('%s', 'po', 2)$q$, :'BRANCH_A'), 'NUMBER_GOES_BACKWARDS');
 select pg_temp.check((select count(*) from public.audit_log where action = 'document_number_changed') = 1, 'changing a document number is logged');
 
 -- Settings writes need the permission, go through the one saver, and are logged.
@@ -1108,6 +1110,322 @@ select pg_temp.expect_error(format($q$select public.import_opening_stock('%s', '
 -- And a cashier cannot read what customers owe.
 select pg_temp.check((select count(*) from public.opening_balances) = 0, 'a cashier cannot see what anyone owes');
 select pg_temp.check((select count(*) from public.import_runs) = 0, 'nor the import history');
+
+
+-- ===========================================================================
+-- 16. STOCK IN AND CORRECTIONS (P5)
+-- ===========================================================================
+-- The done-when: receive 5 SSDs on credit by scanning serials, the supplier's due
+-- goes up, sell one, return one to the supplier, and the history shows all of it.
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+
+-- A name nothing else in this file uses, so the fixed id is definitely the one that
+-- lands (the P4 import tests already created "Smart Technologies BD").
+insert into public.suppliers (id, shop_id, name, phone) values
+  ('00000000-0000-4000-8000-0000000000d1', :'SHOP', 'P5 Parts Supplier', '01811999011');
+insert into public.suppliers (id, shop_id, name, is_cash_only) values
+  ('00000000-0000-4000-8000-0000000000d2', :'SHOP', 'P5 One-off seller', true);
+
+\set SUPPLIER '00000000-0000-4000-8000-0000000000d1'
+\set CASH_SUPPLIER '00000000-0000-4000-8000-0000000000d2'
+\set SSD '00000000-0000-4000-8000-0000000000a8'
+
+-- What the SSD cost, and what is on the shelf, before any of this.
+select pg_temp.check((select cost from public.product_costs where product_id = :'SSD') is null, 'the SSD has no cost recorded yet');
+
+-- ---- Receive 5 SSDs on credit, scanning their serials ----
+do $$
+declare r jsonb;
+begin
+  r := public.receive_goods(
+    '00000000-0000-4000-8000-0000000000b1',
+    jsonb_build_array(jsonb_build_object(
+      'product_id', '00000000-0000-4000-8000-0000000000a8',
+      'unit_cost', 6000,
+      'serials', jsonb_build_array('NEWSSD-0001','NEWSSD-0002','NEWSSD-0003','NEWSSD-0004','NEWSSD-0005'))),
+    '00000000-0000-4000-8000-0000000000d1', 'SI-9981', public.dhaka_today(), true);
+  if (r->>'total')::numeric <> 30000 then raise exception 'WRONG GRN TOTAL: %', r->>'total'; end if;
+  if (r->>'supplier_due')::numeric <> 30000 then raise exception 'SUPPLIER DUE DID NOT GO UP: %', r; end if;
+  if (r->>'grn_no') not like 'GRN-MB-%' then raise exception 'WRONG GRN NUMBER: %', r->>'grn_no'; end if;
+  raise notice 'ok: 5 SSDs received on credit, 30,000 owed to the supplier';
+end $$;
+
+select pg_temp.check((select count(*) from public.serials where serial like 'NEWSSD-%' and status = 'in_stock') = 5, 'the 5 scanned serials are in stock');
+select pg_temp.check(
+  (select qty from public.branch_stock where product_id = :'SSD' and location_id = :'LOC_A') = 7,
+  'and the shelf went from 2 to 7');
+select pg_temp.check(public.supplier_balance(:'SUPPLIER') = 30000, 'the supplier is owed 30,000');
+select pg_temp.check((select count(*) from public.serials where serial = 'NEWSSD-0001' and grn_id is not null) = 1, 'each serial remembers which delivery it came in on');
+
+-- ---- Weighted average cost ----
+-- 2 on the shelf at no recorded cost, then 5 at 6,000, so the average is 6,000.
+select pg_temp.check((select cost from public.product_costs where product_id = :'SSD') = 6000, 'the first receipt simply sets the cost');
+
+-- Now 5 more at 6,400. 8 were on hand across the shop (2 at Branch A after the earlier
+-- sale, 1 at Branch B, plus the 5 just received), so:
+--   (8 x 6,000 + 5 x 6,400) / 13 = 6,153.85
+do $$
+declare r jsonb; c numeric;
+begin
+  r := public.receive_goods(
+    '00000000-0000-4000-8000-0000000000b1',
+    jsonb_build_array(jsonb_build_object(
+      'product_id', '00000000-0000-4000-8000-0000000000a8',
+      'unit_cost', 6400,
+      'serials', jsonb_build_array('NEWSSD-0006','NEWSSD-0007','NEWSSD-0008','NEWSSD-0009','NEWSSD-0010'))),
+    '00000000-0000-4000-8000-0000000000d1', 'SI-9982', public.dhaka_today(), false);
+  select cost into c from public.product_costs where product_id = '00000000-0000-4000-8000-0000000000a8';
+  if c <> 6153.85 then raise exception 'WRONG AVERAGE COST: % (expected 6153.85)', c; end if;
+  raise notice 'ok: 8 on hand at 6,000 plus 5 at 6,400 averages to 6,153.85';
+end $$;
+
+-- A cash purchase does not add to the due.
+select pg_temp.check(public.supplier_balance(:'SUPPLIER') = 30000, 'a cash purchase did not add to what is owed');
+
+-- Extra costs are spread BY VALUE, not evenly: a laptop carries more of the delivery
+-- charge than an adapter.
+do $$
+declare r jsonb; laptop numeric; adapter numeric;
+begin
+  r := public.receive_goods(
+    '00000000-0000-4000-8000-0000000000b1',
+    jsonb_build_array(
+      jsonb_build_object('product_id', '00000000-0000-4000-8000-0000000000a3', 'qty', 10, 'unit_cost', 200),
+      jsonb_build_object('product_id', '00000000-0000-4000-8000-0000000000a6', 'qty', 2, 'unit_cost', 900)),
+    '00000000-0000-4000-8000-0000000000d1', 'SI-9983', public.dhaka_today(), false,
+    0, 380);  -- 380 of transport across 2,000 + 1,800
+  -- The adapters are 2,000 of 3,800, so they take 200 of the 380: 2,200 / 10 = 220.
+  select landed_cost into adapter from public.grn_items gi
+    where gi.grn_id = (r->>'id')::uuid and gi.product_id = '00000000-0000-4000-8000-0000000000a3';
+  -- The cooling pads are 1,800 of 3,800, so 180: 1,980 / 2 = 990.
+  select landed_cost into laptop from public.grn_items gi
+    where gi.grn_id = (r->>'id')::uuid and gi.product_id = '00000000-0000-4000-8000-0000000000a6';
+  if adapter <> 220 then raise exception 'WRONG ADAPTER LANDED COST: %', adapter; end if;
+  if laptop <> 990 then raise exception 'WRONG COOLING PAD LANDED COST: %', laptop; end if;
+  raise notice 'ok: 380 of transport splits by value into 20 and 90 a unit, not evenly';
+end $$;
+
+-- ---- Receive now, price later ----
+-- Earlier tests have moved the mouse stock around, so this checks the CHANGE rather
+-- than an absolute figure.
+do $$
+declare r jsonb; before_qty int; after_qty int;
+begin
+  select qty into before_qty from public.branch_stock
+    where product_id = '00000000-0000-4000-8000-0000000000a4'
+      and location_id = '00000000-0000-4000-8000-0000000000e1';
+  r := public.receive_goods(
+    '00000000-0000-4000-8000-0000000000b1',
+    jsonb_build_array(jsonb_build_object('product_id', '00000000-0000-4000-8000-0000000000a4', 'qty', 6)),
+    '00000000-0000-4000-8000-0000000000d1', null, null, false);
+  if not (r->>'cost_missing')::boolean then raise exception 'COST NOT FLAGGED AS MISSING: %', r; end if;
+  select qty into after_qty from public.branch_stock
+    where product_id = '00000000-0000-4000-8000-0000000000a4'
+      and location_id = '00000000-0000-4000-8000-0000000000e1';
+  if after_qty <> before_qty + 6 then
+    raise exception 'GOODS NOT ON THE SHELF: % -> %', before_qty, after_qty;
+  end if;
+  raise notice 'ok: goods received with no invoice are flagged "cost missing" and still on the shelf';
+end $$;
+
+-- Filling the cost in later clears the flag and moves the average.
+do $$
+declare r jsonb; item uuid;
+begin
+  select gi.id into item from public.grn_items gi
+    join public.grns g on g.id = gi.grn_id
+    where g.cost_missing and gi.unit_cost is null limit 1;
+  r := public.amend_grn_cost(item, 300);
+  if (r->>'cost_missing')::boolean then raise exception 'FLAG NOT CLEARED: %', r; end if;
+  if (r->>'to')::numeric <> 300 then raise exception 'COST NOT SET: %', r; end if;
+  raise notice 'ok: filling the cost in later clears the flag and recalculates the average';
+end $$;
+select pg_temp.check((select count(*) from public.audit_log where action = 'grn_cost_amended') = 1, 'and the amendment is logged');
+select pg_temp.expect_error($q$select public.amend_grn_cost(gen_random_uuid(), 100)$q$, 'GRN_LINE_NOT_FOUND');
+
+-- ---- A duplicate or malformed serial is refused BEFORE anything is saved ----
+select pg_temp.expect_error(format($q$select public.receive_goods('%s',
+  jsonb_build_array(jsonb_build_object('product_id', '%s', 'unit_cost', 6000,
+    'serials', jsonb_build_array('DUP-1','DUP-1'))))$q$, :'BRANCH_A', :'SSD'), 'DUPLICATE_SERIAL_IN_LINE');
+select pg_temp.expect_error(format($q$select public.receive_goods('%s',
+  jsonb_build_array(jsonb_build_object('product_id', '%s', 'unit_cost', 6000,
+    'serials', jsonb_build_array('NEWSSD-0001'))))$q$, :'BRANCH_A', :'SSD'), 'SERIAL_ALREADY_KNOWN');
+
+-- Digit check: a product can say how long its serials are.
+select public.save_setting_row('units', null, '{"name":"check"}');
+update public.products set serial_length = 13 where id = :'SSD';
+select pg_temp.expect_error(format($q$select public.receive_goods('%s',
+  jsonb_build_array(jsonb_build_object('product_id', '%s', 'unit_cost', 6000,
+    'serials', jsonb_build_array('TOOSHORT'))))$q$, :'BRANCH_A', :'SSD'), 'SERIAL_WRONG_LENGTH');
+update public.products set serial_length = null where id = :'SSD';
+
+-- Credit needs a supplier, and a cash-only supplier cannot be given credit.
+select pg_temp.expect_error(format($q$select public.receive_goods('%s',
+  jsonb_build_array(jsonb_build_object('product_id', '%s', 'qty', 1, 'unit_cost', 1)),
+  null, null, null, true)$q$, :'BRANCH_A', '00000000-0000-4000-8000-0000000000a4'), 'CREDIT_NEEDS_SUPPLIER');
+select pg_temp.expect_error(format($q$select public.receive_goods('%s',
+  jsonb_build_array(jsonb_build_object('product_id', '%s', 'qty', 1, 'unit_cost', 1)),
+  '%s', null, null, true)$q$, :'BRANCH_A', '00000000-0000-4000-8000-0000000000a4', :'CASH_SUPPLIER'), 'CASH_SUPPLIER_NO_CREDIT');
+
+-- A service has no stock, so it cannot be received.
+select pg_temp.expect_error(format($q$select public.receive_goods('%s',
+  jsonb_build_array(jsonb_build_object('product_id', '%s', 'qty', 1, 'unit_cost', 1)))$q$,
+  :'BRANCH_A', :'SERVICE'), 'NOT_A_STOCK_ITEM');
+
+-- ---- Paying the supplier from the receive screen ----
+do $$
+declare r jsonb;
+begin
+  r := public.receive_goods(
+    '00000000-0000-4000-8000-0000000000b1',
+    jsonb_build_array(jsonb_build_object('product_id', '00000000-0000-4000-8000-0000000000a2', 'qty', 10, 'unit_cost', 300)),
+    '00000000-0000-4000-8000-0000000000d1', 'SI-9984', public.dhaka_today(), true,
+    0, 0, 0, 0, null, null, null,
+    2000, 'bkash', 'TRX99887');
+  -- 30,000 already owed, plus 3,000 now, less the 2,000 just paid.
+  if (r->>'supplier_due')::numeric <> 31000 then raise exception 'WRONG DUE AFTER PART PAYMENT: %', r; end if;
+  raise notice 'ok: a part payment taken on the receive screen leaves 31,000 owed';
+end $$;
+select pg_temp.check((select count(*) from public.supplier_payments where reference = 'TRX99887') = 1, 'the payment is recorded against the delivery');
+
+-- ---- Sell one of the SSDs ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+do $$
+declare r jsonb; sid uuid;
+begin
+  select id into sid from public.serials where serial = 'NEWSSD-0001';
+  r := public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+        jsonb_build_array(jsonb_build_object('product_id', '00000000-0000-4000-8000-0000000000a8',
+                                             'serial_ids', jsonb_build_array(sid))),
+        'cash', 0, null, null, 7000);
+  if (r->'items'->0->>'serials') not like '%NEWSSD-0001%' then raise exception 'WRONG SERIAL SOLD: %', r->'items'; end if;
+  raise notice 'ok: one of the received SSDs is sold, by its serial';
+end $$;
+select pg_temp.check((select status from public.serials where serial = 'NEWSSD-0001') = 'sold', 'that serial is now sold');
+
+-- ---- Return one to the supplier ----
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+do $$
+declare r jsonb; sid uuid; before numeric;
+begin
+  before := public.supplier_balance('00000000-0000-4000-8000-0000000000d1');
+  select id into sid from public.serials where serial = 'NEWSSD-0002';
+  r := public.return_to_supplier('00000000-0000-4000-8000-0000000000b1',
+        jsonb_build_array(jsonb_build_object('product_id', '00000000-0000-4000-8000-0000000000a8',
+                                             'serials', jsonb_build_array(sid))),
+        '00000000-0000-4000-8000-0000000000d1', 'Dead on arrival');
+  -- Returned at the average cost, which is what reduces the due.
+  if (r->>'supplier_due')::numeric >= before then raise exception 'DUE DID NOT GO DOWN: % -> %', before, r->>'supplier_due'; end if;
+  if (r->>'return_no') not like 'RET-MB-%' then raise exception 'WRONG RETURN NUMBER: %', r->>'return_no'; end if;
+  raise notice 'ok: one SSD returned to the supplier, and the due went down';
+end $$;
+select pg_temp.check((select status from public.serials where serial = 'NEWSSD-0002') = 'returned', 'the returned serial is marked returned');
+select pg_temp.check(
+  (select qty from public.branch_stock where product_id = :'SSD' and location_id = :'LOC_A') = 10,
+  'and it came off the shelf: 12 received less 1 sold less 1 returned');
+
+-- A serial that was already sold cannot be returned to the supplier.
+select pg_temp.expect_error(format($q$select public.return_to_supplier('%s',
+  jsonb_build_array(jsonb_build_object('product_id', '%s',
+    'serials', jsonb_build_array((select id from public.serials where serial = 'NEWSSD-0001')))),
+  '%s')$q$, :'BRANCH_A', :'SSD', :'SUPPLIER'), 'SERIAL_NOT_AVAILABLE');
+
+-- ---- The history shows all of it ----
+do $$
+declare h jsonb; reasons text;
+begin
+  h := public.stock_history('00000000-0000-4000-8000-0000000000b1', '00000000-0000-4000-8000-0000000000a8', 50);
+  select string_agg(distinct x->>'reason', ',') into reasons from jsonb_array_elements(h) x;
+  if reasons not like '%purchase%' then raise exception 'NO PURCHASE IN HISTORY: %', reasons; end if;
+  if reasons not like '%sale%' then raise exception 'NO SALE IN HISTORY: %', reasons; end if;
+  if reasons not like '%return_to_supplier%' then raise exception 'NO RETURN IN HISTORY: %', reasons; end if;
+  raise notice 'ok: the history shows the purchase, the sale and the return';
+end $$;
+select pg_temp.check(
+  (select count(*) from jsonb_array_elements(public.stock_history(:'BRANCH_A', :'SSD', 50)) x
+   where x->>'who' is not null) > 0,
+  'and who did each of them');
+
+-- ---- Stock corrections ----
+do $$
+declare r jsonb;
+begin
+  r := public.correct_stock('00000000-0000-4000-8000-0000000000b1',
+        '00000000-0000-4000-8000-0000000000a2', -2, 'damaged', 'Crushed in the box');
+  if (r->>'to')::integer <> (r->>'from')::integer - 2 then raise exception 'WRONG CORRECTION: %', r; end if;
+  raise notice 'ok: 2 damaged cables taken off the shelf, with a reason';
+end $$;
+select pg_temp.check(
+  (select count(*) from public.stock_movements where reason_detail = 'damaged') = 1,
+  'and the reason is on the movement, so damage can be told from theft');
+select pg_temp.expect_error(format($q$select public.correct_stock('%s', '%s', -1, 'because')$q$, :'BRANCH_A', '00000000-0000-4000-8000-0000000000a2'), 'BAD_STOCK_REASON');
+select pg_temp.expect_error(format($q$select public.correct_stock('%s', '%s', -1, 'other')$q$, :'BRANCH_A', '00000000-0000-4000-8000-0000000000a2'), 'REASON_NOTE_REQUIRED');
+select pg_temp.expect_error(format($q$select public.correct_stock('%s', '%s', -99999, 'lost')$q$, :'BRANCH_A', '00000000-0000-4000-8000-0000000000a2'), 'WOULD_GO_NEGATIVE');
+select pg_temp.expect_error(format($q$select public.correct_stock('%s', '%s', 0, 'lost')$q$, :'BRANCH_A', '00000000-0000-4000-8000-0000000000a2'), 'NOTHING_TO_CORRECT');
+
+-- A serial item is corrected by naming its serials, not by typing a number.
+select pg_temp.expect_error(format($q$select public.correct_stock('%s', '%s', -1, 'damaged')$q$, :'BRANCH_A', :'SSD'), 'SERIAL_COUNT_MISMATCH');
+do $$
+declare r jsonb; sid uuid;
+begin
+  select id into sid from public.serials where serial = 'NEWSSD-0003';
+  r := public.correct_stock('00000000-0000-4000-8000-0000000000b1', '00000000-0000-4000-8000-0000000000a8',
+        -1, 'damaged', 'Bent connector', jsonb_build_array(sid));
+  raise notice 'ok: a damaged SSD is written off by its serial';
+end $$;
+select pg_temp.check((select status from public.serials where serial = 'NEWSSD-0003') = 'rma', 'the written-off serial is out of stock');
+
+-- ---- Stock count ----
+do $$
+declare r jsonb;
+begin
+  -- A dry run first, so the differences can be looked at before anything moves.
+  -- The keyboard is counted at exactly what the system says, so it should come back as
+  -- "already right" rather than as a correction.
+  r := public.apply_stock_count('00000000-0000-4000-8000-0000000000b1',
+        jsonb_build_array(
+          jsonb_build_object('product_id', '00000000-0000-4000-8000-0000000000a4', 'counted', 1),
+          jsonb_build_object('product_id', '00000000-0000-4000-8000-0000000000a5', 'counted',
+            (select qty from public.branch_stock where product_id = '00000000-0000-4000-8000-0000000000a5'
+               and location_id = '00000000-0000-4000-8000-0000000000e1'))),
+        null, 'Monthly count', null, true);
+  if (r->>'corrected')::int <> 1 then raise exception 'WRONG DRY RUN COUNT: %', r; end if;
+  if (r->>'already_right')::int <> 1 then raise exception 'MATCHING LINE NOT REPORTED: %', r; end if;
+  raise notice 'ok: a count dry run finds one difference and one that already matches';
+end $$;
+select pg_temp.check(
+  (select qty from public.branch_stock where product_id = '00000000-0000-4000-8000-0000000000a4' and location_id = :'LOC_A') > 1,
+  'and the dry run changed nothing');
+
+do $$
+declare r jsonb;
+begin
+  r := public.apply_stock_count('00000000-0000-4000-8000-0000000000b1',
+        jsonb_build_array(jsonb_build_object('product_id', '00000000-0000-4000-8000-0000000000a4', 'counted', 1)),
+        null, 'Monthly count', null, false);
+  if (r->>'corrected')::int <> 1 then raise exception 'COUNT NOT APPLIED: %', r; end if;
+  raise notice 'ok: applying the count fixes the shelf figure';
+end $$;
+select pg_temp.check(
+  (select qty from public.branch_stock where product_id = '00000000-0000-4000-8000-0000000000a4' and location_id = :'LOC_A') = 1,
+  'the shelf now says what was counted');
+select pg_temp.check(
+  (select count(*) from public.stock_movements where reason = 'count' and reason_detail = 'lost') = 1,
+  'and the 2 that were missing are recorded as missing, not silently removed');
+
+-- ---- Who may do any of this ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.expect_error(format($q$select public.receive_goods('%s', jsonb_build_array(jsonb_build_object('product_id','%s','qty',1,'unit_cost',1)))$q$, :'BRANCH_A', '00000000-0000-4000-8000-0000000000a4'), 'NOT_ALLOWED:receive_stock');
+select pg_temp.expect_error(format($q$select public.correct_stock('%s', '%s', -1, 'damaged')$q$, :'BRANCH_A', '00000000-0000-4000-8000-0000000000a2'), 'NOT_ALLOWED:adjust_stock');
+select pg_temp.expect_error(format($q$select public.return_to_supplier('%s', jsonb_build_array(jsonb_build_object('product_id','%s','qty',1)))$q$, :'BRANCH_A', '00000000-0000-4000-8000-0000000000a2'), 'NOT_ALLOWED:adjust_stock');
+select pg_temp.expect_error(format($q$select public.stock_history('%s')$q$, :'BRANCH_A'), 'NOT_ALLOWED:view_reports');
+
+-- And a cashier cannot read what the shop pays for anything.
+select pg_temp.check((select count(*) from public.grns) = 0, 'a cashier sees no deliveries');
+select pg_temp.check((select count(*) from public.grn_items) = 0, 'nor what anything cost');
+select pg_temp.check((select count(*) from public.supplier_payments) = 0, 'nor what has been paid out');
+select pg_temp.check((select count(*) from public.supplier_returns) = 0, 'nor what was sent back');
 
 reset role;
 \echo ALL DATABASE CHECKS PASSED

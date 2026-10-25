@@ -1,13 +1,7 @@
-import { SectionPlaceholder } from "@/components/section-placeholder";
+import { SuppliersScreen } from "@/components/suppliers/suppliers-screen";
 import { guardSection } from "@/lib/guard";
 
 export default async function Page() {
   await guardSection("/suppliers");
-  return (
-    <SectionPlaceholder
-      title="Suppliers"
-      what="Suppliers, their contact details, and what you owe them."
-      comingIn="P6"
-    />
-  );
+  return <SuppliersScreen />;
 }
