@@ -24,7 +24,7 @@ describe("who sees which section", () => {
   });
 
   it("an owner sees everything", () => {
-    expect(navFor("owner")).toHaveLength(13);
+    expect(navFor("owner")).toHaveLength(14);
   });
 
   it("the owner can share owner-only sections with managers, one at a time", () => {
@@ -114,6 +114,6 @@ describe("feature switches hide sections", () => {
   });
 
   it("with no feature map at all, nothing is hidden (so the menu never goes blank)", () => {
-    expect(navFor("owner")).toHaveLength(13);
+    expect(navFor("owner")).toHaveLength(14);
   });
 });

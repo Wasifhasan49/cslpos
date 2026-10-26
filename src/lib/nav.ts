@@ -21,7 +21,8 @@ export interface NavItem {
 
 export type IconName =
   | "counter" | "sales" | "warranty" | "stock" | "purchases" | "transfers"
-  | "products" | "customers" | "suppliers" | "cash" | "dashboard" | "accounts" | "settings";
+  | "products" | "customers" | "suppliers" | "cash" | "dashboard" | "accounts"
+  | "reports" | "settings";
 
 const EVERYONE: readonly Role[] = ["owner", "manager", "cashier"];
 const MANAGERS: readonly Role[] = ["owner", "manager"];
@@ -43,6 +44,10 @@ export const NAV: readonly NavItem[] = [
   // what it SHOULD have held is deliberately not theirs to see.
   { href: "/cash",      label: "Cash drawer", short: "Cash",   icon: "cash",      roles: MANAGERS },
   // Owners, and managers only if the owner turns the flag on.
+  // Reports are for whoever keeps the books, which in a small shop is the owner and in
+  // a bigger one a manager. No feature switch: a shop that cannot see what it sold
+  // yesterday has no reason to use any of this.
+  { href: "/reports",   label: "Reports",   short: "Reports", icon: "reports",   roles: MANAGERS },
   { href: "/dashboard", label: "Dashboard", short: "Today",    icon: "dashboard", roles: OWNERS },
   { href: "/accounts",  label: "Accounts",  short: "Books",    icon: "accounts",  roles: OWNERS, feature: "accounts" },
   { href: "/settings",  label: "Settings",  short: "Setup",    icon: "settings",  roles: OWNERS },

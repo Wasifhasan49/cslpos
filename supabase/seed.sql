@@ -89,9 +89,36 @@ insert into public.serials (shop_id, product_id, serial, location_id) values
   ('00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000a8', 'S64DNX0T49999', '00000000-0000-4000-8000-0000000000e2')
 on conflict (shop_id, serial) do nothing;
 
+-- What each one cost. Nearly every product, because stock on a shelf with no cost
+-- recorded is stock of unknown value: the books and the stock valuation can never agree
+-- about it, and the owner's profit figure quietly treats it as free. The SSD is left
+-- out on purpose — it is the one the rule checks start from, to prove the weighted
+-- average behaves when a product is bought for the first time.
 insert into public.product_costs (product_id, shop_id, cost) values
-  ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-000000000001', 250)
+  ('00000000-0000-4000-8000-0000000000a1', '00000000-0000-4000-8000-000000000001', 250),
+  ('00000000-0000-4000-8000-0000000000a2', '00000000-0000-4000-8000-000000000001', 300),
+  ('00000000-0000-4000-8000-0000000000a3', '00000000-0000-4000-8000-000000000001', 220),
+  ('00000000-0000-4000-8000-0000000000a4', '00000000-0000-4000-8000-000000000001', 320),
+  ('00000000-0000-4000-8000-0000000000a5', '00000000-0000-4000-8000-000000000001', 640),
+  ('00000000-0000-4000-8000-0000000000a6', '00000000-0000-4000-8000-000000000001', 950),
+  ('00000000-0000-4000-8000-0000000000a7', '00000000-0000-4000-8000-000000000001', 2450),
+  ('00000000-0000-4000-8000-0000000000a9', '00000000-0000-4000-8000-000000000001', 2800),
+  ('00000000-0000-4000-8000-0000000000aa', '00000000-0000-4000-8000-000000000001', 66000),
+  ('00000000-0000-4000-8000-0000000000ab', '00000000-0000-4000-8000-000000000001', 820)
 on conflict (product_id) do nothing;
+
+-- And the movement that put it there. Stock that appears on a shelf with no movement
+-- behind it is stock no report can explain: every stock report in P14 is built from the
+-- movements, so the two have to agree from the very first row.
+insert into public.stock_movements (shop_id, branch_id, location_id, product_id,
+                                    qty_change, reason, note)
+select bs.shop_id, bs.branch_id, bs.location_id, bs.product_id, bs.qty,
+       'adjust_in', 'Opening stock'
+from public.branch_stock bs
+where bs.qty > 0
+  and not exists (select 1 from public.stock_movements m
+                  where m.product_id = bs.product_id and m.location_id = bs.location_id);
+
 
 -- Units, VAT rates, payment methods, warranty terms, discount reasons, role
 -- permissions and document sequences. Same function shop:init calls, so the demo shop

@@ -18,6 +18,8 @@ import type {
   AccountLedger, BackfillResult, ChartAccount, ChequeBookRow, ChequeDirection,
   ChequePrint, ChequeRow, ChequeStatus, MoneyBalance, TrialBalance, VoucherKind,
   VoucherRow,
+  JournalExport, LayerRebuildResult, PeriodLock, ReportFilters, ReportListItem,
+  ReportResult,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 
@@ -500,4 +502,24 @@ export interface Backend {
   /** Write the entries for everything that happened before the switch went on.
    *  Safe to run twice, which matters because the first run may time out. */
   backfillAccounts(from?: string | null): Promise<BackfillResult>;
+
+  // --- Reports, the period lock and export (P14) ---
+  /** Every report in every register, with the shop's own names and order. */
+  listReports(): Promise<ReportListItem[]>;
+  /** Run one. The answer has the same shape whichever report it was, so one screen
+   *  draws all of them. */
+  runReport(key: string, filters?: ReportFilters): Promise<ReportResult>;
+  /** Rename a report or one of its columns, or move it up the list. Owner only.
+   *  `{ reset: true }` puts it back to its own name. */
+  saveReportSetting(key: string, values: Record<string, unknown>): Promise<void>;
+  /** Close a month, or open it again (which needs a reason and is logged). */
+  lockPeriod(month: string, locked: boolean, note?: string | null): Promise<void>;
+  listPeriodLocks(): Promise<PeriodLock[]>;
+  /** The journal itself, for the accountant's spreadsheet or Tally. */
+  journalExport(
+    from?: string | null, to?: string | null, branchId?: string | null,
+  ): Promise<JournalExport>;
+  /** Work out which delivery every unit on the shelf came in on, from the movements.
+   *  Owner only, and safe to press twice because it rebuilds rather than patches. */
+  rebuildStockLayers(): Promise<LayerRebuildResult>;
 }

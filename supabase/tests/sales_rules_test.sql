@@ -3975,5 +3975,270 @@ select pg_temp.check(
 select pg_temp.expect_error(
   $q$select public.backfill_accounts()$q$, 'NOT_OWNER');
 
+
+-- ===========================================================================
+-- 26. REPORTS, THE PERIOD LOCK AND THE STOCK LAYERS (P14)
+-- ===========================================================================
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+
+-- ---- The FIFO layers ----
+-- Every unit on a shelf came in on some delivery, and the layers are how a report can
+-- say which. They are worked out from the movements, so they can always be rebuilt.
+select pg_temp.check(
+  (select count(*) from public.stock_layers) > 0,
+  'the deliveries in this test file opened stock layers');
+select pg_temp.check(
+  not exists (select 1 from public.stock_layers where remaining > qty),
+  'no layer has more left than ever arrived');
+select pg_temp.check(
+  not exists (
+    select 1 from (
+      select l.branch_id, l.product_id, sum(l.remaining) as layers,
+             (select coalesce(sum(m.qty_change), 0) from public.stock_movements m
+              where m.branch_id = l.branch_id and m.product_id = l.product_id) as moved
+      from public.stock_layers l
+      group by l.branch_id, l.product_id) q
+    where q.layers <> greatest(q.moved, 0)),
+  'what the layers say is left matches what the movements say is on the shelf');
+
+-- A sold unit knows which delivery it came out of: that is what "which purchase
+-- invoice was this sold from" needs, and BMS prints it on its product sales report.
+select pg_temp.check(
+  (select count(*) from public.sale_line_layers) > 0,
+  'sold lines are matched to the deliveries they came out of');
+
+-- Rebuilding is idempotent, because the layers are derived from the movements and
+-- nothing else. A shop with two years of history will press this twice.
+create temporary table p14n (k text primary key, v numeric);
+insert into p14n values ('layers_before', (select count(*) from public.stock_layers));
+select public.backfill_stock_layers();
+insert into p14n values ('layers_after', (select count(*) from public.stock_layers));
+select public.backfill_stock_layers();
+select pg_temp.check(
+  (select count(*) from public.stock_layers) = (select v from p14n where k = 'layers_after'),
+  'rebuilding the layers twice gives the same answer as rebuilding them once');
+select pg_temp.check(
+  not exists (select 1 from public.stock_layers where remaining > qty),
+  'and still no layer has more left than ever arrived');
+
+-- ---- Every report runs ----
+-- The engine builds its query from the catalogue, so a report that names a field its
+-- dataset has not got fails loudly. This runs all of them rather than trusting that.
+do $$
+declare r record; v jsonb; v_n integer := 0;
+  v_filters jsonb := jsonb_build_object(
+    'from', '2000-01-01', 'to', public.dhaka_today()::text,
+    'as_on', public.dhaka_today()::text,
+    'product_id', (select id from public.products where code = 'LOG-K120'));
+  v_account uuid := (select id from public.accounts where role = 'inventory' limit 1);
+begin
+  for r in select key, special from public.report_defs where needs is null order by key loop
+    begin
+      -- A ledger has to be told whose ledger. Everything else works out its own rows.
+      v := public.report_run(r.key, case when r.special = 'ledger'
+             then v_filters || jsonb_build_object('account_id', v_account)
+             else v_filters end);
+    exception when others then
+      raise exception 'REPORT % FAILED: %', r.key, sqlerrm;
+    end;
+    if v->>'title' is null then raise exception 'REPORT % RETURNED NOTHING', r.key; end if;
+    v_n := v_n + 1;
+  end loop;
+  raise notice 'ok: all % reports ran', v_n;
+end $$;
+
+-- A report that is not built yet says so by name, rather than coming back empty.
+select pg_temp.expect_error($q$select public.report_run('S-22')$q$, 'NOT_YET:P14a');
+select pg_temp.expect_error($q$select public.report_run('R-11')$q$, 'NO_SUCH_REPORT');
+
+-- ---- The figures agree with each other ----
+-- BMS's sales register and its own sales figures differ; ours come from one place.
+select pg_temp.check(
+  (select (public.report_run('S-1', jsonb_build_object('from', '2000-01-01',
+            'to', public.dhaka_today()::text))->'totals'->>'amount')::numeric)
+  = (select round(sum(s.total), 2) from public.sales s
+     where s.status = 'completed' and s.approval_status = 'approved'),
+  'the sales register total equals the sales themselves');
+
+-- Stock as on today is current stock. In BMS these are two reports that disagree by
+-- four units, and its trial balance and balance sheet each quote a different one.
+select pg_temp.check(
+  not exists (
+    select 1 from public.rep_stock_as_on(public.dhaka_today()) s
+    full join (select product_id, location_id, qty from public.branch_stock where qty <> 0) b
+      on b.product_id = s.product_id and b.location_id = s.location_id
+    where coalesce(s.qty, 0) <> coalesce(b.qty, 0)),
+  'stock as on today is exactly what is on the shelves');
+
+-- What moved plus what was there equals what is left (BMS's ST-12 arithmetic).
+select pg_temp.check(
+  not exists (
+    select 1 from jsonb_array_elements(
+      public.report_run('ST-12', jsonb_build_object('from', '2000-01-01',
+        'to', public.dhaka_today()::text))->'rows') r
+    where (r->>'_kind') = 'detail'
+      and (r->>'opening')::numeric + (r->>'purchased')::numeric - (r->>'to_supplier')::numeric
+          - (r->>'sold')::numeric + (r->>'taken_back')::numeric + (r->>'found')::numeric
+          - (r->>'written_off')::numeric - (r->>'sent')::numeric + (r->>'received')::numeric
+          + (r->>'others_in')::numeric - (r->>'others_out')::numeric
+          <> (r->>'closing')::numeric),
+  'on every line of the stock movement report, the arithmetic adds up');
+
+-- And the closing figure is the same stock the stock report shows. BMS's two stock
+-- reports differ by four units; these two cannot, because they are the same movements
+-- added up two ways.
+select pg_temp.check(
+  not exists (
+    select 1 from jsonb_array_elements(
+      public.report_run('ST-12', jsonb_build_object('from', '2000-01-01',
+        'to', public.dhaka_today()::text))->'rows') r
+    where (r->>'_kind') = 'detail'
+      and (r->>'closing')::numeric <> coalesce((
+        select sum(s.qty) from public.rep_stock_as_on(public.dhaka_today()) s
+        where s.product_id = (r->>'product_id')::uuid), 0)),
+  'and its closing figure is exactly what the stock report says is on the shelf');
+
+-- ---- DONE-WHEN 1: the trial balance balances ----
+select pg_temp.check(
+  (public.report_run('A-8')->>'balanced')::boolean,
+  'DONE-WHEN: the trial balance balances');
+select pg_temp.check(
+  (public.report_run('A-8')->'totals'->>'debit')::numeric
+  = (public.report_run('A-8')->'totals'->>'credit')::numeric
+  and (public.report_run('A-8')->'totals'->>'debit')::numeric > 0,
+  'and its two columns are the same figure, which is not nil');
+
+-- ---- DONE-WHEN 2: the balance sheet's stock equals the stock valuation ----
+-- This shop was trading before it switched the books on (sections 1 to 24), so the
+-- opening stock, the corrections and the vans have to be caught up first — the same
+-- press of the same button an owner does once.
+select public.backfill_stock_entries();
+select pg_temp.check(
+  (public.backfill_stock_entries()->>'movements')::integer = 0,
+  'the stock back-fill posts nothing the second time it is pressed');
+select pg_temp.check(
+  (public.report_run('R-4')->>'balanced')::boolean,
+  'DONE-WHEN: the stock account equals the stock counted off the shelves');
+select pg_temp.check(
+  (select sum((r->>'amount')::numeric)
+   from jsonb_array_elements(
+     (public.report_run('A-16')->'sections'->1)->'rows') r
+   where r->>'particulars' like 'Stock on hand%')
+  = (public.report_run('R-4')->>'stock_value')::numeric,
+  'DONE-WHEN: and the balance sheet shows that same figure as stock');
+select pg_temp.check(
+  (public.report_run('A-16')->>'balanced')::boolean,
+  'and the balance sheet itself balances');
+
+-- ---- DONE-WHEN 3: locking a month stops a sale in it being voided ----
+-- The sale used here is today's, so "this month" is the month to close.
+do $$
+declare v_sale uuid; v_month date := date_trunc('month', public.dhaka_today())::date;
+begin
+  select id into v_sale from public.sales
+  where status = 'completed' and branch_id = '00000000-0000-4000-8000-0000000000b1'
+  order by created_at desc limit 1;
+  perform public.lock_period(v_month, true, 'Signed off with the accountant');
+  begin
+    perform public.void_sale(v_sale, 'Testing the lock', null);
+    raise exception 'THE LOCK DID NOT STOP THE VOID';
+  exception when others then
+    if position('PERIOD_LOCKED' in sqlerrm) = 0 then raise; end if;
+  end;
+  raise notice 'ok: DONE-WHEN: a closed month cannot be voided out of';
+  -- And nothing new can be dated into it either.
+  begin
+    perform public.cash_movement('00000000-0000-4000-8000-0000000000b1', 'out', 100,
+                                 'other', null, 'Anything at all');
+    raise exception 'THE LOCK DID NOT STOP A NEW ENTRY';
+  exception when others then
+    if position('PERIOD_LOCKED' in sqlerrm) = 0 then raise; end if;
+  end;
+  raise notice 'ok: and nothing new can be dated into a closed month';
+  -- Opening it again needs a reason, and is logged.
+  begin
+    perform public.lock_period(v_month, false, null);
+    raise exception 'A MONTH WAS OPENED WITH NO REASON GIVEN';
+  exception when others then
+    if position('REASON_REQUIRED' in sqlerrm) = 0 then raise; end if;
+  end;
+  perform public.lock_period(v_month, false, 'The accountant found a missing bill');
+  perform public.void_sale(v_sale, 'Testing the lock', null);
+  raise notice 'ok: and once the owner opens it again, the void goes through';
+end $$;
+
+select pg_temp.check(
+  exists (select 1 from public.audit_log where action = 'period_unlocked'),
+  'opening a closed month is written down');
+select pg_temp.check(
+  (select count(*) from public.period_locks) = 0,
+  'and the month is open again at the end of it');
+
+-- A month that has not finished cannot be closed, and only the owner may close one.
+select pg_temp.expect_error(
+  format($q$select public.lock_period('%s', true)$q$,
+         (date_trunc('month', public.dhaka_today()) + interval '2 months')::date),
+  'MONTH_NOT_FINISHED');
+select set_config('request.jwt.claim.sub', '44444444-4444-4444-8444-444444444444', false);
+select pg_temp.expect_error(
+  $q$select public.lock_period(date_trunc('month', public.dhaka_today())::date, true)$q$,
+  'NOT_OWNER');
+
+-- ---- Renaming a report is the owner's business, and per shop ----
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+select public.save_report_setting('S-1', jsonb_build_object(
+  'title', 'Day book of sales', 'sl', 2,
+  'captions', jsonb_build_object('trader', 'Customer')));
+select pg_temp.check(
+  (public.report_run('S-1')->>'title') = 'Day book of sales',
+  'the owner can rename a report');
+select pg_temp.check(
+  exists (select 1 from jsonb_array_elements(public.report_run('S-1')->'columns') c
+          where c->>'f' = 'trader' and c->>'l' = 'Customer'),
+  'and rename one of its columns');
+select pg_temp.check(
+  (select x->>'title' from jsonb_array_elements(public.report_list()) x
+   where x->>'key' = 'S-1') = 'Day book of sales',
+  'and the list of reports uses the new name');
+select public.save_report_setting('S-1', jsonb_build_object('reset', 'true'));
+select pg_temp.check(
+  (public.report_run('S-1')->>'title') = 'Sales by date',
+  'and can put it back');
+
+-- ---- The export carries the entries themselves ----
+select pg_temp.check(
+  jsonb_array_length(public.journal_export('2000-01-01', public.dhaka_today())->'lines') > 0,
+  'the accountant''s export has the journal lines in it');
+select pg_temp.check(
+  (select sum((l->>'debit')::numeric) = sum((l->>'credit')::numeric)
+   from jsonb_array_elements(
+     public.journal_export('2000-01-01', public.dhaka_today())->'lines') l),
+  'and what it exports balances, same as what it came from');
+
+-- ---- A cashier gets no reports at all ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.expect_error($q$select public.report_list()$q$, 'NOT_ALLOWED:view_reports');
+select pg_temp.expect_error($q$select public.report_run('S-1')$q$, 'NOT_ALLOWED:view_reports');
+select pg_temp.expect_error($q$select public.journal_export()$q$, 'NOT_ALLOWED:view_accounts');
+select pg_temp.expect_error($q$select public.backfill_stock_layers()$q$, 'NOT_OWNER');
+select pg_temp.check(
+  (select count(*) from public.stock_layers) = 0
+  and (select count(*) from public.sale_line_layers) = 0,
+  'and reading the layer tables directly tells a cashier nothing about cost');
+
+-- A manager may see reports, but only for the branches they work at.
+select set_config('request.jwt.claim.sub', '44444444-4444-4444-8444-444444444444', false);
+select pg_temp.check(
+  not exists (
+    select 1 from jsonb_array_elements(
+      public.report_run('S-17', jsonb_build_object('from', '2000-01-01',
+        'to', public.dhaka_today()::text))->'rows') r
+    where r->>'branch' = 'Main branch'),
+  'a manager at one branch sees no other branch in a report');
+select pg_temp.expect_error(
+  $q$select public.report_run('S-1', jsonb_build_object('branch_id', '00000000-0000-4000-8000-0000000000b1'))$q$,
+  'BRANCH_NOT_ALLOWED');
+
 reset role;
 \echo ALL DATABASE CHECKS PASSED

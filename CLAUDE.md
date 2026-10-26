@@ -283,6 +283,81 @@ chains with many branches; CSL's single-branch store is only the first customer.
   posted it at the time runs now, and the already-posted guard in every trigger is what
   makes it safe to press twice — which matters, because the first run on a shop with two
   years of sales will time out and the owner will press it again.
+- **A report is configuration, not a query** (P14). BMS prints about a hundred reports
+  across nine register screens, and nearly every one is the same shape: take a list of
+  lines, group it two or three deep, total the money and the quantity at each level. So
+  the database has ONE engine (`report_run()`) that does exactly that with
+  `GROUP BY ROLLUP`, and a report is a row of configuration — which dataset, which
+  grouping, which columns. The dozen that are genuinely a different shape (the trial
+  balance, the balance sheet, a ledger, the day book) name a builder of their own. The
+  catalogue lives in `src/lib/reports.ts`, because the screen and the engine both need
+  it and two copies would drift; `scripts/gen-reports.mts` writes the seed migration
+  from it, the same arrangement as the Bangladesh area list. **Re-run the generator;
+  never hand-edit the generated file.** A field a dataset has not got is refused BY NAME
+  when the migration runs, so a typo is a failed migration naming the report and the
+  field rather than a report that silently comes out empty six months later.
+- **The datasets are granted to nobody** (P14). The `v_rep_*` views hold cost, margin and
+  every supplier price. They are read only through `report_run()`, which is security
+  definer and checks the permission, the shop and the branches first; a view a cashier
+  could select from directly would hand them the lot. Percentages and averages are
+  RECOMPUTED at every subtotal rather than summed — BMS sums its profit-% column, so a
+  subtotal over four lines can read 380%.
+- **FIFO layers track quantity and date, not value** (P14). Three kinds of report cannot
+  be answered without knowing which delivery each unit came from: how long stock has
+  been sitting, which purchase invoice a sold unit came in on, and what happened to one
+  delivery. So `stock_layers` keeps the remaining quantity per delivery and the oldest
+  is used first. **Cost stays the weighted average** decided in P5 — two units on the
+  same shelf cannot be worth different amounts. The layers hang off ONE trigger on
+  `stock_movements`, because every stock change in the app already writes one; a path
+  that moved stock without touching layers would be a path whose ageing report quietly
+  lies. A sale is the exception: its lines take their own layers, because
+  `complete_sale()` writes the movement BEFORE the line exists, so the movement's
+  trigger would have nothing to point at.
+- **What it cost at the time, captured on the movement** (P14). The same lesson as P12's
+  captured sale cost: the average moves every time stock is received, so valuing a
+  write-off from three months ago at today's average is wrong by however much prices
+  have moved — and the stock account and the stock valuation then disagree for ever,
+  with nothing to say which is right. One trigger sets `stock_movements.unit_cost`, so
+  no caller has to remember.
+- **Insisting the books equal the shelves found five holes** (P14). The done-when was
+  that the balance sheet's stock figure equals the stock valuation report, and getting
+  there turned up five things nothing was posting. A delivery went on the books at its
+  INVOICE TOTAL, VAT and advance income tax included, overstating stock by the tax on
+  every delivery (they now go to their own accounts, which is also where the VAT return
+  gets its input figure). Stock corrections never touched the books at all, so the shelf
+  and the ledger drifted apart by every write-off ever made. Transfers never touched
+  them either, so goods in a van — nobody's stock by P7's design, but still the shop's
+  money — were simply missing; they now sit in a stock-in-transit account while the van
+  is on the road. A corrected delivery cost (`amend_grn_cost`, the "receive now, price
+  later" flow) left the journal with the old figure AND the cost of sales wrong on any
+  of those units that had already sold. And changing a cost revalued stock already on
+  the shelf with no entry anywhere. Each is now posted — none by editing the old entry,
+  all by posting another one.
+- **Bringing stock in at its counted value** (P14). A shop that traded for two years
+  before switching the books on has cost changes and corrected invoices in its past that
+  no replay can reconstruct: the figures those events used are gone. What IS known is
+  what is on the shelves today and what it cost, so `backfill_stock_entries()` brings
+  the stock account to that against the owner's capital — what an accountant does when
+  opening books mid-life — in one named entry, so it is obvious what it is and what it
+  is not.
+- **A closed month is closed** (P14, BMS's "Transaction Lock"). A September sale voided
+  in October makes every report printed since then wrong and nobody finds out. So the
+  owner closes a month and nothing dated in it can be created, edited, voided or
+  returned — enforced by one guard trigger on every table that records something dated,
+  with the date column's name as a trigger argument, checked on BOTH dates of an update
+  so a document cannot be dragged out of a closed month either. Only the owner may close
+  or open one; opening needs a reason and is logged, because "who opened August again,
+  and why?" is the question that matters afterwards. The back-fills set a session flag
+  to pass through, because they replay what has ALREADY happened.
+- **Excel in the browser, PDF from the browser, Tally with a warning** (P14). The export
+  needs no new library and no server: exceljs was already a dependency (P4 reads import
+  files with it), and a PDF is the print stylesheet — the browser is better at making
+  paper than anything we could add, and it repeats the column headings on every sheet.
+  Tally imports XML, and the shape is stable, but it refuses a voucher whose ledger
+  NAMES do not match its own exactly and no export can know what a particular accountant
+  called their accounts. So the file is produced, and the screen says: import one
+  voucher, fix the names, then import the year. The CSV is there for the accountant who
+  would rather map the columns themselves, which in practice is most of them.
 - **Dhaka dates, not UTC slices.** `dhakaDate()` in `src/lib/sale.ts` turns a moment into
   its Dhaka calendar date. An ISO string's first ten characters are its UTC date, and
   Dhaka is six hours ahead, so between midnight and 6am slicing the string gives
@@ -378,9 +453,15 @@ The list below is the original short version; BUILD_PROMPTS.md wins where they d
    bank's leaf, an expenses screen, the trial balance and per-account ledgers, and a
    one-time back-fill. **Not done:** sub-ledger pickers on a typed journal voucher (the
    function takes them; the screen offers receipt, payment and contra), measuring a bank's
-   cheque leaf from the UI (`save_cheque_layout()` exists, no screen), and everything in
-   **P14** — reports, the period lock and export.
-   Then SMS receipts and printing.
+   cheque leaf from the UI (`save_cheque_layout()` exists, no screen).
+   ~~**Accounts 2**~~ — done (P14): 132 reports in six registers, every one in
+   docs/BMS_REPORTS.md with an ID, each a config entry in `src/lib/reports.ts`; FIFO
+   quantity layers underneath; the period lock; report renaming; and Excel, PDF and
+   Tally export. **Not done:** the 23 reports marked for P14a and P14c (they are listed,
+   and each says which step brings it), and BMS's bank interest calculator, which nobody
+   at the store was seen using.
+   Then quotations and sales orders (P14a), HR (P14b), sales reps and delivery points
+   (P14c), SMS receipts and printing.
 10. Before charging other shops: paid Supabase + Vercel plans, backups, error monitoring (Sentry).
 
 Not planned yet: HR, sales orders with advance payment, SR targets (see BUILD_PROMPTS.md).

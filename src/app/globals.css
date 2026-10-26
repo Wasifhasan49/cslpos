@@ -47,4 +47,23 @@ html, body {
   body * { visibility: hidden; }
   #print-receipt, #print-receipt * { visibility: visible; }
   #print-receipt { position: absolute; left: 0; top: 0; width: 72mm; font-size: 11px; color: #000; }
+
+  /* A report is a page of paper, so the browser makes the paper: no PDF library, and
+     the headings repeat on every page because a six-page register without them is
+     unreadable. */
+  #print-report, #print-report * { visibility: visible; }
+  #print-report {
+    position: absolute; left: 0; top: 0; width: 100%;
+    font-size: 10px; color: #000;
+  }
+  #print-report table { width: 100%; border-collapse: collapse; }
+  #print-report thead { display: table-header-group; }
+  #print-report tr { page-break-inside: avoid; }
+  #print-report th, #print-report td {
+    border-bottom: 1px solid #ccc; padding: 2px 4px; text-align: left;
+  }
+  #print-report th.right, #print-report td.right { text-align: right; }
+  #print-report .sheet { page-break-after: always; }
+  #print-report .sheet:last-child { page-break-after: auto; }
+  #print-report .no-print { display: none; }
 }

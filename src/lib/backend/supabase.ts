@@ -19,6 +19,8 @@ import type {
   AccountLedger, AccountNature, AccountRole, BackfillResult, ChartAccount, ChequeBookRow,
   ChequeDirection, ChequeLayout, ChequePrint, ChequeRow, ChequeStatus, EntryStatus,
   MoneyBalance, TrialBalance, VoucherRow,
+  JournalExport, LayerRebuildResult, PeriodLock, ReportColumnOut, ReportFilters,
+  ReportListItem, ReportResult, ReportRow, ReportSection, ReportRegisterKey,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
@@ -2215,6 +2217,79 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
       };
     },
 
+    async listReports(): Promise<ReportListItem[]> {
+      const { data, error } = await sb.rpc("report_list");
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((r) => ({
+        key: String(r.key), register: r.register as ReportRegisterKey,
+        sl: num(r.sl), title: String(r.title),
+        note: (r.note as string | null) ?? null,
+        dateMode: (r.date_mode as ReportListItem["dateMode"]) ?? "range",
+        landscape: Boolean(r.landscape),
+        needs: (r.needs as string | null) ?? null,
+        needsCost: Boolean(r.needs_cost),
+        allowed: Boolean(r.allowed),
+        renamed: Boolean(r.renamed),
+      }));
+    },
+
+    async runReport(key, filters): Promise<ReportResult> {
+      const { data, error } = await sb.rpc("report_run", {
+        p_key: key, p_filters: toFilters(filters),
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return readReport(key, (data ?? {}) as Record<string, unknown>, filters ?? {});
+    },
+
+    async saveReportSetting(key, values): Promise<void> {
+      const { error } = await sb.rpc("save_report_setting", { p_key: key, p_values: values });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async lockPeriod(month, locked, note): Promise<void> {
+      const { error } = await sb.rpc("lock_period", {
+        p_month: month, p_locked: locked, p_note: note ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async listPeriodLocks(): Promise<PeriodLock[]> {
+      const { data, error } = await sb.rpc("period_lock_list");
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((l) => ({
+        month: String(l.month), note: (l.note as string | null) ?? null,
+        at: String(l.at), who: String(l.who),
+      }));
+    },
+
+    async journalExport(from, to, branchId): Promise<JournalExport> {
+      const { data, error } = await sb.rpc("journal_export", {
+        p_from: from ?? null, p_to: to ?? null, p_branch_id: branchId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const d = (data ?? {}) as Record<string, unknown>;
+      return {
+        shop: String(d.shop ?? ""),
+        from: (d.from as string | null) ?? null, to: (d.to as string | null) ?? null,
+        lines: ((d.lines as Record<string, unknown>[] | null) ?? []).map((l) => ({
+          date: String(l.date), entryNo: String(l.entry_no), kind: String(l.kind),
+          narration: String(l.narration ?? ""), account: String(l.account),
+          accountCode: String(l.account_code), party: String(l.party ?? ""),
+          debit: num(l.debit), credit: num(l.credit), note: String(l.note ?? ""),
+          branch: String(l.branch),
+        })),
+      };
+    },
+
+    async rebuildStockLayers(): Promise<LayerRebuildResult> {
+      const { data, error } = await sb.rpc("backfill_stock_layers");
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return {
+        movements: num(r.movements), layers: num(r.layers), openLayers: num(r.open_layers),
+      };
+    },
+
     async stockHistory(branchId: string, productId?: string | null, limit = 100): Promise<StockMovementRow[]> {
       const { data, error } = await sb.rpc("stock_history", {
         p_branch_id: branchId, p_product_id: productId ?? null, p_limit: limit,
@@ -2260,4 +2335,82 @@ function readLayout(l: Record<string, unknown>): ChequeLayout {
 /** "There is no session" is the normal signed-out case, not a failure. */
 function isNoSession(error: { name?: string; message?: string }): boolean {
   return error.name === "AuthSessionMissingError" || /session|not authenticated/i.test(error.message ?? "");
+}
+
+/** The filters go down snake_cased, like every other argument to a function. */
+function toFilters(f?: ReportFilters): Record<string, unknown> {
+  if (!f) return {};
+  const out: Record<string, unknown> = {};
+  if (f.branchId) out.branch_id = f.branchId;
+  if (f.from) out.from = f.from;
+  if (f.to) out.to = f.to;
+  if (f.asOn) out.as_on = f.asOn;
+  if (f.productId) out.product_id = f.productId;
+  if (f.customerId) out.customer_id = f.customerId;
+  if (f.supplierId) out.supplier_id = f.supplierId;
+  if (f.accountId) out.account_id = f.accountId;
+  if (f.category) out.category = f.category;
+  if (f.top) out.top = f.top;
+  return out;
+}
+
+function readColumns(v: unknown): ReportColumnOut[] {
+  return ((v as Record<string, unknown>[] | null) ?? []).map((c) => ({
+    f: String(c.f), l: String(c.l), t: c.t as ReportColumnOut["t"],
+    calc: (c.calc as string | null) ?? null, cost: Boolean(c.cost),
+  }));
+}
+
+function readRows(v: unknown): ReportRow[] {
+  return ((v as Record<string, unknown>[] | null) ?? []).map((r) => r as unknown as ReportRow);
+}
+
+/**
+ * The report envelope. The ROWS are not mapped: their fields are the report's own
+ * columns, and renaming them here would mean this file had to know about every report.
+ */
+function readReport(
+  key: string, d: Record<string, unknown>, filters: ReportFilters,
+): ReportResult {
+  const sections = (d.sections as Record<string, unknown>[] | null) ?? null;
+  return {
+    key: String(d.key ?? key),
+    register: (d.register as ReportRegisterKey) ?? "other",
+    title: String(d.title ?? key),
+    note: (d.note as string | null) ?? null,
+    noteExtra: (d.note_extra as string | null) ?? null,
+    dateMode: (d.date_mode as ReportResult["dateMode"]) ?? "range",
+    landscape: Boolean(d.landscape),
+    columns: readColumns(d.columns),
+    rows: readRows(d.rows),
+    totals: (d.totals as ReportRow | null) ?? null,
+    sections: sections
+      ? sections.map((s): ReportSection => ({
+          title: String(s.title),
+          columns: readColumns(s.columns),
+          rows: readRows(s.rows),
+          totals: (s.totals as ReportRow | null) ?? null,
+          opening: s.opening === undefined || s.opening === null ? null : num(s.opening),
+          extra: (s.extra as Record<string, unknown> | null) ?? null,
+        }))
+      : null,
+    pivot: Boolean(d.pivot),
+    balanced: d.balanced === undefined || d.balanced === null ? null : Boolean(d.balanced),
+    drill: (d.drill as string | null) ?? null,
+    opening: d.opening === undefined || d.opening === null ? null : num(d.opening),
+    account: (d.account as string | null) ?? null,
+    onOrder: d.on_order === undefined || d.on_order === null ? null : num(d.on_order),
+    stockValue: d.stock_value === undefined || d.stock_value === null ? null : num(d.stock_value),
+    stockOnShelves: d.stock_on_shelves === undefined || d.stock_on_shelves === null
+      ? null : num(d.stock_on_shelves),
+    stockNoCost: d.stock_no_cost === undefined || d.stock_no_cost === null
+      ? null : num(d.stock_no_cost),
+    stockAccount: d.stock_account === undefined || d.stock_account === null
+      ? null : num(d.stock_account),
+    shop: (d.shop as string | null) ?? null,
+    branch: (d.branch as string | null) ?? null,
+    runAt: String(d.run_at ?? new Date().toISOString()),
+    runBy: String(d.run_by ?? ""),
+    filters,
+  };
 }

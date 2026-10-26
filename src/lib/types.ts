@@ -1366,3 +1366,142 @@ export interface BackfillResult {
   supplierPayments: number;
   cashMovements: number;
 }
+
+// --- Reports, the period lock and export (P14) ---
+
+/** What `report_run()` gives back, whichever of the hundred-odd reports it was. */
+export interface ReportColumnOut {
+  f: string;
+  l: string;
+  t: "text" | "date" | "qty" | "money" | "pct" | "num";
+  /** Worked out after the totals rather than added up. */
+  calc?: string | null;
+  /** A cost or profit figure. */
+  cost?: boolean;
+}
+
+/**
+ * One row. The fields are whatever the report's columns are, so this is deliberately
+ * open; `_kind` says whether it is a line, a subtotal or the grand total and `_level`
+ * how deep the grouping was, which is all the screen needs to draw it.
+ */
+export interface ReportRow {
+  _kind: "detail" | "subtotal" | "total";
+  _level: number;
+  [field: string]: unknown;
+}
+
+/** Reports that print in blocks: a balance sheet's two sides, a book of bills. */
+export interface ReportSection {
+  title: string;
+  columns: ReportColumnOut[];
+  rows: ReportRow[];
+  totals: ReportRow | null;
+  opening?: number | null;
+  extra?: Record<string, unknown> | null;
+}
+
+export interface ReportResult {
+  key: string;
+  register: ReportRegisterKey;
+  title: string;
+  note: string | null;
+  /** A second line the report itself wanted to say, e.g. that the shop charges no VAT. */
+  noteExtra: string | null;
+  dateMode: "range" | "as_on" | "none";
+  landscape: boolean;
+  columns: ReportColumnOut[];
+  rows: ReportRow[];
+  totals: ReportRow | null;
+  sections: ReportSection[] | null;
+  /** Rows × columns rather than a list. */
+  pivot: boolean;
+  /** For the reports whose whole job is to balance: the trial balance, the balance
+   *  sheet, the stock valuation. Null when the question does not apply. */
+  balanced: boolean | null;
+  /** Which field on a row opens the thing behind it. */
+  drill: string | null;
+  opening: number | null;
+  /** The account or product a ledger is for. */
+  account: string | null;
+  onOrder: number | null;
+  /** The stock valuation report's three figures. */
+  stockValue: number | null;
+  stockOnShelves: number | null;
+  stockNoCost: number | null;
+  stockAccount: number | null;
+  shop: string | null;
+  branch: string | null;
+  runAt: string;
+  runBy: string;
+  filters: ReportFilters;
+}
+
+export type ReportRegisterKey =
+  "sales" | "purchase" | "stock" | "accounts" | "transfer" | "other";
+
+export interface ReportFilters {
+  branchId?: string | null;
+  from?: string | null;
+  to?: string | null;
+  asOn?: string | null;
+  productId?: string | null;
+  customerId?: string | null;
+  supplierId?: string | null;
+  accountId?: string | null;
+  category?: string | null;
+  top?: number | null;
+}
+
+export interface ReportListItem {
+  key: string;
+  register: ReportRegisterKey;
+  sl: number;
+  title: string;
+  note: string | null;
+  dateMode: "range" | "as_on" | "none";
+  landscape: boolean;
+  /** Which later step brings it, when it is not here yet. */
+  needs: string | null;
+  needsCost: boolean;
+  /** False when it needs a permission this login has not got, or is not built yet. */
+  allowed: boolean;
+  /** The owner has given it a name of their own. */
+  renamed: boolean;
+}
+
+/** A month the owner has closed. */
+export interface PeriodLock {
+  month: string;
+  note: string | null;
+  at: string;
+  who: string;
+}
+
+/** One journal line, for the accountant's export. */
+export interface JournalExportLine {
+  date: string;
+  entryNo: string;
+  kind: string;
+  narration: string;
+  account: string;
+  accountCode: string;
+  party: string;
+  debit: number;
+  credit: number;
+  note: string;
+  branch: string;
+}
+
+export interface JournalExport {
+  shop: string;
+  from: string | null;
+  to: string | null;
+  lines: JournalExportLine[];
+}
+
+export interface LayerRebuildResult {
+  movements: number;
+  layers: number;
+  openLayers: number;
+}

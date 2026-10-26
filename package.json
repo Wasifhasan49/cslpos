@@ -14,6 +14,7 @@
     "doctor": "tsx scripts/doctor.mts",
     "shop:init": "tsx scripts/shop-init.mts",
     "staff:add": "tsx scripts/create-staff.mts",
+    "reports:gen": "tsx scripts/gen-reports.mts",
     "check": "tsx scripts/doctor.mts"
   },
   "dependencies": {

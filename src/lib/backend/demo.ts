@@ -24,10 +24,15 @@ import type {
   AccountLedger, AccountNature, AccountRole, BackfillResult, ChartAccount, ChequeBookRow,
   ChequeLayout, ChequePrint, ChequeRow, ChequeStatus, EntryStatus, LedgerLine,
   MoneyBalance, TrialBalance, TrialBalanceRow, VoucherRow,
+  JournalExport, LayerRebuildResult, PeriodLock, ReportListItem, ReportResult,
 } from "../types";
 import { DEFAULT_CHEQUE_LAYOUT, takaInWords } from "../cheque";
 import type { ImportKind } from "../import/schema";
 import type { Backend } from "./types";
+import {
+  demoReportList, runDemoReport,
+  type DemoReportData, type DemoReportSale,
+} from "./demo-reports";
 import {
   DEFAULT_SERIAL_BRANCH, DEMO_BRANCHES, DEMO_CATEGORIES, DEMO_PIN, DEMO_SERIAL_BRANCH,
   DEMO_STOCK, demoCatalogue,
@@ -382,7 +387,13 @@ export function createDemoBackend(): Backend {
   };
   const sales: DemoSale[] = [];
   let returnCounter = 1;
-  const costs: Record<string, number> = { a1: 250 };
+  // What each one cost. Every product, not just one: stock with no cost recorded is
+  // stock of unknown value, and the profit figure quietly treats it as free. The SSD is
+  // deliberately left out, so "received for the first time" has something to prove.
+  const costs: Record<string, number> = {
+    a1: 250, a2: 300, a3: 220, a4: 320, a5: 640, a6: 950, a7: 2450,
+    a9: 2800, aa: 66000, ab: 820,
+  };
 
   // --- Accounts (P13) --------------------------------------------------------
   // The same double entry the database does: every taka written twice, and nothing
@@ -609,6 +620,93 @@ export function createDemoBackend(): Backend {
         serials: mine,
       };
     });
+
+  // Months the owner has closed, and the names they have given the reports (P14).
+  const locks: PeriodLock[] = [];
+  /** Refuse to touch a closed month — the same rule the database enforces with a
+   *  trigger on every table that records something dated. */
+  const periodOpen = (when: string): void => {
+    const month = `${dhakaDate(when).slice(0, 7)}-01`;
+    if (locks.some((l) => l.month === month)) {
+      fail(`PERIOD_LOCKED:${monthWords(month)}`);
+    }
+  };
+  const reportSettings: Record<
+    string, { title?: string; sl?: number; captions?: Record<string, string> }> = {};
+
+  /** Everything the reports read, gathered fresh so they see the latest sale. */
+  const reportData = (): DemoReportData => ({
+    shop: DEMO_SHOP_NAME,
+    me: { name: staff.name, role: staff.role },
+    branches: branches.map((b) => ({ id: b.id, name: b.name })),
+    products: catalogue.map((p) => ({
+      id: p.id, code: p.code, name: p.name, brand: p.brand,
+      categoryId: p.categoryId, reorderLevel: p.reorderLevel,
+    })),
+    categories: DEMO_CATEGORIES.map((c) => ({ id: c.id, name: c.name })),
+    customers: customers.map((c) => ({
+      id: c.id, name: c.name ?? c.phone, phone: c.phone, company: c.company,
+      address: c.address, group: c.group, openingBalance: c.openingBalance,
+    })),
+    suppliers: suppliers.map((s) => ({
+      id: s.id, name: s.name, phone: s.phone, address: s.address ?? null,
+    })),
+    sales: sales.map((s): DemoReportSale => ({
+      id: s.id, invoiceNo: s.invoiceNo, createdAt: s.createdAt,
+      branchId: s.branchId, branch: s.branch, staff: s.staff,
+      customerId: s.customerId,
+      customerName: s.customerId
+        ? (customers.find((c) => c.id === s.customerId)?.name ?? null) : null,
+      customerGroup: s.customerId
+        ? (customers.find((c) => c.id === s.customerId)?.group ?? null) : null,
+      paymentMethod: s.paymentMethod, paymentRef: s.paymentRef,
+      subtotal: s.subtotal, discountPct: s.discountPct, discountAmount: s.discountAmount,
+      vatAmount: s.vatAmount, chargesAmount: s.chargesAmount, total: s.total,
+      dueAmount: s.dueAmount, paidAmount: s.paidAmount, status: s.status,
+      lines: s.items.map((l) => ({
+        id: l.id, productId: l.productId, name: l.name, qty: l.qty,
+        unitPrice: l.unitPrice, lineTotal: l.lineTotal, vatAmount: l.vatAmount,
+        cost: s.lineCosts[l.id] ?? null,
+        serials: l.serials.map((x) => x.serial),
+        returnedQty: l.returnedQty, refundEach: l.refundEach,
+      })),
+    })),
+    deliveries: deliveries.map((g) => ({ ...g, branchId: branches[0].id })),
+    stock,
+    costs,
+    serials: serials.map((x) => ({
+      serial: x.serial, productId: x.productId, branchId: x.branchId,
+      sold: x.sold, inTransit: x.inTransit,
+    })),
+    journal: journal.map((e) => ({
+      id: e.id, entryNo: e.entryNo, date: e.date, narration: e.narration,
+      sourceKind: e.sourceKind, status: e.status, branchId: e.branchId, who: e.who,
+      lines: e.lines.map((l) => ({
+        accountId: l.accountId, debit: l.debit, credit: l.credit, note: l.note,
+        customerId: l.customerId, supplierId: l.supplierId,
+      })),
+    })),
+    accounts: accounts.map((a) => ({
+      id: a.id, code: a.code, name: a.name, group: a.group, nature: a.nature,
+      role: a.role, branchId: a.branchId,
+    })),
+    cheques: cheques.map((c) => ({
+      chequeNo: c.chequeNo, direction: c.direction, status: c.status, amount: c.amount,
+      chequeDate: c.chequeDate,
+      party: c.payee
+        ?? (c.customerId ? (customers.find((x) => x.id === c.customerId)?.name ?? null)
+            : c.supplierId ? (suppliers.find((x) => x.id === c.supplierId)?.name ?? null)
+            : null),
+      bank: c.bank ?? c.drawnOn,
+      branchId: branches[0].id,
+      settledOn: c.clearedAt ? dhakaDate(c.clearedAt) : null,
+    })),
+    claims,
+    transfers,
+    locks,
+    settings: reportSettings,
+    features,
+  });
 
   const api: Backend = {
     mode: "demo",
@@ -2811,6 +2909,7 @@ export function createDemoBackend(): Backend {
       const sale = sales.find((s) => s.id === input.saleId);
       if (!sale) fail("SALE_NOT_FOUND");
       if (sale!.status === "void") fail("SALE_ALREADY_VOID");
+      periodOpen(sale!.createdAt);
       if (dhakaDate(sale!.createdAt) !== dhakaToday()) fail("VOID_TOO_LATE");
       if (sale!.items.some((i) => i.returnedQty > 0)) fail("SALE_PARTLY_RETURNED");
 
@@ -2853,6 +2952,7 @@ export function createDemoBackend(): Backend {
       const sale = sales.find((s) => s.id === input.saleId);
       if (!sale) fail("SALE_NOT_FOUND");
       if (sale!.status === "void") fail("SALE_IS_VOID");
+      periodOpen(new Date().toISOString());
 
       let subtotal = 0;
       const out: ReturnResult["lines"] = [];
@@ -3834,10 +3934,123 @@ export function createDemoBackend(): Backend {
         postSale(sale);
         posted += 1;
       }
+      // And bring the stock in at what it is worth. A shop that was trading before it
+      // switched the books on has stock on its shelves that the books have never heard
+      // of, so the stock account would stay negative as sales took goods off it. What
+      // IS known is what is on the shelves and what it cost, so the account is brought
+      // to that, against the owner's capital — which is what an accountant does when
+      // opening books mid-life. The real one does exactly this (backfill_stock_entries).
+      const shelf = roundTaka(branches.reduce((total, b) => total
+        + catalogue.reduce((n, p) => {
+            const loose = stock[b.id]?.[p.id] ?? 0;
+            const serialled = serials.filter(
+              (x) => x.productId === p.id && x.branchId === b.id && !x.sold && !x.inTransit).length;
+            return n + (loose + serialled) * (costs[p.id] ?? 0);
+          }, 0), 0));
+      const inventory = accounts.find((a) => a.role === "inventory")!;
+      const onBooks = roundTaka(journal
+        .filter((e) => e.status === "posted")
+        .flatMap((e) => e.lines)
+        .filter((l) => l.accountId === inventory.id)
+        .reduce((n, l) => n + l.debit - l.credit, 0));
+      const gap = roundTaka(shelf - onBooks);
+      if (gap !== 0) {
+        post({
+          branchId: branches[0].id,
+          narration: "Stock brought in at its counted value",
+          sourceKind: "opening_balance",
+          lines: gap > 0
+            ? [{ accountId: inventory.id, debit: gap },
+               { accountId: accounts.find((a) => a.role === "opening_equity")!.id, credit: gap }]
+            : [{ accountId: accounts.find((a) => a.role === "opening_equity")!.id, debit: -gap },
+               { accountId: inventory.id, credit: -gap }],
+        });
+      }
+
       return {
         from: from ?? "2000-01-01", sales: posted, grns: 0, supplierReturns: 0,
         saleReturns: 0, customerPayments: 0, supplierPayments: 0, cashMovements: 0,
       };
+    },
+
+    // --- Reports, the period lock and export (P14) ---
+
+    async listReports(): Promise<ReportListItem[]> {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:view_reports");
+      return demoReportList(reportData());
+    },
+
+    async runReport(key, filters): Promise<ReportResult> {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:view_reports");
+      return runDemoReport(key, filters ?? {}, reportData());
+    },
+
+    async saveReportSetting(key, values): Promise<void> {
+      if (staff.role !== "owner") fail("NOT_OWNER");
+      if (values.reset === true || values.reset === "true") {
+        delete reportSettings[key];
+        return;
+      }
+      const got = reportSettings[key] ?? {};
+      const title = typeof values.title === "string" ? values.title.trim() : "";
+      if (title) got.title = title;
+      if (values.sl !== undefined && values.sl !== null) got.sl = Number(values.sl);
+      if (values.captions) got.captions = values.captions as Record<string, string>;
+      reportSettings[key] = got;
+    },
+
+    async lockPeriod(month, locked, note): Promise<void> {
+      if (staff.role !== "owner") fail("NOT_OWNER");
+      const first = `${month.slice(0, 7)}-01`;
+      if (first > dhakaDate(new Date().toISOString())) fail("MONTH_NOT_FINISHED");
+      if (locked) {
+        const at = new Date().toISOString();
+        const got = locks.find((l) => l.month === first);
+        if (got) { got.note = note ?? null; got.at = at; } else {
+          locks.push({ month: first, note: note ?? null, at, who: staff.name });
+        }
+      } else {
+        // Opening a month again has to be explained, and the reason is kept.
+        if (!note || note.trim().length < 3) fail("REASON_REQUIRED");
+        const i = locks.findIndex((l) => l.month === first);
+        if (i >= 0) locks.splice(i, 1);
+      }
+    },
+
+    async listPeriodLocks(): Promise<PeriodLock[]> {
+      return [...locks].sort((a, b) => b.month.localeCompare(a.month));
+    },
+
+    async journalExport(from, to, branchId): Promise<JournalExport> {
+      accountsOn();
+      if (staff.role === "cashier") fail("NOT_ALLOWED:view_accounts");
+      const lines = journal
+        .filter((e) => e.status === "posted"
+                       && (!from || e.date >= from) && (!to || e.date <= to)
+                       && (!branchId || e.branchId === branchId))
+        .flatMap((e) => e.lines.map((l) => ({
+          date: e.date, entryNo: e.entryNo,
+          kind: e.sourceKind === "sale" ? "Sales"
+            : e.sourceKind === "grn" ? "Purchase"
+            : e.sourceKind.includes("payment") ? "Payment" : "Journal",
+          narration: e.narration,
+          account: accounts.find((a) => a.id === l.accountId)?.name ?? "—",
+          accountCode: accounts.find((a) => a.id === l.accountId)?.code ?? "—",
+          party: l.customerId
+            ? (customers.find((c) => c.id === l.customerId)?.name ?? "")
+            : l.supplierId ? (suppliers.find((x) => x.id === l.supplierId)?.name ?? "") : "",
+          debit: l.debit, credit: l.credit, note: l.note ?? "",
+          branch: branches.find((b) => b.id === e.branchId)?.name ?? "—",
+        })));
+      return { shop: DEMO_SHOP_NAME, from: from ?? null, to: to ?? null, lines };
+    },
+
+    async rebuildStockLayers(): Promise<LayerRebuildResult> {
+      if (staff.role !== "owner") fail("NOT_OWNER");
+      // Demo mode has no layers to rebuild: it works out which delivery a unit came
+      // from on the spot. The real one replays every movement in order.
+      const layers = deliveries.reduce((n, g) => n + g.lines.length, 0);
+      return { movements: movements.length, layers, openLayers: layers };
     },
   };
 
@@ -3877,4 +4090,10 @@ function agingFrom(entries: LedgerEntry[], balance: number): SupplierAging {
     days0to30: Math.max(buckets[0], 0), days31to60: Math.max(buckets[1], 0),
     days60plus: Math.max(buckets[2], 0), total: balance, unapplied: Math.max(paid, 0),
   };
+}
+
+/** "September 2026", for the period-lock message. */
+function monthWords(month: string): string {
+  const [y, m] = month.split("-");
+  return `${new Date(Number(y), Number(m) - 1, 1).toLocaleString("en-GB", { month: "long" })} ${y}`;
 }

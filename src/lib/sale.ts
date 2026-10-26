@@ -288,6 +288,10 @@ export const SALE_ERROR_CODES = [
   "CHEQUE_NEEDS_NUMBER", "CHEQUE_BOOK_NOT_FOUND", "CHEQUE_BOOK_FINISHED",
   "CHEQUE_NOT_FOUND", "CHEQUE_ALREADY_SETTLED", "BOUNCE_REASON_REQUIRED",
   "ONLY_ISSUED_CHEQUES_PRINT",
+  // P14: reports, the period lock and export.
+  "PERIOD_LOCKED", "MONTH_NOT_FINISHED", "NO_SUCH_REPORT", "NOT_YET",
+  "PICK_AN_ACCOUNT", "PICK_A_PRODUCT", "NO_SUCH_PRODUCT",
+  "NO_SUCH_DATASET", "NO_SUCH_FIELD", "NO_SUCH_BUILDER", "REPORT_HAS_NO_GROUPING",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -564,6 +568,30 @@ export function friendlyError(raw: string): string {
     case "ONLY_POSTED_ENTRIES_REVERSE":
       return "Only an entry that is actually on the books can be reversed.";
     case "ALREADY_REVERSED": return "This entry has already been reversed.";
+    case "PERIOD_LOCKED":
+      return `${detail ?? "That month"} is closed. The owner has to open it again before `
+        + "anything in it can change — Settings → Closing the books.";
+    case "MONTH_NOT_FINISHED":
+      return "A month can only be closed once it is over.";
+    case "NO_SUCH_REPORT":
+      return "There is no report by that name. Pick one from the list.";
+    case "NOT_YET":
+      return detail === "P14a"
+        ? "This report comes with quotations, sales orders and challans."
+        : detail === "P14c"
+          ? "This report comes with sales reps and delivery points."
+          : "This report hasn't been built yet.";
+    case "PICK_AN_ACCOUNT": return "Pick which account's ledger you want.";
+    case "PICK_A_PRODUCT": return "Pick which product you want the history of.";
+    case "NO_SUCH_PRODUCT": return "That product isn't in this shop.";
+    // The three below mean a report's own configuration is wrong, which is a fault in
+    // the app rather than anything the person did. Say so, and name the part at fault.
+    case "NO_SUCH_DATASET":
+    case "NO_SUCH_FIELD":
+    case "NO_SUCH_BUILDER":
+    case "REPORT_HAS_NO_GROUPING":
+      return `This report is set up wrongly (${detail ?? "unknown field"}). `
+        + "It needs fixing in the app, not by you.";
     case "BAD_VOUCHER_KIND": return "That isn't a kind of voucher.";
     case "VOUCHER_NEEDS_TWO_ACCOUNTS":
       return "Pick both accounts: where the money came out of and where it went in.";
@@ -573,9 +601,12 @@ export function friendlyError(raw: string): string {
     case "VOUCHER_NEEDS_LINES":
       return "A journal entry needs at least two lines — that is what double entry means.";
     case "VOUCHER_NOT_WAITING": return "This voucher isn't waiting for anybody.";
-    case "REASON_REQUIRED":
     case "REVERSAL_REASON_REQUIRED":
       return "Say why. A reversal with no reason is one nobody can explain later.";
+    // Shared: reversing an entry, and opening a month that was closed. Both are
+    // decisions somebody will be asked about months later.
+    case "REASON_REQUIRED":
+      return "Say why. Without a reason this is a change nobody can explain later.";
     case "NOT_INTER_BRANCH": return "That entry isn't between two branches.";
     case "ALREADY_ACCEPTED": return "The other branch has already accepted this.";
     case "ACCOUNT_NOT_ALLOWED": return "You haven't been given access to that account.";

@@ -4,9 +4,9 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  ArrowLeftRight, BookOpenCheck, Boxes, ChevronDown, Check, KeyRound, LayoutDashboard,
-  LogOut, MoreHorizontal, Package, Receipt, Settings, ShieldCheck, ShoppingCart, Store,
-  Truck, Users, Wallet,
+  ArrowLeftRight, BookOpenCheck, Boxes, ChevronDown, Check, FileText, KeyRound,
+  LayoutDashboard, LogOut, MoreHorizontal, Package, Receipt, Settings, ShieldCheck,
+  ShoppingCart, Store, Truck, Users, Wallet,
 } from "lucide-react";
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,7 @@ const ICONS: Record<IconName, React.ComponentType<{ className?: string }>> = {
   cash: Wallet,
   dashboard: LayoutDashboard,
   accounts: BookOpenCheck,
+  reports: FileText,
   settings: Settings,
 };
 
