@@ -37,10 +37,16 @@ One line per prompt from docs/BUILD_PROMPTS.md, newest at the bottom.
 
 ## Waiting on Wasif
 
-- Supabase: the old test project no longer resolves (paused or deleted). Create a new
-  one, update .env.local, apply all migrations in order, then run `pnpm check`.
-  Everything below is tested against a local Postgres instead; only real sign-in and
-  live RLS are unverified.
+- Supabase: **the project is alive again** (27 Oct 2026 — it was paused, not deleted;
+  Supabase pauses an idle free project and brings it back on demand). `pnpm check` gets
+  as far as "no shop". But only the **P0-era migrations** are applied to it: `products`
+  exists, `branches`, `shop_features`, `journal_entries`, `report_defs`, `stock_layers`
+  and `quotations` do not. So it is fourteen prompts behind, and `pnpm dev` against it
+  shows a login screen nobody has credentials for.
+  To use it: apply `supabase/migrations/20261025000001_branches.sql` onward **in
+  filename order**, then `pnpm shop:init`, then `pnpm staff:add`, then `pnpm check`.
+  Until then, test with `pnpm dev:demo`. Everything is verified against a local Postgres;
+  only real sign-in and live RLS are unverified.
 - **P4 was built against synthetic samples, not the real export.** The real BMS files
   were not available, so `bms-export/samples/` holds reconstructions with the same
   column names and quirks (title row above the header, "Convarter", blank rows, codes
