@@ -57,3 +57,44 @@ One line per prompt from docs/BUILD_PROMPTS.md, newest at the bottom.
   use and stock counts), the rest of the Stock Register list below #19, and whether
   anybody uses the bank interest calculator (skipped, and listed as skipped). **Ask at
   the store, and take a photo of the Challan, RMA and Modification register lists.**
+
+## Where P14a got to (paused mid-prompt, 27 Oct 2026)
+
+P14 is finished and committed. **P14a is part-built and committed as work in progress**
+so nothing is lost; it is safe to leave as it is — every check passes with it in place,
+and nothing in it is reachable from the UI yet (its feature switch does not exist in
+Settings, and no screen calls it).
+
+Done so far, in `supabase/migrations/20261026000020_sales_documents.sql`:
+
+- The long comment at the top explaining the chain and the four decisions it rests on
+  (why reserved stock is worked out rather than stored; where goods live between
+  delivery and billing; why the bill still goes through `complete_sale()`).
+- The `sales_documents` feature switch, and QT-/SO-/CH- document numbering.
+- All nine tables: quotations and their lines, sales orders and their lines, customer
+  advances, challans with lines and serials, plus `sales.challan_id` / `sales.order_id`,
+  the `delivered` serial status and the `delivered` / `delivery_returned` stock reasons.
+- `reserved_qty()` and `available_qty()` — the counter's "4 in stock, 2 reserved".
+- `save_quotation()` and `set_quotation_status()`.
+
+Still to do for P14a, in order:
+
+1. `save_sales_order()` (reserves stock, approval over a limit), `adjust_sales_order()`,
+   `set_order_status()`, `record_advance()`.
+2. `save_challan()` (stock out at cost, serials to `delivered`), `return_challan()`.
+3. The billing path: redefine `complete_sale()` with a `p_extras->>'challan_id'` flag
+   that skips the stock move (the challan already made it) and takes serials from
+   `delivered` rather than `in_stock`; then `bill_challan()` and `bill_order()`, applying
+   the advance.
+4. Accounts: a customer-advance liability account and a "goods delivered, not invoiced"
+   asset account, seeded like P14's three; posting on advance, challan and bill; and
+   `post_sale()` redefined so a bill from a challan takes its cost of sales out of
+   "delivered not invoiced" instead of out of stock.
+5. The four lists, the counter showing reserved stock, and the screens.
+6. Turn on the 10 reports marked `needs: "P14a"` in `src/lib/reports.ts` (add their
+   datasets, drop the `needs`, re-run `pnpm reports:gen`).
+7. Checks, a PROGRESS row, and the CLAUDE.md architecture notes.
+
+The done-when to aim at: quote a company 10 keyboards, convert to an order with a
+৳5,000 advance, see them reserved at the counter, deliver 6 on a challan, bill those 6
+using the advance, deliver and bill the last 4 — and every ledger balances.

@@ -292,6 +292,8 @@ export const SALE_ERROR_CODES = [
   "PERIOD_LOCKED", "MONTH_NOT_FINISHED", "NO_SUCH_REPORT", "NOT_YET",
   "PICK_AN_ACCOUNT", "PICK_A_PRODUCT", "NO_SUCH_PRODUCT",
   "NO_SUCH_DATASET", "NO_SUCH_FIELD", "NO_SUCH_BUILDER", "REPORT_HAS_NO_GROUPING",
+  // P14a: quotations, sales orders and challans.
+  "QUOTE_NOT_FOUND", "QUOTE_NOT_DRAFT", "BAD_QUOTE_STATUS",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -581,6 +583,11 @@ export function friendlyError(raw: string): string {
         : detail === "P14c"
           ? "This report comes with sales reps and delivery points."
           : "This report hasn't been built yet.";
+    case "QUOTE_NOT_FOUND": return "That quotation no longer exists. Reload and try again.";
+    case "QUOTE_NOT_DRAFT":
+      return "This quotation has already gone out. Copy it into a new one rather than "
+        + "changing what the customer was sent.";
+    case "BAD_QUOTE_STATUS": return "That isn't something a quotation can be.";
     case "PICK_AN_ACCOUNT": return "Pick which account's ledger you want.";
     case "PICK_A_PRODUCT": return "Pick which product you want the history of.";
     case "NO_SUCH_PRODUCT": return "That product isn't in this shop.";
