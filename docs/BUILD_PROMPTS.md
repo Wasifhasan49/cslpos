@@ -33,7 +33,8 @@ Notes:
   "<number> is unblocked".
 - Check `docs/PROGRESS.md` any time to see where it's up to and what to test.
 - Reference material from the store is in `reports_samples/` (BMS report PDFs and
-  screenshots). Keep it out of git.
+  screenshots). Keep it out of git. The reports are summarised in `docs/BMS_REPORTS.md`;
+  read that, not the PDFs.
 
 | # | Prompt | What it gives you |
 |---|---|---|
@@ -725,8 +726,13 @@ the recorded shortfall, and every entry balances.
 
 Task: the reports an accountant and owner need, and closing periods.
 
-Use the BMS report samples in reports_samples/ as the reference for which reports shops
-expect and what columns they show; match their content, not their look.
+docs/BMS_REPORTS.md is the checklist: every report there with an ID (P-, S-, ST-, A-, T-)
+is in scope, with the columns, grouping and totals it lists. Match content, not look; its
+section 3 lists BMS errors to test against, section 4 what the reports need underneath
+(including FIFO quantity layers; cost stays weighted average). Reports marked "needs
+P14a" or "needs P14c" are built in those prompts: make each report one config entry so
+they are quick to add. Use the defaults in its section 10 for the open questions. Don't
+open reports_samples/.
 
 Reports (per branch and consolidated, any date range, PDF and Excel export, Dhaka
 dates):
@@ -795,6 +801,8 @@ Flow: Quotation → Sales order → Challan (goods leave) → Bill. Any step can
   stock at cost to "goods delivered not invoiced"; the bill clears both. Tests that
   everything balances.
 - Printables for all four documents (layouts in P16).
+- The sales-order, delivery and challan reports marked "needs P14a" in
+  docs/BMS_REPORTS.md.
 
 Done when: I quote a company 10 keyboards, convert to an order with ৳5,000 advance,
 the counter shows them reserved, I deliver 6 on a challan, bill those 6 using the
@@ -866,6 +874,7 @@ Trader Search.
   counter respects (blocked customers can't buy on due).
 - Move a customer's home branch (BMS "Branch Wise Trader Transfer"), with their dues.
 - Customer search across all fields (name, phone, company, SR, area, type).
+- The SR/MPO reports marked "needs P14c" in docs/BMS_REPORTS.md.
 
 Done when: an SR with a ৳5 lakh monthly target sees 40% achieved on their phone after
 I record their dealers' orders, a dealer with a ৳50,000 security deposit shows it on
@@ -924,7 +933,8 @@ none>, <SCANNER MODEL>, and still works for other shops' hardware.
   barcode for returns. Warranty lines with serials and end dates.
 - Other printables in the same style: quotation, sales order, challan (P14a), GRN, PO,
   transfer slip, claim slip, payment and advance receipts, salary slip (P14b),
-  customer/supplier statements. Check reports_samples/ for the layouts shops are used to.
+  customer/supplier statements. Report and statement printouts follow sections 2 and 3
+  of docs/BMS_REPORTS.md (same header everywhere, A4, Dhaka dates).
 - Near one-click printing: dedicated print pages, correct @page size, documented Chrome
   kiosk-printing setup for counter PCs.
 - Barcode labels (Code128) for products without one and for serial items; warranty
@@ -1005,6 +1015,7 @@ products, sells one at each branch, and I see the shop in the admin area.
 ## Coverage check against BMS
 
 With P14a–P14c, every BMS module we photographed has an equivalent. Not seen in the
-photos, so check before launch (P17): the inside of each BMS report (use
-reports_samples/), the RMA screens themselves, and BMS's admin settings. Anything found
+photos, so check before launch (P17): the RMA screens themselves, BMS's admin settings,
+and the report lists not yet photographed (docs/BMS_REPORTS.md section 10). The inside of
+the BMS reports is covered in docs/BMS_REPORTS.md. Anything found
 there becomes a new prompt in this format, slotted in before P17.

@@ -46,5 +46,5 @@ One line per prompt from docs/BUILD_PROMPTS.md, newest at the bottom.
   from the BMS screenshots. **When the real export exists: put it in `bms-export/`, run
   the wizard, and check the auto-mapping actually matches.** Anything it misses is one
   line in `src/lib/import/schema.ts`.
-- Before P14: Claude (chat) reviews reports_samples/ (~100 BMS report PDFs + 5 images)
-  and writes docs/BMS_REPORTS.md. P14 and P16 should use that file, not the PDFs.
+- Done: docs/BMS_REPORTS.md written from all 100 BMS report PDFs and the menu photos.
+  P14, P14a, P14c and P16 now point at it. Its section 10 lists questions for the store.
