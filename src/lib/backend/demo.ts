@@ -21,7 +21,11 @@ import type {
   StatementEntry, EmiPlan, PriceHelp, SaleField,
   ClaimRow, ClaimStatus, ProblemType, SupplierRmaRow, Technician, WarrantyHit,
   Dashboard, DashboardDetailRow,
+  AccountLedger, AccountNature, AccountRole, BackfillResult, ChartAccount, ChequeBookRow,
+  ChequeLayout, ChequePrint, ChequeRow, ChequeStatus, EntryStatus, LedgerLine,
+  MoneyBalance, TrialBalance, TrialBalanceRow, VoucherRow,
 } from "../types";
+import { DEFAULT_CHEQUE_LAYOUT, takaInWords } from "../cheque";
 import type { ImportKind } from "../import/schema";
 import type { Backend } from "./types";
 import {
@@ -82,6 +86,7 @@ export function createDemoBackend(): Backend {
     invoicePrefix: "DEMO", currency: "BDT", aitPct: 0, poApprovalLimit: 0,
     cashShortLimit: 50, returnDays: 7, saleApprovalLimit: 0, approveAllSales: false,
     cardChargeMode: "absorb" as "absorb" | "add", claimApproval: false,
+    voucherApproval: false,
   };
   // `active` defaults to true in every setup table, so the demo rows have to say so
   // too or the whole list reads as switched off.
@@ -123,7 +128,11 @@ export function createDemoBackend(): Backend {
       row({ name: "Visa", charge_pct: 2 }), row({ name: "Mastercard", charge_pct: 2 }),
       row({ name: "American Express", charge_pct: 3 }),
     ],
-    bank_accounts: [row({ name: "Counter cash drawer", kind: "cash_drawer" })],
+    bank_accounts: [
+      row({ name: "Counter cash drawer", kind: "cash_drawer" }),
+      // A real shop adds its own; the demo needs one so cheques can be tried.
+      row({ name: "City Bank — current", kind: "bank" }),
+    ],
     warranty_terms: [
       row({ name: "No warranty", months: 0, receipt_text: "No warranty on this item." }),
       row({ name: "6 months replacement", months: 6, receipt_text: "Replacement within 6 months for manufacturing faults." }),
@@ -374,6 +383,176 @@ export function createDemoBackend(): Backend {
   const sales: DemoSale[] = [];
   let returnCounter = 1;
   const costs: Record<string, number> = { a1: 250 };
+
+  // --- Accounts (P13) --------------------------------------------------------
+  // The same double entry the database does: every taka written twice, and nothing
+  // reaches the journal except through `post()`, which refuses an entry that does not
+  // balance. The demo would otherwise be able to show figures the real shop cannot.
+  interface DemoAccount {
+    id: string; code: string; name: string; role: AccountRole | null;
+    group: string; nature: AccountNature; active: boolean;
+    branchId: string | null; bankAccountId: string | null;
+  }
+  interface DemoLine {
+    accountId: string; branchId: string; debit: number; credit: number;
+    note: string | null; customerId: string | null; supplierId: string | null;
+  }
+  interface DemoEntry {
+    id: string; entryNo: string; date: string; narration: string;
+    sourceKind: string; sourceId: string | null; status: EntryStatus;
+    branchId: string; otherBranchId: string | null; acceptedAt: string | null;
+    reversesId: string | null; interKind: "fund" | "cost" | null;
+    interAccountId: string | null; who: string; lines: DemoLine[];
+  }
+  const CHART: [string, string, string, AccountNature, AccountRole | null][] = [
+    ["1100", "Cash in hand", "Current assets", "asset", "cash_in_hand"],
+    ["1200", "Bank accounts", "Current assets", "asset", "bank"],
+    ["1300", "bKash / Nagad", "Current assets", "asset", "wallet"],
+    ["1400", "Money owed by customers", "Current assets", "asset", "receivable"],
+    ["1500", "Stock", "Current assets", "asset", "inventory"],
+    ["2100", "Money owed to suppliers", "Current liabilities", "liability", "payable"],
+    ["2200", "VAT payable", "Current liabilities", "liability", "vat_payable"],
+    ["2300", "Between branches", "Current liabilities", "liability", "inter_branch"],
+    ["3100", "Owner's capital", "Equity", "equity", "opening_equity"],
+    ["4100", "Sales", "Income", "income", "sales"],
+    ["4200", "Sales returns", "Income", "income", "sales_return"],
+    ["5100", "Cost of goods sold", "Direct costs", "expense", "cogs"],
+    ["5200", "Discounts given", "Direct costs", "expense", "discount_given"],
+    ["6100", "Tea and snacks", "Running costs", "expense", null],
+    ["6200", "Transport", "Running costs", "expense", null],
+    ["6300", "Electricity", "Running costs", "expense", null],
+    ["6400", "Shop rent", "Running costs", "expense", null],
+    ["6500", "Card charges", "Running costs", "expense", "card_charge"],
+    ["6900", "Other expenses", "Running costs", "expense", null],
+  ];
+  const accounts: DemoAccount[] = CHART.flatMap(([code, name, group, nature, role]): DemoAccount[] =>
+    role === "cash_in_hand"
+      // One drawer per place: the done-when is that this balance matches what was counted.
+      ? branches.map((b) => ({
+          id: `ac-${code}-${b.id}`, code: `${code}-${b.code}`,
+          name: `${name} — ${b.name}`, role, group, nature, active: true,
+          branchId: b.id, bankAccountId: null,
+        }))
+      : [{ id: `ac-${code}`, code, name, role, group, nature, active: true,
+           branchId: null, bankAccountId: null }]);
+  const journal: DemoEntry[] = [];
+  let entryCounter = 1;
+  const chequeBooks: (ChequeBookRow & { shopPrefix: string | null })[] = [];
+  const cheques: (ChequeRow & {
+    branchId: string; bankAccountId: string | null; bookId: string | null;
+    entryId: string | null;
+  })[] = [];
+  const chequeLayouts: Record<string, ChequeLayout> = {};
+
+  const accountFor = (role: AccountRole, branchId?: string | null): DemoAccount | undefined =>
+    accounts.find((a) => a.role === role && a.active
+      && (a.branchId === null || a.branchId === branchId))
+    ?? accounts.find((a) => a.role === role && a.active);
+
+  const accountForMethod = (method: string, branchId: string): DemoAccount | undefined =>
+    accountFor(method === "cash" ? "cash_in_hand"
+               : ["bkash", "nagad", "rocket"].includes(method) ? "wallet" : "bank", branchId);
+
+  /** The one way an entry is written here, exactly as post_entry() is there. */
+  const post = (input: {
+    branchId: string; date?: string | null; narration: string;
+    sourceKind: string; sourceId?: string | null; status?: EntryStatus;
+    otherBranchId?: string | null;
+    lines: { accountId?: string | null; role?: AccountRole; branchId?: string | null;
+             debit?: number; credit?: number; note?: string | null;
+             customerId?: string | null; supplierId?: string | null }[];
+  }): DemoEntry => {
+    const lines: DemoLine[] = [];
+    for (const l of input.lines) {
+      const debit = roundTaka(l.debit ?? 0);
+      const credit = roundTaka(l.credit ?? 0);
+      // A zero line is not an error, it is just nothing: a sale with no VAT has one.
+      if (debit === 0 && credit === 0) continue;
+      const acc = l.accountId
+        ? accounts.find((a) => a.id === l.accountId)
+        : accountFor(l.role as AccountRole, l.branchId ?? input.branchId);
+      if (!acc) fail(`NO_ACCOUNT_FOR:${l.role ?? "that line"}`);
+      lines.push({
+        accountId: acc!.id, branchId: l.branchId ?? input.branchId, debit, credit,
+        note: l.note ?? null, customerId: l.customerId ?? null,
+        supplierId: l.supplierId ?? null,
+      });
+    }
+    if (lines.length === 0) fail("NOTHING_TO_POST");
+    const debits = roundTaka(lines.reduce((t, l) => t + l.debit, 0));
+    const credits = roundTaka(lines.reduce((t, l) => t + l.credit, 0));
+    if (debits !== credits) fail("ENTRY_DOES_NOT_BALANCE");
+    const entry: DemoEntry = {
+      id: `je-${entryCounter}`,
+      entryNo: `VOU-${branches.find((b) => b.id === input.branchId)?.code ?? "XX"}-${
+        String(new Date().getFullYear())}${String(entryCounter).padStart(6, "0")}`,
+      date: input.date ?? dhakaToday(),
+      narration: input.narration, sourceKind: input.sourceKind,
+      sourceId: input.sourceId ?? null, status: input.status ?? "posted",
+      branchId: input.branchId, otherBranchId: input.otherBranchId ?? null,
+      acceptedAt: null, reversesId: null, interKind: null, interAccountId: null,
+      who: staff.name, lines,
+    };
+    entryCounter += 1;
+    journal.push(entry);
+    return entry;
+  };
+
+  const accountsOn = () => {
+    if (!features.accounts) fail("FEATURE_OFF:accounts");
+  };
+
+  const toVoucherRow = (e: DemoEntry): VoucherRow => ({
+    id: e.id, entryNo: e.entryNo, date: e.date, narration: e.narration,
+    sourceKind: e.sourceKind, sourceId: e.sourceId, status: e.status,
+    branch: branches.find((b) => b.id === e.branchId)?.name ?? null,
+    branchId: e.branchId,
+    otherBranch: branches.find((b) => b.id === e.otherBranchId)?.name ?? null,
+    acceptedAt: e.acceptedAt, reversesId: e.reversesId, who: e.who,
+    amount: roundTaka(e.lines.reduce((t, l) => t + l.debit, 0)),
+    lines: e.lines.map((l) => {
+      const acc = accounts.find((a) => a.id === l.accountId)!;
+      return {
+        account: acc.name, code: acc.code, debit: l.debit, credit: l.credit,
+        note: l.note,
+        party: customers.find((c) => c.id === l.customerId)?.name
+          ?? suppliers.find((x) => x.id === l.supplierId)?.name ?? null,
+      };
+    }),
+  });
+
+  /** What a sale, a return or an expense does to the books. */
+  const postSale = (sale: DemoSale) => {
+    if (!features.accounts) return;
+    const goods = roundTaka(sale.total - sale.vatAmount - (sale.chargesAmount ?? 0));
+    post({
+      branchId: sale.branchId, date: dhakaDate(sale.createdAt),
+      narration: `Sale ${sale.invoiceNo}`, sourceKind: "sale", sourceId: sale.id,
+      lines: [
+        { accountId: accountForMethod(sale.paymentMethod, sale.branchId)?.id,
+          debit: sale.paidAmount, note: `Paid on ${sale.invoiceNo}` },
+        { role: "receivable", debit: sale.dueAmount, customerId: sale.customerId,
+          note: `On due from ${sale.invoiceNo}` },
+        { role: "discount_given", debit: sale.discountAmount,
+          note: `Discount on ${sale.invoiceNo}` },
+        { role: "sales", credit: roundTaka(goods + sale.discountAmount), note: sale.invoiceNo },
+        { role: "vat_payable", credit: sale.vatAmount, note: `VAT on ${sale.invoiceNo}` },
+        { role: "sales", credit: sale.chargesAmount ?? 0,
+          note: `Charges on ${sale.invoiceNo}` },
+      ],
+    });
+    // The goods leaving the shelf is its own event, at the cost captured on the line.
+    const cogs = roundTaka(sale.items.reduce(
+      (t: number, l: SaleDetailLine) => t + (sale.lineCosts[l.id] ?? 0) * l.qty, 0));
+    if (cogs > 0) {
+      post({
+        branchId: sale.branchId, date: dhakaDate(sale.createdAt),
+        narration: `Cost of goods on ${sale.invoiceNo}`,
+        sourceKind: "sale", sourceId: sale.id,
+        lines: [{ role: "cogs", debit: cogs }, { role: "inventory", credit: cogs }],
+      });
+    }
+  };
 
   const noteMovement = (m: StockMovementRow) => movements.unshift(m);
 
@@ -763,6 +942,8 @@ export function createDemoBackend(): Backend {
           detailLines.map((l) => [l.id, l.serials.map((x) => x.id)])),
         lineCosts: costAtSale,
       });
+      // The books keep themselves, the way the sales_post_to_accounts trigger does.
+      postSale(sales[0]);
 
       return {
         id: saleId, invoiceNo, createdAt,
@@ -929,6 +1110,8 @@ export function createDemoBackend(): Backend {
           ? (values.card_charge_mode as "absorb" | "add") : shopDetails.cardChargeMode,
         claimApproval: values.claim_approval !== undefined
           ? Boolean(values.claim_approval) : shopDetails.claimApproval,
+        voucherApproval: values.voucher_approval !== undefined
+          ? Boolean(values.voucher_approval) : shopDetails.voucherApproval,
       });
       staff.shopName = shopDetails.name;
     },
@@ -3203,7 +3386,467 @@ export function createDemoBackend(): Backend {
       if (allowed && at === -1) routes.push({ fromBranchId, toBranchId });
       if (!allowed && at !== -1) routes.splice(at, 1);
     },
+
+    // --- Accounts (P13) ---
+
+    async chartOfAccounts(): Promise<ChartAccount[]> {
+      accountsOn();
+      return accounts.map((a) => ({
+        id: a.id, code: a.code, name: a.name, role: a.role, group: a.group,
+        nature: a.nature, active: a.active, branchId: a.branchId,
+        branch: branches.find((b) => b.id === a.branchId)?.name ?? null,
+      })).sort((x, y) => x.code.localeCompare(y.code));
+    },
+
+    async trialBalance(branchId, from, to): Promise<TrialBalance> {
+      accountsOn();
+      const within = (e: DemoEntry) =>
+        e.status === "posted"
+        && (!from || e.date >= from) && (!to || e.date <= to)
+        && (!branchId || e.branchId === branchId);
+      const rows: TrialBalanceRow[] = [];
+      for (const a of accounts) {
+        let debit = 0;
+        let credit = 0;
+        for (const e of journal.filter(within)) {
+          for (const l of e.lines.filter((x) => x.accountId === a.id)) {
+            debit += l.debit;
+            credit += l.credit;
+          }
+        }
+        if (debit === 0 && credit === 0) continue;
+        rows.push({
+          accountId: a.id, code: a.code, name: a.name, group: a.group, nature: a.nature,
+          branch: branches.find((b) => b.id === a.branchId)?.name ?? null,
+          debit: roundTaka(debit), credit: roundTaka(credit),
+          // Assets and expenses are "up" on the debit side; everything else the other way.
+          balance: roundTaka(["asset", "expense"].includes(a.nature)
+            ? debit - credit : credit - debit),
+        });
+      }
+      rows.sort((x, y) => x.code.localeCompare(y.code));
+      const totalDebit = roundTaka(rows.reduce((t, r) => t + r.debit, 0));
+      const totalCredit = roundTaka(rows.reduce((t, r) => t + r.credit, 0));
+      return {
+        from: from ?? null, to: to ?? null,
+        branch: branches.find((b) => b.id === branchId)?.name ?? null,
+        accounts: rows, totalDebit, totalCredit, balanced: totalDebit === totalCredit,
+      };
+    },
+
+    async accountLedger(accountId, from, to, branchId): Promise<AccountLedger> {
+      accountsOn();
+      const acc = accounts.find((a) => a.id === accountId);
+      if (!acc) fail("ACCOUNT_NOT_FOUND");
+      const up = ["asset", "expense"].includes(acc!.nature) ? 1 : -1;
+      const mine = (e: DemoEntry) =>
+        e.status === "posted" && (!branchId || e.branchId === branchId);
+      let opening = 0;
+      const lines: LedgerLine[] = [];
+      for (const e of journal.filter(mine)) {
+        for (const l of e.lines.filter((x) => x.accountId === accountId)) {
+          if (from && e.date < from) { opening += up * (l.debit - l.credit); continue; }
+          if (to && e.date > to) continue;
+          lines.push({
+            entryId: e.id, entryNo: e.entryNo, date: e.date, narration: e.narration,
+            sourceKind: e.sourceKind, sourceId: e.sourceId,
+            branch: branches.find((b) => b.id === l.branchId)?.name ?? null,
+            debit: l.debit, credit: l.credit, note: l.note,
+            party: customers.find((c) => c.id === l.customerId)?.name
+              ?? suppliers.find((x) => x.id === l.supplierId)?.name ?? null,
+            who: e.who,
+          });
+        }
+      }
+      lines.sort((x, y) => x.date.localeCompare(y.date));
+      return {
+        account: {
+          id: acc!.id, code: acc!.code, name: acc!.name, nature: acc!.nature,
+          branch: branches.find((b) => b.id === acc!.branchId)?.name ?? null,
+        },
+        opening: roundTaka(opening), lines,
+      };
+    },
+
+    async voucherList(input = {}): Promise<VoucherRow[]> {
+      accountsOn();
+      const from = input.from ?? dhakaDate(daysAgo(30));
+      const to = input.to ?? dhakaToday();
+      return journal
+        .filter((e) => e.date >= from && e.date <= to
+          && (!input.branchId || e.branchId === input.branchId
+              || e.otherBranchId === input.branchId)
+          && (!input.status || e.status === input.status)
+          && (!input.source || e.sourceKind === input.source))
+        .sort((x, y) => y.date.localeCompare(x.date) || Number(y.id.slice(3)) - Number(x.id.slice(3)))
+        .map(toVoucherRow);
+    },
+
+    async moneyBalances(branchId): Promise<MoneyBalance[]> {
+      accountsOn();
+      return accounts
+        .filter((a) => a.active && ["cash_in_hand", "bank", "wallet"].includes(a.role ?? "")
+          && (!branchId || a.branchId === null || a.branchId === branchId))
+        .map((a) => {
+          let balance = 0;
+          for (const e of journal.filter((x) => x.status === "posted"
+                                           && (!branchId || x.branchId === branchId))) {
+            for (const l of e.lines.filter((x) => x.accountId === a.id)) {
+              balance += l.debit - l.credit;
+            }
+          }
+          const out = cheques.filter((c) => c.bankAccountId === a.bankAccountId
+            && c.direction === "issued" && c.status === "issued");
+          const inn = cheques.filter((c) => c.bankAccountId === a.bankAccountId
+            && c.direction === "received" && c.status === "issued");
+          return {
+            accountId: a.id, code: a.code, name: a.name, role: a.role,
+            branch: branches.find((b) => b.id === a.branchId)?.name ?? null,
+            bankAccountId: a.bankAccountId,
+            balance: roundTaka(balance),
+            unclearedOut: roundTaka(out.reduce((t, c) => t + c.amount, 0)),
+            unclearedIn: roundTaka(inn.reduce((t, c) => t + c.amount, 0)),
+          };
+        })
+        .sort((x, y) => x.code.localeCompare(y.code));
+    },
+
+    async saveVoucher(input): Promise<{ id: string; entryNo: string; status: string }> {
+      accountsOn();
+      branchOr404(input.branchId);
+      const status: EntryStatus = shopDetails.voucherApproval ? "awaiting_approval" : "posted";
+      let lines: Parameters<typeof post>[0]["lines"];
+      if (input.kind === "journal") {
+        if (!input.lines?.length) fail("VOUCHER_NEEDS_LINES");
+        lines = input.lines!.map((l) => ({
+          accountId: l.accountId, debit: l.debit ?? 0, credit: l.credit ?? 0,
+          note: l.note ?? null, customerId: l.customerId ?? null,
+          supplierId: l.supplierId ?? null,
+        }));
+      } else {
+        if (!(input.amount && input.amount > 0)) fail("BAD_PAYMENT_AMOUNT");
+        if (!input.fromAccount || !input.toAccount) fail("VOUCHER_NEEDS_TWO_ACCOUNTS");
+        // A receipt brings money in, a payment sends it out, a contra moves it between
+        // the shop's own pockets. All three are two accounts and one amount.
+        const debit = input.kind === "payment" ? input.toAccount : input.toAccount;
+        const credit = input.fromAccount;
+        lines = [
+          { accountId: debit, debit: input.amount!, customerId: input.customerId ?? null,
+            supplierId: input.supplierId ?? null },
+          { accountId: credit, credit: input.amount! },
+        ];
+      }
+      const entry = post({
+        branchId: input.branchId, date: input.date ?? null,
+        narration: input.narration ?? `${input.kind} voucher`,
+        sourceKind: "voucher", status, lines,
+      });
+      return { id: entry.id, entryNo: entry.entryNo, status };
+    },
+
+    async approveVoucher(entryId, approve, reason): Promise<void> {
+      accountsOn();
+      const e = journal.find((x) => x.id === entryId);
+      if (!e) fail("ENTRY_NOT_FOUND");
+      if (e!.status !== "awaiting_approval") fail("VOUCHER_NOT_WAITING");
+      e!.status = approve ? "posted" : "cancelled";
+      e!.narration = reason ? `${e!.narration} — ${reason}` : e!.narration;
+    },
+
+    async reverseEntry(entryId, reason): Promise<{ entryNo: string }> {
+      accountsOn();
+      if (!reason?.trim()) fail("REVERSAL_REASON_REQUIRED");
+      const e = journal.find((x) => x.id === entryId);
+      if (!e) fail("ENTRY_NOT_FOUND");
+      if (e!.status !== "posted") fail("ONLY_POSTED_ENTRIES_REVERSE");
+      if (journal.some((x) => x.reversesId === e!.id)) fail("ALREADY_REVERSED");
+      // A mirror image. The first entry is never touched: that is what an audit trail is.
+      const mirror = post({
+        branchId: e!.branchId, narration: `Reversal of ${e!.entryNo}: ${reason}`,
+        sourceKind: "reversal", sourceId: e!.id,
+        lines: e!.lines.map((l) => ({
+          accountId: l.accountId, branchId: l.branchId,
+          debit: l.credit, credit: l.debit, note: l.note,
+          customerId: l.customerId, supplierId: l.supplierId,
+        })),
+      });
+      mirror.reversesId = e!.id;
+      return { entryNo: mirror.entryNo };
+    },
+
+    async interBranchEntry(input): Promise<{ id: string; entryNo: string; waitingOn: string | null }> {
+      accountsOn();
+      branchOr404(input.fromBranchId);
+      if (input.fromBranchId === input.toBranchId) fail("SAME_BRANCH");
+      if (!(input.amount > 0)) fail("BAD_PAYMENT_AMOUNT");
+      const to = branches.find((b) => b.id === input.toBranchId && b.active);
+      if (!to) fail("BRANCH_NOT_FOUND");
+      const entry = post({
+        branchId: input.fromBranchId,
+        narration: input.narration ?? "Sent to another branch",
+        sourceKind: "fund_transfer", otherBranchId: input.toBranchId,
+        lines: [
+          { role: "inter_branch", debit: input.amount, note: "Owed by the other branch" },
+          { accountId: input.fromAccount
+              ?? accountFor("cash_in_hand", input.fromBranchId)?.id,
+            credit: input.amount },
+        ],
+      });
+      entry.interKind = input.kind ?? "fund";
+      entry.interAccountId = input.toAccount ?? null;
+      return { id: entry.id, entryNo: entry.entryNo, waitingOn: to!.name };
+    },
+
+    async acceptInterBranch(entryId): Promise<{ accepted: string; amount: number }> {
+      accountsOn();
+      const e = journal.find((x) => x.id === entryId);
+      if (!e) fail("ENTRY_NOT_FOUND");
+      if (!e!.otherBranchId) fail("NOT_INTER_BRANCH");
+      if (e!.acceptedAt) fail("ALREADY_ACCEPTED");
+      const amount = roundTaka(e!.lines.reduce((t, l) => t + l.debit, 0));
+      // Money sent is money received; a bill paid for them is their expense, not cash
+      // they can count. The sender said which it was.
+      post({
+        branchId: e!.otherBranchId!,
+        narration: `Received from ${branches.find((b) => b.id === e!.branchId)?.name ?? "another branch"}`,
+        sourceKind: "fund_transfer", sourceId: e!.id,
+        lines: [
+          { accountId: e!.interAccountId
+              ?? accountFor("cash_in_hand", e!.otherBranchId)?.id,
+            debit: amount },
+          { role: "inter_branch", credit: amount, note: `Settled with ${e!.entryNo}` },
+        ],
+      });
+      e!.acceptedAt = new Date().toISOString();
+      return { accepted: e!.entryNo, amount };
+    },
+
+    async listCheques(input = {}): Promise<ChequeRow[]> {
+      accountsOn();
+      const today = dhakaToday();
+      return cheques
+        .filter((c) => (!input.direction || c.direction === input.direction)
+          && (!input.status || c.status === input.status)
+          && (!input.from || c.chequeDate >= input.from)
+          && (!input.to || c.chequeDate <= input.to))
+        .map((c) => ({ ...c, overdue: c.status === "issued" && c.chequeDate < today }))
+        .sort((x, y) => y.chequeDate.localeCompare(x.chequeDate));
+    },
+
+    async listChequeBooks(): Promise<ChequeBookRow[]> {
+      accountsOn();
+      return chequeBooks.map((b) => ({
+        ...b, left: Math.max(b.lastNumber - b.nextNumber + 1, 0),
+      }));
+    },
+
+    async saveChequeBook(bankAccountId, first, last, prefix): Promise<void> {
+      accountsOn();
+      if (!(first > 0) || last < first) fail("BAD_CHEQUE_RANGE");
+      const bank = lists.bank_accounts.find((b) => b.id === bankAccountId);
+      if (!bank) fail("ACCOUNT_NOT_FOUND");
+      chequeBooks.push({
+        id: `cb-${chequeBooks.length + 1}`, bankAccountId,
+        bank: String(bank!.name), prefix: prefix?.trim() || null,
+        firstNumber: first, lastNumber: last, nextNumber: first, active: true,
+        left: last - first + 1, shopPrefix: prefix?.trim() || null,
+      });
+    },
+
+    async saveCheque(input): Promise<{ id: string; chequeNo: string; amount: number }> {
+      accountsOn();
+      branchOr404(input.branchId);
+      if (!["issued", "received"].includes(input.direction)) {
+        fail(`BAD_CHEQUE_DIRECTION:${input.direction}`);
+      }
+      if (!(input.amount > 0)) fail("BAD_PAYMENT_AMOUNT");
+      if (input.direction === "issued" && !input.supplierId && !input.payee?.trim()) {
+        fail("CHEQUE_NEEDS_PAYEE");
+      }
+      let no = input.chequeNo?.trim() || null;
+      const book = chequeBooks.find((b) => b.id === input.bookId);
+      if (input.direction === "issued" && !no) {
+        if (!book) fail("CHEQUE_NEEDS_NUMBER");
+        if (book!.nextNumber > book!.lastNumber) fail("CHEQUE_BOOK_FINISHED");
+        no = `${book!.prefix ?? ""}${book!.nextNumber}`;
+        book!.nextNumber += 1;
+      }
+      if (!no) fail("CHEQUE_NEEDS_NUMBER");
+      const bankAccountId = input.bankAccountId ?? book?.bankAccountId ?? null;
+
+      // A cheque is a promise, not money: it posts against the party now, and the bank
+      // balance only moves when it clears. A payment already on the books takes its own
+      // entry rather than a second one, or paying by cheque would post twice.
+      let entryId: string | null = null;
+      if (!input.supplierPaymentId && !input.customerPaymentId) {
+        if (input.direction === "issued" && input.supplierId) {
+          entryId = post({
+            branchId: input.branchId, date: input.chequeDate,
+            narration: `Cheque ${no} to supplier`, sourceKind: "cheque",
+            lines: [
+              { role: "payable", debit: input.amount, supplierId: input.supplierId },
+              { role: "bank", credit: input.amount, note: `Cheque ${no}` },
+            ],
+          }).id;
+        } else if (input.direction === "received" && input.customerId) {
+          entryId = post({
+            branchId: input.branchId, date: input.chequeDate,
+            narration: `Cheque ${no} from customer`, sourceKind: "cheque",
+            lines: [
+              { role: "bank", debit: input.amount, note: `Cheque ${no}` },
+              { role: "receivable", credit: input.amount, customerId: input.customerId },
+            ],
+          }).id;
+        }
+      }
+
+      const id = `cq-${cheques.length + 1}`;
+      cheques.push({
+        id, direction: input.direction, chequeNo: no!, amount: input.amount,
+        chequeDate: input.chequeDate, status: "issued",
+        payee: input.payee ?? suppliers.find((x) => x.id === input.supplierId)?.name ?? null,
+        drawnOn: input.drawnOn ?? null,
+        bank: lists.bank_accounts.find((b) => b.id === bankAccountId)?.name as string ?? null,
+        branch: branches.find((b) => b.id === input.branchId)?.name ?? null,
+        customerId: input.customerId ?? null, supplierId: input.supplierId ?? null,
+        bouncedReason: null, clearedAt: null, note: input.note ?? null, who: staff.name,
+        overdue: false, branchId: input.branchId, bankAccountId,
+        bookId: input.bookId ?? null, entryId,
+      });
+      return { id, chequeNo: no!, amount: input.amount };
+    },
+
+    async setChequeStatus(chequeId, status, reason): Promise<{ chequeNo: string; status: ChequeStatus; reversed: boolean }> {
+      accountsOn();
+      const c = cheques.find((x) => x.id === chequeId);
+      if (!c) fail("CHEQUE_NOT_FOUND");
+      if (c!.status !== "issued") fail(`CHEQUE_ALREADY_SETTLED:${c!.status}`);
+      if (!["cleared", "bounced", "cancelled"].includes(status)) {
+        fail(`BAD_CHEQUE_STATUS:${status}`);
+      }
+      if (status === "bounced" && !reason?.trim()) fail("BOUNCE_REASON_REQUIRED");
+      c!.status = status;
+      c!.clearedAt = status === "cleared" ? new Date().toISOString() : null;
+      c!.bouncedReason = status === "bounced" ? reason! : null;
+      // A bounce means the money never arrived, so the books must stop saying it did.
+      const reversed = ["bounced", "cancelled"].includes(status) && Boolean(c!.entryId);
+      if (reversed) {
+        await api.reverseEntry(c!.entryId!, status === "bounced"
+          ? `Cheque ${c!.chequeNo} bounced: ${reason}`
+          : `Cheque ${c!.chequeNo} cancelled`);
+      }
+      return { chequeNo: c!.chequeNo, status, reversed };
+    },
+
+    async chequePrint(chequeId): Promise<ChequePrint> {
+      accountsOn();
+      const c = cheques.find((x) => x.id === chequeId);
+      if (!c) fail("CHEQUE_NOT_FOUND");
+      if (c!.direction !== "issued") fail("ONLY_ISSUED_CHEQUES_PRINT");
+      const measured = c!.bankAccountId ? Boolean(chequeLayouts[c!.bankAccountId]) : false;
+      return {
+        chequeNo: c!.chequeNo, date: c!.chequeDate, payee: c!.payee,
+        amount: c!.amount, amountWords: takaInWords(c!.amount), bank: c!.bank,
+        measured,
+        layout: (c!.bankAccountId && chequeLayouts[c!.bankAccountId]) || DEFAULT_CHEQUE_LAYOUT,
+      };
+    },
+
+    async saveChequeLayout(bankAccountId, values): Promise<void> {
+      accountsOn();
+      chequeLayouts[bankAccountId] = {
+        ...(chequeLayouts[bankAccountId] ?? DEFAULT_CHEQUE_LAYOUT),
+        ...(values as Partial<ChequeLayout>),
+      };
+    },
+
+    async recordExpense(input): Promise<void> {
+      branchOr404(input.branchId);
+      if (!(input.amount > 0)) fail("BAD_PAYMENT_AMOUNT");
+      if (!input.categoryId) fail("EXPENSE_CATEGORY_REQUIRED");
+      const cat = lists.transaction_categories.find((c) => c.id === input.categoryId);
+      if (!cat) fail("CATEGORY_NOT_FOUND");
+      const method = input.method ?? "cash";
+      // Cash out of the drawer is the drawer's business, and P8 already owns that rule.
+      if (method === "cash") {
+        await api.cashMovement({
+          branchId: input.branchId, direction: "out", amount: input.amount,
+          reason: "expense", categoryId: input.categoryId,
+          note: input.note ?? String(cat!.name),
+        });
+        if (!features.accounts) return;
+        post({
+          branchId: input.branchId, date: input.date ?? null,
+          narration: input.note ? `${cat!.name} — ${input.note}` : String(cat!.name),
+          sourceKind: "cash_movement",
+          lines: [
+            { accountId: expenseAccountFor(String(cat!.name)), debit: input.amount },
+            { role: "cash_in_hand", credit: input.amount },
+          ],
+        });
+        return;
+      }
+      accountsOn();
+      post({
+        branchId: input.branchId, date: input.date ?? null,
+        narration: input.note ? `${cat!.name} — ${input.note}` : String(cat!.name),
+        sourceKind: "expense",
+        lines: [
+          { accountId: expenseAccountFor(String(cat!.name)), debit: input.amount,
+            supplierId: input.supplierId ?? null },
+          { accountId: accountForMethod(method, input.branchId)?.id, credit: input.amount },
+        ],
+      });
+    },
+
+    async saveAccount(id, values): Promise<void> {
+      accountsOn();
+      if (staff.role !== "owner") fail("NOT_OWNER");
+      const name = String(values.name ?? "").trim();
+      const code = String(values.code ?? "").trim();
+      if (id) {
+        const a = accounts.find((x) => x.id === id);
+        if (!a) fail("ACCOUNT_NOT_FOUND");
+        if (name) a!.name = name;
+        if (code) a!.code = code;
+        if (values.active != null) a!.active = Boolean(values.active);
+        return;
+      }
+      if (!name) fail("NAME_REQUIRED");
+      if (!code) fail("ACCOUNT_CODE_REQUIRED");
+      const group = String(values.group ?? "Running costs");
+      accounts.push({
+        id: `ac-${code}`, code, name, role: null, group,
+        nature: (values.nature as AccountNature) ?? "expense", active: true,
+        branchId: (values.branchId as string | null) ?? null, bankAccountId: null,
+      });
+    },
+
+    async backfillAccounts(from): Promise<BackfillResult> {
+      accountsOn();
+      if (staff.role !== "owner") fail("NOT_OWNER");
+      // The demo posts as it goes, so there is nothing behind to catch up on. It still
+      // posts anything that happened before the switch was turned on.
+      let posted = 0;
+      for (const sale of sales) {
+        if (sale.status !== "completed") continue;
+        if (journal.some((e) => e.sourceKind === "sale" && e.sourceId === sale.id)) continue;
+        postSale(sale);
+        posted += 1;
+      }
+      return {
+        from: from ?? "2000-01-01", sales: posted, grns: 0, supplierReturns: 0,
+        saleReturns: 0, customerPayments: 0, supplierPayments: 0, cashMovements: 0,
+      };
+    },
   };
+
+  /** An expense category becomes the account of the same name, or Other expenses. */
+  function expenseAccountFor(categoryName: string): string {
+    const match = accounts.find(
+      (a) => a.active && a.name.toLowerCase() === categoryName.toLowerCase());
+    return (match ?? accounts.find((a) => a.code === "6900"))!.id;
+  }
 
   return api;
 }

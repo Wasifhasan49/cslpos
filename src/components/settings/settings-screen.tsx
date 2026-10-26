@@ -317,6 +317,13 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
     return_days: String(s.returnDays),
     sale_approval_limit: String(s.saleApprovalLimit),
   });
+  // The yes/no shop rules. Kept apart from the text boxes because a checkbox carries a
+  // boolean, not a string, and they go to the same saver.
+  const [flags, setFlags] = React.useState({
+    approve_all_sales: s.approveAllSales,
+    claim_approval: s.claimApproval,
+    voucher_approval: s.voucherApproval,
+  });
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm({ ...form, [k]: e.target.value });
 
@@ -332,6 +339,7 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
           cash_short_limit: Number(form.cash_short_limit) || 0,
           return_days: Number(form.return_days) || 0,
           sale_approval_limit: Number(form.sale_approval_limit) || 0,
+          ...flags,
         }), true);
       }}
     >
@@ -415,6 +423,31 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
       <Field label="Receipt footer" hint="The last line on every receipt.">
         <Input value={form.receipt_footer} onChange={set("receipt_footer")} disabled={readOnly} />
       </Field>
+
+      <fieldset className="flex flex-col gap-2">
+        <legend className="text-[13px] text-muted">What has to be approved</legend>
+        <Switch
+          label="Every sale waits for approval"
+          what="Whatever it is worth. Most shops use the figure above instead."
+          on={flags.approve_all_sales}
+          disabled={readOnly}
+          onChange={(v) => setFlags({ ...flags, approve_all_sales: v })}
+        />
+        <Switch
+          label="A new warranty claim waits for a manager"
+          what="The item is still taken in; what waits is moving the claim along."
+          on={flags.claim_approval}
+          disabled={readOnly}
+          onChange={(v) => setFlags({ ...flags, claim_approval: v })}
+        />
+        <Switch
+          label="A typed accounts entry waits for a manager"
+          what="Entered, then approved. The automatic entries from sales and deliveries are not affected."
+          on={flags.voucher_approval}
+          disabled={readOnly}
+          onChange={(v) => setFlags({ ...flags, voucher_approval: v })}
+        />
+      </fieldset>
       <p className="text-[13px] text-muted">Currency is {s.currency}.</p>
       {!readOnly && (
         <Button type="submit" size="lg" className="self-start" disabled={busy}>

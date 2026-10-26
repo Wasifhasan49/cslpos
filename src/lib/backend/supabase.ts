@@ -16,6 +16,9 @@ import type {
   StatementEntry, EmiPlan, PriceHelp, SaleField,
   ClaimEvent, ClaimRow, ClaimStatus, ProblemType, SupplierRmaRow, Technician, WarrantyHit,
   Dashboard, DashboardDetailRow,
+  AccountLedger, AccountNature, AccountRole, BackfillResult, ChartAccount, ChequeBookRow,
+  ChequeDirection, ChequeLayout, ChequePrint, ChequeRow, ChequeStatus, EntryStatus,
+  MoneyBalance, TrialBalance, VoucherRow,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
@@ -513,7 +516,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         "transaction_categories", "sale_fields",
       ];
       const [shopRes, featRes, keysRes, roleRes, staffPermRes, docRes, ...listRes] = await Promise.all([
-        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct, po_approval_limit, cash_short_limit, return_days, sale_approval_limit, approve_all_sales, card_charge_mode, claim_approval").limit(1).maybeSingle(),
+        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct, po_approval_limit, cash_short_limit, return_days, sale_approval_limit, approve_all_sales, card_charge_mode, claim_approval, voucher_approval").limit(1).maybeSingle(),
         sb.from("shop_features").select("feature, enabled"),
         sb.from("permission_keys").select("key, label, area, has_limit").order("sort"),
         sb.from("role_permissions").select("role, perm, allowed, num_limit"),
@@ -541,6 +544,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
           approveAllSales: Boolean(shop.approve_all_sales),
           cardChargeMode: (shop.card_charge_mode ?? "absorb") as "absorb" | "add",
           claimApproval: Boolean(shop.claim_approval),
+          voucherApproval: Boolean(shop.voucher_approval),
         },
         features: Object.fromEntries((featRes.data ?? []).map((r) => [r.feature, r.enabled])),
         lists,
@@ -1933,6 +1937,284 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
       return { name: String(r.name), amount: num(r.amount), asOf: String(r.as_of) };
     },
 
+    // --- Accounts (P13) ---
+
+    async chartOfAccounts(): Promise<ChartAccount[]> {
+      const { data, error } = await sb.rpc("chart_of_accounts");
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map(readAccount);
+    },
+
+    async trialBalance(branchId, from, to): Promise<TrialBalance> {
+      const { data, error } = await sb.rpc("trial_balance", {
+        p_branch_id: branchId ?? null, p_from: from ?? null, p_to: to ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const d = (data ?? {}) as Record<string, unknown>;
+      return {
+        from: (d.from as string | null) ?? null,
+        to: (d.to as string | null) ?? null,
+        branch: (d.branch as string | null) ?? null,
+        totalDebit: num(d.total_debit),
+        totalCredit: num(d.total_credit),
+        balanced: Boolean(d.balanced),
+        accounts: ((d.accounts as Record<string, unknown>[] | null) ?? []).map((a) => ({
+          accountId: String(a.account_id), code: String(a.code), name: String(a.name),
+          group: String(a.group), nature: a.nature as AccountNature,
+          branch: (a.branch as string | null) ?? null,
+          debit: num(a.debit), credit: num(a.credit), balance: num(a.balance),
+        })),
+      };
+    },
+
+    async accountLedger(accountId, from, to, branchId): Promise<AccountLedger> {
+      const { data, error } = await sb.rpc("account_ledger", {
+        p_account_id: accountId, p_from: from ?? null, p_to: to ?? null,
+        p_branch_id: branchId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const d = (data ?? {}) as Record<string, unknown>;
+      const a = (d.account ?? {}) as Record<string, unknown>;
+      return {
+        account: {
+          id: String(a.id), code: String(a.code), name: String(a.name),
+          nature: a.nature as AccountNature, branch: (a.branch as string | null) ?? null,
+        },
+        opening: num(d.opening),
+        lines: ((d.lines as Record<string, unknown>[] | null) ?? []).map((l) => ({
+          entryId: String(l.entry_id), entryNo: String(l.entry_no), date: String(l.date),
+          narration: (l.narration as string | null) ?? null,
+          sourceKind: (l.source_kind as string | null) ?? null,
+          sourceId: (l.source_id as string | null) ?? null,
+          branch: (l.branch as string | null) ?? null,
+          debit: num(l.debit), credit: num(l.credit),
+          note: (l.note as string | null) ?? null,
+          party: (l.party as string | null) ?? null,
+          who: (l.who as string | null) ?? null,
+        })),
+      };
+    },
+
+    async voucherList(input = {}): Promise<VoucherRow[]> {
+      const { data, error } = await sb.rpc("voucher_list", {
+        p_from: input.from ?? null, p_to: input.to ?? null,
+        p_branch_id: input.branchId ?? null, p_status: input.status ?? null,
+        p_source: input.source ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((e) => ({
+        id: String(e.id), entryNo: String(e.entry_no), date: String(e.date),
+        narration: (e.narration as string | null) ?? null,
+        sourceKind: (e.source_kind as string | null) ?? null,
+        sourceId: (e.source_id as string | null) ?? null,
+        status: e.status as EntryStatus,
+        branch: (e.branch as string | null) ?? null,
+        branchId: (e.branch_id as string | null) ?? null,
+        otherBranch: (e.other_branch as string | null) ?? null,
+        acceptedAt: (e.accepted_at as string | null) ?? null,
+        reversesId: (e.reverses_id as string | null) ?? null,
+        who: (e.who as string | null) ?? null,
+        amount: num(e.amount),
+        lines: ((e.lines as Record<string, unknown>[] | null) ?? []).map((l) => ({
+          account: String(l.account), code: String(l.code),
+          debit: num(l.debit), credit: num(l.credit),
+          note: (l.note as string | null) ?? null,
+          party: (l.party as string | null) ?? null,
+        })),
+      }));
+    },
+
+    async moneyBalances(branchId): Promise<MoneyBalance[]> {
+      const { data, error } = await sb.rpc("money_balances", { p_branch_id: branchId ?? null });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((a) => ({
+        accountId: String(a.account_id), code: String(a.code), name: String(a.name),
+        role: (a.role as AccountRole | null) ?? null,
+        branch: (a.branch as string | null) ?? null,
+        bankAccountId: (a.bank_account_id as string | null) ?? null,
+        balance: num(a.balance),
+        unclearedOut: num(a.uncleared_out), unclearedIn: num(a.uncleared_in),
+      }));
+    },
+
+    async saveVoucher(input): Promise<{ id: string; entryNo: string; status: string }> {
+      const { data, error } = await sb.rpc("save_voucher", {
+        p_kind: input.kind, p_branch_id: input.branchId, p_date: input.date ?? null,
+        p_narration: input.narration ?? null, p_amount: input.amount ?? null,
+        p_from_account: input.fromAccount ?? null, p_to_account: input.toAccount ?? null,
+        p_customer_id: input.customerId ?? null, p_supplier_id: input.supplierId ?? null,
+        p_lines: input.lines
+          ? input.lines.map((l) => ({
+              account_id: l.accountId, debit: l.debit ?? 0, credit: l.credit ?? 0,
+              note: l.note ?? null, customer_id: l.customerId ?? null,
+              supplier_id: l.supplierId ?? null,
+            }))
+          : null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return { id: String(r.id), entryNo: String(r.entry_no), status: String(r.status) };
+    },
+
+    async approveVoucher(entryId, approve, reason): Promise<void> {
+      const { error } = await sb.rpc("approve_voucher", {
+        p_entry_id: entryId, p_approve: approve, p_reason: reason ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async reverseEntry(entryId, reason): Promise<{ entryNo: string }> {
+      const { data, error } = await sb.rpc("reverse_entry", {
+        p_entry_id: entryId, p_reason: reason,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return { entryNo: String(r.entry_no ?? "") };
+    },
+
+    async interBranchEntry(input): Promise<{ id: string; entryNo: string; waitingOn: string | null }> {
+      const { data, error } = await sb.rpc("inter_branch_entry", {
+        p_from_branch: input.fromBranchId, p_to_branch: input.toBranchId,
+        p_amount: input.amount, p_narration: input.narration ?? null,
+        p_kind: input.kind ?? "fund",
+        p_from_account: input.fromAccount ?? null, p_to_account: input.toAccount ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return {
+        id: String(r.id), entryNo: String(r.entry_no),
+        waitingOn: (r.waiting_on as string | null) ?? null,
+      };
+    },
+
+    async acceptInterBranch(entryId): Promise<{ accepted: string; amount: number }> {
+      const { data, error } = await sb.rpc("accept_inter_branch", { p_entry_id: entryId });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return { accepted: String(r.accepted ?? ""), amount: num(r.amount) };
+    },
+
+    async listCheques(input = {}): Promise<ChequeRow[]> {
+      const { data, error } = await sb.rpc("cheque_list", {
+        p_direction: input.direction ?? null, p_status: input.status ?? null,
+        p_from: input.from ?? null, p_to: input.to ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((c) => ({
+        id: String(c.id), direction: c.direction as ChequeDirection,
+        chequeNo: String(c.cheque_no), amount: num(c.amount),
+        chequeDate: String(c.cheque_date), status: c.status as ChequeStatus,
+        payee: (c.payee as string | null) ?? null,
+        drawnOn: (c.drawn_on as string | null) ?? null,
+        bank: (c.bank as string | null) ?? null,
+        branch: (c.branch as string | null) ?? null,
+        customerId: (c.customer_id as string | null) ?? null,
+        supplierId: (c.supplier_id as string | null) ?? null,
+        bouncedReason: (c.bounced_reason as string | null) ?? null,
+        clearedAt: (c.cleared_at as string | null) ?? null,
+        note: (c.note as string | null) ?? null,
+        who: (c.who as string | null) ?? null,
+        overdue: Boolean(c.overdue),
+      }));
+    },
+
+    async listChequeBooks(): Promise<ChequeBookRow[]> {
+      const { data, error } = await sb.rpc("cheque_book_list");
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((b) => ({
+        id: String(b.id), bankAccountId: String(b.bank_account_id), bank: String(b.bank),
+        prefix: (b.prefix as string | null) ?? null,
+        firstNumber: num(b.first_number), lastNumber: num(b.last_number),
+        nextNumber: num(b.next_number), active: Boolean(b.active), left: num(b.left),
+      }));
+    },
+
+    async saveChequeBook(bankAccountId, first, last, prefix): Promise<void> {
+      const { error } = await sb.rpc("save_cheque_book", {
+        p_bank_account_id: bankAccountId, p_first: first, p_last: last,
+        p_prefix: prefix ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async saveCheque(input): Promise<{ id: string; chequeNo: string; amount: number }> {
+      const { data, error } = await sb.rpc("save_cheque", {
+        p_branch_id: input.branchId, p_direction: input.direction, p_amount: input.amount,
+        p_cheque_date: input.chequeDate, p_cheque_no: input.chequeNo ?? null,
+        p_book_id: input.bookId ?? null, p_bank_account_id: input.bankAccountId ?? null,
+        p_payee: input.payee ?? null, p_customer_id: input.customerId ?? null,
+        p_supplier_id: input.supplierId ?? null, p_drawn_on: input.drawnOn ?? null,
+        p_note: input.note ?? null,
+        p_supplier_payment_id: input.supplierPaymentId ?? null,
+        p_customer_payment_id: input.customerPaymentId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return { id: String(r.id), chequeNo: String(r.cheque_no), amount: num(r.amount) };
+    },
+
+    async setChequeStatus(chequeId, status, reason): Promise<{ chequeNo: string; status: ChequeStatus; reversed: boolean }> {
+      const { data, error } = await sb.rpc("set_cheque_status", {
+        p_cheque_id: chequeId, p_status: status, p_reason: reason ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return {
+        chequeNo: String(r.cheque_no), status: r.status as ChequeStatus,
+        reversed: Boolean(r.reversed),
+      };
+    },
+
+    async chequePrint(chequeId): Promise<ChequePrint> {
+      const { data, error } = await sb.rpc("cheque_print", { p_cheque_id: chequeId });
+      if (error) throw new Error(friendlyError(error.message));
+      const d = (data ?? {}) as Record<string, unknown>;
+      const l = (d.layout ?? {}) as Record<string, unknown>;
+      return {
+        chequeNo: String(d.cheque_no), date: String(d.date),
+        payee: (d.payee as string | null) ?? null,
+        amount: num(d.amount), amountWords: String(d.amount_words),
+        bank: (d.bank as string | null) ?? null,
+        measured: Boolean(d.measured),
+        layout: readLayout(l),
+      };
+    },
+
+    async saveChequeLayout(bankAccountId, values): Promise<void> {
+      const { error } = await sb.rpc("save_cheque_layout", {
+        p_bank_account_id: bankAccountId, p_values: values,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async recordExpense(input): Promise<void> {
+      const { error } = await sb.rpc("record_expense", {
+        p_branch_id: input.branchId, p_category_id: input.categoryId,
+        p_amount: input.amount, p_method: input.method ?? "cash",
+        p_note: input.note ?? null, p_supplier_id: input.supplierId ?? null,
+        p_date: input.date ?? null, p_bank_account_id: input.bankAccountId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async saveAccount(id, values): Promise<void> {
+      const { error } = await sb.rpc("save_account", { p_id: id, p_values: values });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async backfillAccounts(from): Promise<BackfillResult> {
+      const { data, error } = await sb.rpc("backfill_accounts", { p_from: from ?? null });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return {
+        from: String(r.from), sales: num(r.sales), grns: num(r.grns),
+        supplierReturns: num(r.supplier_returns), saleReturns: num(r.sale_returns),
+        customerPayments: num(r.customer_payments),
+        supplierPayments: num(r.supplier_payments),
+        cashMovements: num(r.cash_movements),
+      };
+    },
+
     async stockHistory(branchId: string, productId?: string | null, limit = 100): Promise<StockMovementRow[]> {
       const { data, error } = await sb.rpc("stock_history", {
         p_branch_id: branchId, p_product_id: productId ?? null, p_limit: limit,
@@ -1947,6 +2229,31 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         location: (m.location as string | null) ?? null,
       }));
     },
+  };
+}
+
+/** The chart arrives snake_cased, like everything else from a function. */
+function readAccount(a: Record<string, unknown>): ChartAccount {
+  return {
+    id: String(a.id), code: String(a.code), name: String(a.name),
+    role: (a.role as AccountRole | null) ?? null,
+    group: String(a.group), nature: a.nature as AccountNature,
+    active: Boolean(a.active),
+    branchId: (a.branch_id as string | null) ?? null,
+    branch: (a.branch as string | null) ?? null,
+  };
+}
+
+/** Millimetres off the cheque leaf. */
+function readLayout(l: Record<string, unknown>): ChequeLayout {
+  return {
+    leafWidthMm: num(l.leaf_width_mm), leafHeightMm: num(l.leaf_height_mm),
+    dateX: num(l.date_x), dateY: num(l.date_y),
+    payeeX: num(l.payee_x), payeeY: num(l.payee_y),
+    words1X: num(l.words1_x), words1Y: num(l.words1_y),
+    words2X: num(l.words2_x), words2Y: num(l.words2_y),
+    figuresX: num(l.figures_x), figuresY: num(l.figures_y),
+    fontPt: num(l.font_pt) || 11,
   };
 }
 

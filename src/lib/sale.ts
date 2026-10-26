@@ -277,6 +277,17 @@ export const SALE_ERROR_CODES = [
   "CLAIM_NOT_FOUND", "CLAIM_NOT_APPROVED", "CLAIM_ALREADY_CLOSED", "BAD_CLAIM_STATUS",
   "CLAIM_NEEDS_SUPPLIER", "REJECT_REASON_REQUIRED", "NAME_REQUIRED",
   "BAD_DATE_RANGE", "BAD_DETAIL_KIND",
+  // Accounts (P13)
+  "ENTRY_DOES_NOT_BALANCE", "NOTHING_TO_POST", "NO_ACCOUNT_FOR", "ENTRY_NOT_FOUND",
+  "ENTRY_NOT_POSTED", "ALREADY_REVERSED", "BAD_VOUCHER_KIND", "VOUCHER_NEEDS_TWO_ACCOUNTS",
+  "VOUCHER_SAME_ACCOUNT", "JOURNAL_NEEDS_TWO_LINES", "VOUCHER_NEEDS_LINES",
+  "VOUCHER_NOT_WAITING", "REASON_REQUIRED", "REVERSAL_REASON_REQUIRED",
+  "NOT_INTER_BRANCH", "ALREADY_ACCEPTED", "ACCOUNT_NOT_ALLOWED",
+  "ACCOUNT_CODE_REQUIRED", "ONLY_POSTED_ENTRIES_REVERSE",
+  "BAD_CHEQUE_RANGE", "BAD_CHEQUE_DIRECTION", "BAD_CHEQUE_STATUS", "CHEQUE_NEEDS_PAYEE",
+  "CHEQUE_NEEDS_NUMBER", "CHEQUE_BOOK_NOT_FOUND", "CHEQUE_BOOK_FINISHED",
+  "CHEQUE_NOT_FOUND", "CHEQUE_ALREADY_SETTLED", "BOUNCE_REASON_REQUIRED",
+  "ONLY_ISSUED_CHEQUES_PRINT",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -436,7 +447,8 @@ export function friendlyError(raw: string): string {
     case "BAD_PAYMENT_AMOUNT": return "Enter how much is being paid.";
     case "OPENING_DATE_IN_FUTURE": return "An opening balance can't be dated in the future.";
     case "CUSTOMER_NOT_FOUND": return "That customer isn't in this shop.";
-    case "ACCOUNT_NOT_FOUND": return "Pick which account the money came from.";
+    case "ACCOUNT_NOT_FOUND":
+      return "Pick an account — the one chosen is not one of this shop's.";
     case "SAME_BRANCH": return "Pick a different branch to send to.";
     case "TRANSFER_NOT_ALLOWED":
       return "These two branches aren't allowed to send to each other. The owner sets that up in Settings.";
@@ -541,6 +553,51 @@ export function friendlyError(raw: string): string {
     case "NAME_REQUIRED": return "Give it a name.";
     case "BAD_DATE_RANGE": return "The end date is before the start date.";
     case "BAD_DETAIL_KIND": return "There is nothing to show behind that figure.";
+    // --- Accounts (P13) ---
+    case "ENTRY_DOES_NOT_BALANCE":
+      return "The two sides don't add up to the same figure. Every entry has to balance.";
+    case "NOTHING_TO_POST": return "There is nothing in this entry to post.";
+    case "NO_ACCOUNT_FOR":
+      return `There is no account set up for ${detail ?? "that"}. Add it in Accounts first.`;
+    case "ENTRY_NOT_FOUND": return "That entry no longer exists. Reload and try again.";
+    case "ENTRY_NOT_POSTED":
+    case "ONLY_POSTED_ENTRIES_REVERSE":
+      return "Only an entry that is actually on the books can be reversed.";
+    case "ALREADY_REVERSED": return "This entry has already been reversed.";
+    case "BAD_VOUCHER_KIND": return "That isn't a kind of voucher.";
+    case "VOUCHER_NEEDS_TWO_ACCOUNTS":
+      return "Pick both accounts: where the money came out of and where it went in.";
+    case "VOUCHER_SAME_ACCOUNT":
+      return "The money can't come out of and go into the same account.";
+    case "JOURNAL_NEEDS_TWO_LINES":
+    case "VOUCHER_NEEDS_LINES":
+      return "A journal entry needs at least two lines — that is what double entry means.";
+    case "VOUCHER_NOT_WAITING": return "This voucher isn't waiting for anybody.";
+    case "REASON_REQUIRED":
+    case "REVERSAL_REASON_REQUIRED":
+      return "Say why. A reversal with no reason is one nobody can explain later.";
+    case "NOT_INTER_BRANCH": return "That entry isn't between two branches.";
+    case "ALREADY_ACCEPTED": return "The other branch has already accepted this.";
+    case "ACCOUNT_NOT_ALLOWED": return "You haven't been given access to that account.";
+    case "ACCOUNT_CODE_REQUIRED": return "Give the account a code.";
+    case "BAD_CHEQUE_RANGE":
+      return "Check the cheque numbers: the last one has to be after the first.";
+    case "BAD_CHEQUE_DIRECTION":
+      return "Say whether the cheque was written by the shop or handed to it.";
+    case "BAD_CHEQUE_STATUS": return "That isn't something that can happen to a cheque.";
+    case "CHEQUE_NEEDS_PAYEE": return "Say who the cheque is written out to.";
+    case "CHEQUE_NEEDS_NUMBER":
+      return "Type the cheque number, or pick the cheque book to take the next leaf from.";
+    case "CHEQUE_BOOK_NOT_FOUND": return "That cheque book no longer exists.";
+    case "CHEQUE_BOOK_FINISHED":
+      return "That cheque book is finished. Add the new one in Accounts.";
+    case "CHEQUE_NOT_FOUND": return "That cheque no longer exists. Reload and try again.";
+    case "CHEQUE_ALREADY_SETTLED":
+      return `This cheque is already ${detail ?? "settled"}.`;
+    case "BOUNCE_REASON_REQUIRED":
+      return "Say why it bounced. A month later this is what the argument is about.";
+    case "ONLY_ISSUED_CHEQUES_PRINT":
+      return "Only a cheque the shop wrote can be printed.";
     case "SERIAL_CHANGE_HAS_STOCK":
       return `${detail ?? "This product"} already has stock, so it can't switch between serial-tracked and not. Sell or write off the stock first.`;
     // Keep the raw text so a code we have not seen can still be reported and fixed,

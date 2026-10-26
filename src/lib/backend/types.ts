@@ -15,6 +15,9 @@ import type {
   EmiPlan, PriceHelp, SaleField,
   ClaimRow, ClaimStatus, ProblemType, SupplierRmaRow, Technician, WarrantyHit,
   Dashboard, DashboardDetailKind, DashboardDetailRow,
+  AccountLedger, BackfillResult, ChartAccount, ChequeBookRow, ChequeDirection,
+  ChequePrint, ChequeRow, ChequeStatus, MoneyBalance, TrialBalance, VoucherKind,
+  VoucherRow,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 
@@ -63,7 +66,7 @@ export interface Backend {
    *  needs it before any Settings screen is opened. */
   listFeatures(): Promise<Record<string, boolean>>;
   setFeature(feature: FeatureKey, enabled: boolean): Promise<void>;
-  saveShopDetails(values: Record<string, string | number | null>): Promise<void>;
+  saveShopDetails(values: Record<string, string | number | boolean | null>): Promise<void>;
   /** Add (no id) or change (id) a row in one of the setup lists. */
   saveSettingRow(table: SettingTable, id: string | null, values: Record<string, string | number | boolean | null>): Promise<SettingRow>;
   setRolePermission(role: Role, perm: string, allowed: boolean, limit?: number | null): Promise<void>;
@@ -395,4 +398,106 @@ export interface Backend {
     kind: DashboardDetailKind, branchId?: string | null,
     from?: string | null, to?: string | null,
   ): Promise<DashboardDetailRow[]>;
+
+  // --- Accounts (P13) ---
+  /** The chart itself, for the pickers. Only accounts this login may see. */
+  chartOfAccounts(): Promise<ChartAccount[]>;
+  /** Every account's balance, with the two columns that must match. */
+  trialBalance(
+    branchId?: string | null, from?: string | null, to?: string | null,
+  ): Promise<TrialBalance>;
+  /** One account's entries, oldest first, with what it stood at before the period. */
+  accountLedger(
+    accountId: string, from?: string | null, to?: string | null, branchId?: string | null,
+  ): Promise<AccountLedger>;
+  /** The entries themselves, newest first: both the typed vouchers and the automatic
+   *  ones, because an owner asking "what happened on the 5th" means all of it. */
+  voucherList(input?: {
+    from?: string | null; to?: string | null; branchId?: string | null;
+    status?: string | null; source?: string | null;
+  }): Promise<VoucherRow[]>;
+  /** What is in each drawer, bank account and wallet right now. */
+  moneyBalances(branchId?: string | null): Promise<MoneyBalance[]>;
+  /** A voucher somebody types: receipt, payment, contra (cash ↔ bank) or journal. */
+  saveVoucher(input: {
+    kind: VoucherKind;
+    branchId: string;
+    date?: string | null;
+    narration?: string | null;
+    amount?: number | null;
+    fromAccount?: string | null;
+    toAccount?: string | null;
+    customerId?: string | null;
+    supplierId?: string | null;
+    /** For a journal voucher: the lines, typed. They must balance. */
+    lines?: { accountId: string; debit?: number; credit?: number; note?: string | null;
+              customerId?: string | null; supplierId?: string | null }[] | null;
+  }): Promise<{ id: string; entryNo: string; status: string }>;
+  /** When the shop makes typed vouchers wait for a manager. */
+  approveVoucher(entryId: string, approve: boolean, reason?: string | null): Promise<void>;
+  /** The only correction there is: a mirror-image entry. The first one is untouched. */
+  reverseEntry(entryId: string, reason: string): Promise<{ entryNo: string }>;
+  /** One branch sending money, or paying a bill, for another. */
+  interBranchEntry(input: {
+    fromBranchId: string;
+    toBranchId: string;
+    amount: number;
+    narration?: string | null;
+    /** "fund" moves money; "cost" is a bill paid for them, charged to `toAccount`. */
+    kind?: "fund" | "cost";
+    fromAccount?: string | null;
+    toAccount?: string | null;
+  }): Promise<{ id: string; entryNo: string; waitingOn: string | null }>;
+  /** The receiving branch agreeing to it. Until they do, it is not on their books. */
+  acceptInterBranch(entryId: string): Promise<{ accepted: string; amount: number }>;
+  listCheques(input?: {
+    direction?: ChequeDirection | null; status?: ChequeStatus | null;
+    from?: string | null; to?: string | null;
+  }): Promise<ChequeRow[]>;
+  listChequeBooks(): Promise<ChequeBookRow[]>;
+  saveChequeBook(
+    bankAccountId: string, first: number, last: number, prefix?: string | null,
+  ): Promise<void>;
+  /** Write one, or record one somebody handed over. Linking it to a payment already
+   *  recorded stops the money being counted twice. */
+  saveCheque(input: {
+    branchId: string;
+    direction: ChequeDirection;
+    amount: number;
+    chequeDate: string;
+    chequeNo?: string | null;
+    bookId?: string | null;
+    bankAccountId?: string | null;
+    payee?: string | null;
+    customerId?: string | null;
+    supplierId?: string | null;
+    drawnOn?: string | null;
+    note?: string | null;
+    supplierPaymentId?: string | null;
+    customerPaymentId?: string | null;
+  }): Promise<{ id: string; chequeNo: string; amount: number }>;
+  /** Cleared, bounced (reverses its entry) or cancelled. A bounce needs a reason. */
+  setChequeStatus(
+    chequeId: string, status: ChequeStatus, reason?: string | null,
+  ): Promise<{ chequeNo: string; status: ChequeStatus; reversed: boolean }>;
+  /** Everything needed to print onto the bank's leaf. Needs the cheque-print permission. */
+  chequePrint(chequeId: string): Promise<ChequePrint>;
+  /** Measure a bank's leaf once; print straight after that. Owner only. */
+  saveChequeLayout(bankAccountId: string, values: Record<string, number>): Promise<void>;
+  /** A daily expense. Cash goes through the drawer; anything else straight to the books. */
+  recordExpense(input: {
+    branchId: string;
+    categoryId: string;
+    amount: number;
+    method?: string;
+    note?: string | null;
+    supplierId?: string | null;
+    date?: string | null;
+    bankAccountId?: string | null;
+  }): Promise<void>;
+  /** Add an account of the shop's own. Owner only. */
+  saveAccount(id: string | null, values: Record<string, unknown>): Promise<void>;
+  /** Write the entries for everything that happened before the switch went on.
+   *  Safe to run twice, which matters because the first run may time out. */
+  backfillAccounts(from?: string | null): Promise<BackfillResult>;
 }

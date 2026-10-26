@@ -3561,5 +3561,419 @@ select pg_temp.check(
   (select count(*) from public.sale_item_costs) = 0,
   'and a cashier cannot read a single captured cost, which is the point of the separate table');
 
+-- ===========================================================================
+-- 25. ACCOUNTS (P13)
+-- ===========================================================================
+-- The done-when, run as one day at one branch: sales, a return, a supplier paid
+-- by cheque and a cup of tea, then close the drawer. The cash-in-hand ledger has
+-- to come out at the counted cash plus the shortfall that was written down.
+--
+-- A fresh branch, so the drawer and the ledger both start from nothing and the
+-- figures in the comments are the figures.
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+create table pg_temp.p13 (k text primary key, v uuid);
+create table pg_temp.p13n (k text primary key, v numeric);
+
+select public.set_feature('accounts', true);
+
+do $$
+declare br uuid; prod uuid; sup uuid;
+begin
+  br := (public.save_branch(null, 'Accounts Test Branch', 'AT', null, null, true)->>'id')::uuid;
+  insert into pg_temp.p13 values ('branch', br);
+
+  prod := (public.upsert_product(null, '{"code":"P13-CABLE","name":"P13 HDMI Cable",
+                                         "price":800,"is_serial":false}')->>'id')::uuid;
+  insert into pg_temp.p13 values ('prod', prod);
+  perform public.set_prices(prod,
+    (select id from public.price_lists where shop_id = '00000000-0000-4000-8000-000000000001'
+     and is_default), 800);
+
+  sup := gen_random_uuid();
+  insert into public.suppliers (id, shop_id, name, phone)
+  values (sup, '00000000-0000-4000-8000-000000000001', 'P13 Cable Importers', '01700000913');
+  insert into pg_temp.p13 values ('supplier', sup);
+
+  -- Bought on credit BEFORE the day starts: nothing has touched this drawer yet.
+  perform public.receive_goods(br,
+    format('[{"product_id":"%s","qty":20,"unit_cost":500}]', prod)::jsonb,
+    sup, 'CBL-9001', null, true);
+  raise notice 'ok: a branch, a product at 800 costing 500, and 20 of them on credit';
+end $$;
+
+-- ---- The chart a Bangladeshi trading shop starts with ----
+select pg_temp.check(
+  (select count(*) from public.accounts a join public.account_groups g on g.id = a.group_id
+   where a.shop_id = '00000000-0000-4000-8000-000000000001'
+     and g.nature in ('asset','liability','equity','income','expense')) >= 20,
+  'the shop has a chart of accounts without anybody building one');
+select pg_temp.check(
+  (select count(*) from public.accounts
+   where shop_id = '00000000-0000-4000-8000-000000000001' and role = 'cash_in_hand') =
+  (select count(*) from public.branches where shop_id = '00000000-0000-4000-8000-000000000001'),
+  'one cash-in-hand account per branch, including the one just added');
+
+-- ---- Receiving on credit: stock up, supplier owed ----
+select pg_temp.check(
+  (select sum(l.debit) from public.journal_lines l
+   join public.accounts a on a.id = l.account_id
+   join public.journal_entries e on e.id = l.entry_id
+   where a.role = 'inventory' and e.source_kind = 'grn'
+     and e.branch_id = (select v from pg_temp.p13 where k='branch')) = 10000,
+  '20 cables at 500 put 10,000 of stock on the books');
+select pg_temp.check(
+  (select sum(l.credit) from public.journal_lines l
+   join public.accounts a on a.id = l.account_id
+   where a.role = 'payable' and l.supplier_id = (select v from pg_temp.p13 where k='supplier')) = 10000,
+  'and 10,000 owed to the supplier who sent them');
+
+-- ---- Open the drawer with 1,000 and sell ----
+do $$
+declare r jsonb; br uuid := (select v from pg_temp.p13 where k='branch');
+        prod uuid := (select v from pg_temp.p13 where k='prod');
+begin
+  r := public.open_shift(br, 1000);
+  insert into pg_temp.p13 values ('shift', (r->>'shift_id')::uuid);
+
+  -- Three cables for cash: 2,400 in.
+  r := public.complete_sale(br, format('[{"product_id":"%s","qty":3}]', prod)::jsonb,
+                            'cash', 0, null, null, 2400);
+  insert into pg_temp.p13 values ('sale', (r->>'id')::uuid);
+
+  -- One more on card: the money goes to the bank, not into the drawer.
+  r := public.complete_sale(br, format('[{"product_id":"%s","qty":1}]', prod)::jsonb,
+                            'card', p_payment_ref => '4321',
+                            p_extras => jsonb_build_object(
+                              'card', jsonb_build_object('last4', '4321')));
+  insert into pg_temp.p13 values ('card_sale', (r->>'id')::uuid);
+  raise notice 'ok: 3 cables for cash and 1 on card';
+end $$;
+
+select pg_temp.check(
+  (select sum(l.debit) from public.journal_lines l
+   join public.accounts a on a.id = l.account_id
+   join public.journal_entries e on e.id = l.entry_id
+   where a.role = 'cash_in_hand' and e.source_id = (select v from pg_temp.p13 where k='sale')) = 2400,
+  'the cash sale went into the drawer account');
+select pg_temp.check(
+  (select sum(l.debit) from public.journal_lines l
+   join public.accounts a on a.id = l.account_id
+   join public.journal_entries e on e.id = l.entry_id
+   where a.role = 'bank' and e.source_id = (select v from pg_temp.p13 where k='card_sale')) > 0,
+  'and the card sale went to the bank, where card money actually arrives');
+
+-- ---- A sale's cost of goods is the cost that was captured on its lines ----
+select pg_temp.check(
+  (select sum(l.debit) from public.journal_lines l
+   join public.accounts a on a.id = l.account_id
+   join public.journal_entries e on e.id = l.entry_id
+   where a.role = 'cogs' and e.source_id = (select v from pg_temp.p13 where k='sale')) =
+  (select sum(c.unit_cost * i.qty) from public.sale_items i
+   join public.sale_item_costs c on c.sale_item_id = i.id
+   where i.sale_id = (select v from pg_temp.p13 where k='sale')),
+  'cost of goods sold is exactly what the sale captured, so profit and the ledger agree');
+
+-- ---- One comes back ----
+do $$
+declare r jsonb; item uuid; br uuid := (select v from pg_temp.p13 where k='branch');
+begin
+  select id into item from public.sale_items
+    where sale_id = (select v from pg_temp.p13 where k='sale');
+  r := public.return_sale((select v from pg_temp.p13 where k='sale'), br,
+        jsonb_build_array(jsonb_build_object('sale_item_id', item, 'qty', 1)),
+        'cash', 'Customer changed their mind');
+  insert into pg_temp.p13
+    select 'return', id from public.sale_returns where return_no = r->>'return_no';
+  insert into pg_temp.p13n values ('refund', (r->>'total')::numeric);
+  raise notice 'ok: one cable back, % refunded in cash', r->>'total';
+end $$;
+select pg_temp.check(
+  (select v from pg_temp.p13n where k='refund') = 800,
+  '800 went back, which is what was charged for it');
+select pg_temp.check(
+  (select sum(l.debit) from public.journal_lines l
+   join public.accounts a on a.id = l.account_id
+   join public.journal_entries e on e.id = l.entry_id
+   where a.role = 'inventory' and e.source_kind = 'sale_return'
+     and e.source_id = (select v from pg_temp.p13 where k='return')) = 500,
+  'a sound cable goes back on the shelf at the cost it left at');
+
+-- ---- The supplier, paid by cheque ----
+do $$
+declare r jsonb; pay uuid; bk uuid; book uuid;
+        br uuid := (select v from pg_temp.p13 where k='branch');
+begin
+  select id into bk from public.bank_accounts
+    where shop_id = '00000000-0000-4000-8000-000000000001' and kind <> 'cash_drawer' limit 1;
+  if bk is null then
+    bk := (public.save_setting_row('bank_accounts', null,
+             '{"name":"P13 City Bank","kind":"bank"}')->>'id')::uuid;
+  end if;
+  insert into pg_temp.p13 values ('bank', bk);
+
+  book := (public.save_cheque_book(bk, 400101, 400150, 'CB')->>'id')::uuid;
+  insert into pg_temp.p13 values ('book', book);
+
+  -- The payment is the money event; the cheque is the piece of paper it went out on.
+  pay := (public.pay_supplier(br, (select v from pg_temp.p13 where k='supplier'),
+                              6000, 'cheque', 'CB400101')->>'payment_id')::uuid;
+  insert into pg_temp.p13 values ('payment', pay);
+
+  r := public.save_cheque(br, 'issued', 6000, public.dhaka_today(), null, book, bk,
+                          null, null, (select v from pg_temp.p13 where k='supplier'),
+                          null, 'Part payment', pay, null);
+  insert into pg_temp.p13 values ('cheque', (r->>'id')::uuid);
+  if r->>'cheque_no' <> 'CB400101' then raise exception 'WRONG CHEQUE NUMBER: %', r->>'cheque_no'; end if;
+  raise notice 'ok: 6,000 paid to the supplier on cheque %', r->>'cheque_no';
+end $$;
+select pg_temp.check(
+  (select next_number from public.cheque_books where id = (select v from pg_temp.p13 where k='book')) = 400102,
+  'the next leaf in the book is the next one in the book');
+select pg_temp.check(
+  (select count(*) from public.journal_entries
+   where source_kind = 'supplier_payment' and source_id = (select v from pg_temp.p13 where k='payment')) = 1,
+  'paying by cheque posts ONCE: the cheque is the paper, not a second payment');
+select pg_temp.check(
+  (select entry_id from public.cheques where id = (select v from pg_temp.p13 where k='cheque')) =
+  (select id from public.journal_entries where source_kind = 'supplier_payment'
+   and source_id = (select v from pg_temp.p13 where k='payment')),
+  'and the cheque knows which entry it caused, which is what lets it be bounced');
+
+-- ---- Tea ----
+do $$
+declare r jsonb; cat uuid; br uuid := (select v from pg_temp.p13 where k='branch');
+begin
+  select id into cat from public.transaction_categories
+    where shop_id = '00000000-0000-4000-8000-000000000001' and name = 'Tea and snacks';
+  r := public.record_expense(br, cat, 150, 'cash', 'Tea for the counter');
+  raise notice 'ok: 150 on tea, out of the drawer';
+end $$;
+select pg_temp.check(
+  (select sum(l.debit) from public.journal_lines l
+   join public.accounts a on a.id = l.account_id
+   join public.journal_entries e on e.id = l.entry_id
+   where lower(a.name) = 'tea and snacks'
+     and e.branch_id = (select v from pg_temp.p13 where k='branch')) = 150,
+  'the tea is filed under tea, not under "other"');
+
+-- ---- Every entry of the day balances ----
+select pg_temp.check(
+  not exists (
+    select 1 from public.journal_entries e
+    join public.journal_lines l on l.entry_id = e.id
+    group by e.id
+    having sum(l.debit) <> sum(l.credit)),
+  'every entry in the books has two equal sides');
+select pg_temp.check(
+  (public.trial_balance()->>'balanced')::boolean
+  and (public.trial_balance()->>'total_debit')::numeric =
+      (public.trial_balance()->>'total_credit')::numeric,
+  'and so does the trial balance, which is the only thing it is for');
+select pg_temp.check(
+  (public.trial_balance()->>'total_debit')::numeric > 0,
+  'with figures in it, not an empty report that balances because it is empty');
+
+-- ---- Close the drawer: THE DONE-WHEN ----
+-- Expected = 1,000 opening + 2,400 cash sale − 800 refund − 150 tea = 2,450.
+-- The counter hands over 2,400, so 50 is missing and gets written down.
+do $$
+declare r jsonb; sh uuid := (select v from pg_temp.p13 where k='shift');
+begin
+  -- The owner is told the expected figure; a cashier closing the same drawer is not,
+  -- which is the whole point of P8 and is checked there.
+  r := public.close_shift(sh, 2400, 'Fifty short, nobody knows where');
+  insert into pg_temp.p13n values ('expected', (r->>'expected')::numeric);
+  insert into pg_temp.p13n values ('counted', 2400);
+end $$;
+select pg_temp.check(
+  (select v from pg_temp.p13n where k='expected') = 2450,
+  'the till expects 2,450: opening plus the cash sale, less the refund and the tea');
+select pg_temp.check(
+  (select counted_cash - expected_cash from public.shifts
+   where id = (select v from pg_temp.p13 where k='shift')) = -50,
+  'and 50 short is recorded as 50 short');
+
+-- The ledger's own answer, worked out from entries only, with no help from the till.
+insert into pg_temp.p13n
+select 'ledger_moved', coalesce(sum(l.debit - l.credit), 0)
+from public.journal_lines l
+join public.accounts a on a.id = l.account_id
+join public.journal_entries e on e.id = l.entry_id and e.status = 'posted'
+where a.role = 'cash_in_hand'
+  and a.branch_id = (select v from pg_temp.p13 where k='branch')
+  and e.created_at >= (select opened_at from public.shifts
+                       where id = (select v from pg_temp.p13 where k='shift'));
+select pg_temp.check(
+  (select v from pg_temp.p13n where k='ledger_moved') = 1450,
+  'the cash-in-hand ledger moved by 1,450 over the shift: 2,400 in, 950 out');
+select pg_temp.check(
+  1000 + (select v from pg_temp.p13n where k='ledger_moved')
+  = (select v from pg_temp.p13n where k='counted')
+    + ((select v from pg_temp.p13n where k='expected') - (select v from pg_temp.p13n where k='counted')),
+  'DONE-WHEN: opening float plus the ledger equals the counted cash plus the shortfall');
+
+-- ---- A bounced cheque un-does itself ----
+-- Why it bounced goes on the record before anything is reversed: "bounced" with no
+-- reason is the thing a shop argues with a customer about a month later.
+select pg_temp.expect_error(
+  format($q$select public.set_cheque_status('%s', 'bounced')$q$,
+         (select v from pg_temp.p13 where k='cheque')),
+  'BOUNCE_REASON_REQUIRED');
+do $$
+declare r jsonb;
+begin
+  r := public.set_cheque_status((select v from pg_temp.p13 where k='cheque'), 'bounced',
+                               'Insufficient funds');
+  if not (r->>'reversed')::boolean then raise exception 'A BOUNCED CHEQUE DID NOT REVERSE'; end if;
+end $$;
+select pg_temp.check(
+  (select sum(l.credit) - sum(l.debit) from public.journal_lines l
+   where l.supplier_id = (select v from pg_temp.p13 where k='supplier')) = 10000,
+  'the supplier is owed the whole 10,000 again: the cheque never paid them');
+select pg_temp.check(
+  (select count(*) from public.journal_entries
+   where reverses_id = (select entry_id from public.cheques
+                        where id = (select v from pg_temp.p13 where k='cheque'))) = 1,
+  'and it was undone with a reversing entry, not by editing the first one');
+select pg_temp.expect_error(
+  format($q$select public.set_cheque_status('%s', 'cleared')$q$,
+         (select v from pg_temp.p13 where k='cheque')),
+  'CHEQUE_ALREADY_SETTLED');
+
+-- ---- Printing it: figures AND words ----
+select pg_temp.check(
+  public.taka_in_words(6000) = 'Six Thousand Taka Only',
+  'six thousand reads as six thousand');
+select pg_temp.check(
+  public.taka_in_words(125000) = 'One Lakh Twenty Five Thousand Taka Only',
+  'and a lakh is a lakh, not a hundred thousand');
+select pg_temp.check(
+  public.taka_in_words(10550075.50) =
+  'One Crore Five Lakh Fifty Thousand Seventy Five Taka and Fifty Paisa Only',
+  'crore, lakh, thousand, and the paisa on the end');
+select pg_temp.check(
+  (public.cheque_print((select v from pg_temp.p13 where k='cheque'))->>'amount_words')
+    = 'Six Thousand Taka Only'
+  and (public.cheque_print((select v from pg_temp.p13 where k='cheque'))->'layout'->>'payee_x') is not null,
+  'a cheque prints with the words and a layout for the bank it is drawn on');
+
+-- ---- Vouchers a person types ----
+do $$
+declare r jsonb; br uuid := (select v from pg_temp.p13 where k='branch');
+        cash uuid; bank uuid;
+begin
+  select id into cash from public.accounts where role = 'cash_in_hand' and branch_id = br;
+  select id into bank from public.accounts
+    where shop_id = '00000000-0000-4000-8000-000000000001' and role = 'bank' limit 1;
+  -- Contra: the drawer's takings walked to the bank. Same money, different pocket.
+  r := public.save_voucher('contra', br, public.dhaka_today(), 'Banked the day',
+                           1000, cash, bank);
+  insert into pg_temp.p13 values ('contra', (r->>'id')::uuid);
+end $$;
+select pg_temp.check(
+  (select sum(debit) from public.journal_lines
+   where entry_id = (select v from pg_temp.p13 where k='contra')) =
+  (select sum(credit) from public.journal_lines
+   where entry_id = (select v from pg_temp.p13 where k='contra')),
+  'a typed voucher balances like everything else');
+select pg_temp.expect_error(
+  format($q$select public.save_voucher('journal', '%s', public.dhaka_today(), 'Wonky',
+          null, null, null, null, null,
+          '[{"account_id":"%s","debit":100},{"account_id":"%s","credit":90}]')$q$,
+         (select v from pg_temp.p13 where k='branch'),
+         (select id from public.accounts where role = 'cash_in_hand'
+          and branch_id = (select v from pg_temp.p13 where k='branch')),
+         (select id from public.accounts where shop_id = '00000000-0000-4000-8000-000000000001'
+          and role = 'bank' limit 1)),
+  'ENTRY_DOES_NOT_BALANCE');
+
+-- ---- One branch paying for another, and the other having to agree ----
+do $$
+declare r jsonb; courier uuid;
+begin
+  select id into courier from public.accounts
+    where shop_id = '00000000-0000-4000-8000-000000000001' and code = '6900';
+  r := public.inter_branch_entry((select v from pg_temp.p13 where k='branch'),
+        '00000000-0000-4000-8000-0000000000b1', 500, 'Paid their courier bill', 'cost',
+        null, courier);
+  insert into pg_temp.p13 values ('inter', (r->>'id')::uuid);
+  insert into pg_temp.p13 values ('courier_account', courier);
+end $$;
+select pg_temp.check(
+  (select count(*) from public.journal_entries
+   where source_kind = 'fund_transfer'
+     and branch_id = '00000000-0000-4000-8000-0000000000b1') = 0,
+  'nothing has landed on the receiving branch yet: they have not agreed to it');
+select pg_temp.check(
+  (select accepted_at from public.journal_entries
+   where id = (select v from pg_temp.p13 where k='inter')) is null,
+  'and the sending entry is still waiting to be accepted');
+do $$ begin
+  perform public.accept_inter_branch((select v from pg_temp.p13 where k='inter'));
+end $$;
+select pg_temp.check(
+  (select accepted_at from public.journal_entries
+   where id = (select v from pg_temp.p13 where k='inter')) is not null
+  and (select count(*) from public.journal_entries
+       where source_kind = 'fund_transfer'
+         and branch_id = '00000000-0000-4000-8000-0000000000b1') = 1,
+  'once they accept, it is on their books and the acceptance is on the record');
+select pg_temp.check(
+  (select sum(l.debit) from public.journal_lines l
+   join public.journal_entries e on e.id = l.entry_id
+   where e.source_id = (select v from pg_temp.p13 where k='inter')
+     and l.account_id = (select v from pg_temp.p13 where k='courier_account')) = 500,
+  'and a bill paid for them is charged to them as a cost, not handed to them as cash');
+
+-- ---- The back-fill picks up the trading done before the switch went on ----
+-- Everything in sections 1 to 24 happened with the accounts feature off, so none of it
+-- is on the books. That is exactly the shop this function exists for.
+do $$
+declare r jsonb; before_count int;
+begin
+  r := public.backfill_accounts();
+  insert into pg_temp.p13n values ('backfilled_sales', (r->>'sales')::numeric);
+  raise notice 'ok: back-filled %', r::text;
+
+  -- And again: the second run must change nothing, because the first one will time out
+  -- on a shop with two years of history and the owner will press the button again.
+  select count(*) into before_count from public.journal_entries;
+  r := public.backfill_accounts();
+  if (select count(*) from public.journal_entries) <> before_count then
+    raise exception 'THE BACK-FILL POSTED SOMETHING TWICE';
+  end if;
+  raise notice 'ok: a second back-fill is a no-op';
+end $$;
+select pg_temp.check(
+  (select v from pg_temp.p13n where k='backfilled_sales') > 0,
+  'the sales from before the switch went on are on the books now');
+select pg_temp.check(
+  (public.trial_balance()->>'balanced')::boolean,
+  'and the trial balance still balances with all of it in');
+select pg_temp.check(
+  not exists (
+    select 1 from public.journal_entries e
+    join public.journal_lines l on l.entry_id = e.id
+    group by e.id
+    having sum(l.debit) <> sum(l.credit)),
+  'every back-filled entry balances too');
+
+-- ---- The books are not the counter's business ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.expect_error($q$select public.trial_balance()$q$, 'NOT_ALLOWED:view_accounts');
+select pg_temp.expect_error($q$select public.chart_of_accounts()$q$, 'NOT_ALLOWED:view_accounts');
+select pg_temp.expect_error($q$select public.voucher_list()$q$, 'NOT_ALLOWED:view_accounts');
+select pg_temp.expect_error($q$select public.money_balances()$q$, 'NOT_ALLOWED:view_accounts');
+select pg_temp.expect_error($q$select public.cheque_list()$q$, 'NOT_ALLOWED:view_accounts');
+select pg_temp.check(
+  (select count(*) from public.journal_entries) = 0
+  and (select count(*) from public.journal_lines) = 0
+  and (select count(*) from public.accounts) = 0
+  and (select count(*) from public.cheques) = 0,
+  'and a cashier reading the tables directly sees no journal, no chart and no cheques');
+select pg_temp.expect_error(
+  $q$select public.backfill_accounts()$q$, 'NOT_OWNER');
+
 reset role;
 \echo ALL DATABASE CHECKS PASSED

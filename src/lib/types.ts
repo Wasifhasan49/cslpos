@@ -325,6 +325,8 @@ export interface ShopDetails {
   cardChargeMode: "absorb" | "add";
   /** Whether a new warranty claim waits for a manager before it can move. */
   claimApproval: boolean;
+  /** Whether a typed voucher waits for a manager before it reaches the books (P13). */
+  voucherApproval: boolean;
 }
 
 /** Which setup list a row belongs to. Matches the tables save_setting_row() allows. */
@@ -1187,3 +1189,180 @@ export type DashboardDetailKind =
 
 /** One row behind a tapped figure. Deliberately loose: each kind lists different things. */
 export type DashboardDetailRow = Record<string, unknown>;
+
+// --- Accounts (P13) ---------------------------------------------------------
+
+export type AccountNature = "asset" | "liability" | "equity" | "income" | "expense";
+
+/** What an account IS, so the auto-posting can find it without matching on names. */
+export type AccountRole =
+  | "cash_in_hand" | "bank" | "wallet" | "receivable" | "payable" | "inventory"
+  | "vat_payable" | "sales" | "sales_return" | "cogs" | "discount_given"
+  | "purchase_return" | "stock_loss" | "stock_gain" | "inter_branch"
+  | "card_charge" | "opening_equity" | "rounding";
+
+export interface ChartAccount {
+  id: string;
+  code: string;
+  name: string;
+  role: AccountRole | null;
+  group: string;
+  nature: AccountNature;
+  active: boolean;
+  branchId: string | null;
+  branch: string | null;
+}
+
+export interface TrialBalanceRow {
+  accountId: string;
+  code: string;
+  name: string;
+  group: string;
+  nature: AccountNature;
+  branch: string | null;
+  debit: number;
+  credit: number;
+  /** Positive on the side the account normally sits: assets and expenses debit. */
+  balance: number;
+}
+
+export interface TrialBalance {
+  from: string | null;
+  to: string | null;
+  branch: string | null;
+  accounts: TrialBalanceRow[];
+  totalDebit: number;
+  totalCredit: number;
+  /** Reported, not asserted: if the two columns ever differ the owner must SEE it. */
+  balanced: boolean;
+}
+
+export interface LedgerLine {
+  entryId: string;
+  entryNo: string;
+  date: string;
+  narration: string | null;
+  sourceKind: string | null;
+  sourceId: string | null;
+  branch: string | null;
+  debit: number;
+  credit: number;
+  note: string | null;
+  party: string | null;
+  who: string | null;
+}
+
+export interface AccountLedger {
+  account: { id: string; code: string; name: string; nature: AccountNature; branch: string | null };
+  opening: number;
+  lines: LedgerLine[];
+}
+
+export type VoucherKind = "receipt" | "payment" | "contra" | "journal";
+export type EntryStatus = "posted" | "awaiting_approval" | "cancelled";
+
+export interface VoucherRow {
+  id: string;
+  entryNo: string;
+  date: string;
+  narration: string | null;
+  sourceKind: string | null;
+  sourceId: string | null;
+  status: EntryStatus;
+  branch: string | null;
+  branchId: string | null;
+  otherBranch: string | null;
+  acceptedAt: string | null;
+  reversesId: string | null;
+  who: string | null;
+  amount: number;
+  lines: {
+    account: string; code: string; debit: number; credit: number;
+    note: string | null; party: string | null;
+  }[];
+}
+
+export interface MoneyBalance {
+  accountId: string;
+  code: string;
+  name: string;
+  role: AccountRole | null;
+  branch: string | null;
+  bankAccountId: string | null;
+  balance: number;
+  /** Cheques written that the bank has not taken yet, and ones banked but not cleared. */
+  unclearedOut: number;
+  unclearedIn: number;
+}
+
+export type ChequeDirection = "issued" | "received";
+export type ChequeStatus = "issued" | "cleared" | "bounced" | "cancelled";
+
+export interface ChequeRow {
+  id: string;
+  direction: ChequeDirection;
+  chequeNo: string;
+  amount: number;
+  chequeDate: string;
+  status: ChequeStatus;
+  payee: string | null;
+  drawnOn: string | null;
+  bank: string | null;
+  branch: string | null;
+  customerId: string | null;
+  supplierId: string | null;
+  bouncedReason: string | null;
+  clearedAt: string | null;
+  note: string | null;
+  who: string | null;
+  /** Dated in the past and still out: somebody has to chase it. */
+  overdue: boolean;
+}
+
+export interface ChequeBookRow {
+  id: string;
+  bankAccountId: string;
+  bank: string;
+  prefix: string | null;
+  firstNumber: number;
+  lastNumber: number;
+  nextNumber: number;
+  active: boolean;
+  left: number;
+}
+
+/** Where each thing goes on the bank's own cheque leaf, in millimetres. */
+export interface ChequeLayout {
+  leafWidthMm: number;
+  leafHeightMm: number;
+  dateX: number; dateY: number;
+  payeeX: number; payeeY: number;
+  words1X: number; words1Y: number;
+  words2X: number; words2Y: number;
+  figuresX: number; figuresY: number;
+  fontPt: number;
+}
+
+export interface ChequePrint {
+  chequeNo: string;
+  date: string;
+  payee: string | null;
+  amount: number;
+  /** The words are what a bank honours when the figures have been tampered with. */
+  amountWords: string;
+  bank: string | null;
+  /** False means nobody has measured this bank's leaf yet; the defaults are being used. */
+  measured: boolean;
+  layout: ChequeLayout;
+}
+
+export interface BackfillResult {
+  from: string;
+  sales: number;
+  grns: number;
+  supplierReturns: number;
+  saleReturns: number;
+  customerPayments: number;
+  supplierPayments: number;
+  cashMovements: number;
+}
