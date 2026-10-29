@@ -108,3 +108,48 @@ using the advance, deliver and bill the last 4 — and every ledger balances.
 | P14a | done | Quotations, sales orders and challans, behind the "Sales documents" switch. **Quote → order → delivery note → bill, and any step can be skipped.** A quotation carries the date its prices run out (BMS has no such field, so its quotations are argued about), prices itself from the customer's own list, cannot be rewritten once sent, and needs a reason when marked lost. An order **holds the stock**: the counter shows "4 in stock, 2 reserved" and refuses to sell the two to a walk-in — the reserved figure is worked out from the open lines every time, never stored, so a cancelled line can't leave stock stuck for ever. Orders over the shop's limit (Settings → Shop) or over the seller's discount limit wait for the owner. Cutting an order down or calling it off releases what it held, with a reason, logged. Money taken up front is **held, not earned**: a liability until there is a bill, and cash goes through the open drawer. A delivery note takes the goods off the shelf and puts them in "delivered, not invoiced" — still the shop's, but not on a shelf; serials go to `delivered`, so nobody can sell them while they sit at the customer's. Billing goes through **the till's own function** with one flag that says the stock has already gone, so VAT, discounts, approvals and the invoice sequence are identical to a counter sale; whatever advance is waiting comes off the bill first. Goods back off a delivery note are not a refund — the stock returns and the order wants them again. Plus 12 of the reports P14 listed as "comes with P14a", including free-to-promise. 553 database checks, 154 unit tests. | Settings → Features → turn on **Sales documents**; Settings → Shop → set "Sales orders over this need your approval" to 5000 if you want to see the approval step. Orders → New quotation: Orbit/any company, 10 keyboards, save and send. Open it → "They accepted it — make an order": the stock should now read **10 reserved** on Products and at the counter, and trying to sell all the keyboards at the till should refuse by name. Open the order → "Take money up front" ৳5,000 → "Deliver some of it", send 6: the shelf drops by 6 and the order says "Some of it has gone". Open that delivery note → Bill it, paying ৳100: the receipt should say ৳5,000 of their advance was used and ৳100 was taken. Deliver and bill the last 4. The order should end "Billed", nothing reserved, and Accounts → Trial balance should still balance. Then try: cut an order to fewer than you have already delivered (refused), call off an order with goods already gone (refused), and mark a quotation lost with no reason (refused). |
 
 | P14b | done | Staff records, behind the "Staff records" switch: employees, attendance, leave and a monthly salary sheet. **An employee is not a login** — a delivery boy has no sign-in and still has to be paid and marked present — so employees are their own list with an optional link to a login. **Checking in is guarded by a code the branch keeps**, and the record says whether the person typed it themselves or a manager marked them: an IP check would lock everybody out of their own attendance the morning the router changes, and a code everybody knows is not proof of presence, so the app records what it can honestly record — a record made at the branch, on the day. **A day nobody recorded is "not recorded", never guessed at as absent** (shown in red, because it is the figure to chase); only a day marked absent costs anybody money. Approving leave fills in those days, so the salary sheet cannot dock somebody for days the owner agreed to. The sheet shows every figure, not just the net — basic, allowances, days worked, days absent, the absence cut and the advance cut — and **a day's pay is the month divided by that month's own days**, never a flat 30. Paying posts a running cost dated the end of the month it is for, takes the cash out of the drawer, and settles the advances it took back. Salary is a **second permission** on top of HR: a manager can keep attendance without seeing the payroll, and the pay figures are absent from the response rather than zeroed. Plus two reports (attendance, salary sheet). 583 database checks, 154 unit tests. | Settings → Features → turn on **Staff records**. Settings → Lists: add a department and a job title. Staff records → People → Add somebody: add "Mina" with no login. Attendance → "Set Main branch's opening time and code": put in 7788, then check in with it (try a wrong code too — it should refuse by name). Mark Mina absent for a day last month. People → "Set it" against each person to say what they earn, and give one of them an advance. Salary → Work out a month: the absence should cost exactly one day's pay for that month's length, and any advance should come off. Pay it, and Accounts → Trial balance should still balance with the salary in Staff salaries. Check that a manager with HR but not salary sees the first three tabs and no figures. |
+
+## Where P14c got to (paused mid-prompt, 30 Oct 2026)
+
+P14 through P14b are finished and committed. **P14c is part-built and committed as work
+in progress** — every check passes with it in place, and nothing in it is reachable from
+the UI yet (no `distribution` switch appears in Settings and no screen calls it), so it
+cannot affect anything you test.
+
+Done so far, in `supabase/migrations/20261026000024_distribution.sql`:
+
+- The comment at the top with the four decisions it rests on (a rep is an employee with
+  a territory; every sale already has a rep so the SR reports cannot drop a third of the
+  day the way BMS's do; a target is what somebody was asked to do, never recalculated; a
+  security deposit is the dealer's money, so a liability).
+- The `distribution` feature switch and the `manage_customers` permission.
+- `employees.is_rep`, `commission_pct`, `commission_on`; `rep_areas`; `rep_targets`.
+- On `customers`: `kind` (retail / dealer / retailer / corporate), `parent_id` for a
+  sub-dealer, `rep_id`, `home_branch_id`, and the BMS trader flags `blocked`,
+  `block_reason`, `cash_only`, `is_vip`.
+- `delivery_points`, wired to `sales_orders.delivery_point_id` (the column was waiting
+  in P14a) and a new `challans.delivery_point_id`.
+- `customer_deposits`.
+
+Still to do for P14c, in order:
+
+1. `save_rep()` (areas, commission), `save_rep_target()`, and `rep_achievement()` —
+   target against actual, % done, the run-rate for the rest of the month, and a ranking.
+   A rep's own view shows only their own numbers.
+2. `save_delivery_point()`, and making orders and challans pick one.
+3. `record_deposit()` (take, refund, or use against a bill) posting to a
+   `customer_deposit` liability account seeded like P14a's two.
+4. **The flags the counter has to respect**: `complete_sale()` refuses `due` for a
+   blocked or cash-only customer, and says which. This is a redefinition of
+   `complete_sale()` like P14a's — copy the current body and add the check beside the
+   existing `CUSTOMER_HAS_NO_CREDIT` one at line ~1616 of the P14a migration.
+5. `convert_customer()` (retail → dealer, cash → credit) and
+   `move_customer_branch()`, both logged, and a search across every field.
+6. Turn on the 5 reports still marked `needs: "P14c"` in `src/lib/reports.ts` (S-11 to
+   S-14 need a `rep` column the sale datasets already carry; S-29, S-33 and S-41 need a
+   rep statement), then `pnpm reports:gen`.
+7. Types, backend, demo, screens, checks, a PROGRESS row and `docs/notes/distribution.md`.
+
+The done-when to aim at: a rep with a ৳5 lakh monthly target sees 40% achieved on their
+phone after their dealers' orders are recorded; a dealer with a ৳50,000 security deposit
+shows it on their profile and in the accounts; and a blocked customer cannot buy on due.
