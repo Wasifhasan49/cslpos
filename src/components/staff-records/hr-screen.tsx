@@ -198,6 +198,7 @@ function People({ onDone, onFail }: { onDone: (s: string) => void; onFail: (e: u
                 <th className="p-3 font-normal">Today</th>
                 {canSeePay && <th className="p-3 text-right font-normal">Monthly</th>}
                 {canSeePay && <th className="p-3 text-right font-normal">Advance owed</th>}
+                {canSeePay && <th className="p-3 font-normal">What they earn</th>}
               </tr>
             </thead>
             <tbody>
@@ -225,6 +226,11 @@ function People({ onDone, onFail }: { onDone: (s: string) => void; onFail: (e: u
                       {e.advanceOutstanding ? formatTaka(e.advanceOutstanding) : "—"}
                     </td>
                   )}
+                  {canSeePay && (
+                    <td className="p-3">
+                      <Pay employee={e} onDone={onDone} onFail={onFail} />
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -237,6 +243,79 @@ function People({ onDone, onFail }: { onDone: (s: string) => void; onFail: (e: u
         </p>
       )}
     </>
+  );
+}
+
+/** What somebody earns, and lending against it. Owner only, in the database too. */
+function Pay({ employee, onDone, onFail }: {
+  employee: Employee;
+  onDone: (s: string) => void;
+  onFail: (e: unknown) => void;
+}) {
+  const { backend } = useStaff();
+  const [open, setOpen] = React.useState(false);
+  const [basic, setBasic] = React.useState(String(employee.basic ?? 0));
+  const [house, setHouse] = React.useState(String(employee.allowances?.["House rent"] ?? 0));
+  const [advance, setAdvance] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+
+  if (!open) {
+    return (
+      <Button variant="ghost" onClick={() => setOpen(true)}>
+        {employee.basic ? "Change it" : "Set it"}
+      </Button>
+    );
+  }
+  return (
+    <div className="flex flex-wrap items-end gap-2">
+      <label className="flex w-[110px] flex-col gap-1 text-[13px] text-muted">
+        Basic
+        <Input inputMode="numeric" className="num" value={basic}
+               onChange={(e) => setBasic(e.target.value)} />
+      </label>
+      <label className="flex w-[110px] flex-col gap-1 text-[13px] text-muted">
+        House rent
+        <Input inputMode="numeric" className="num" value={house}
+               onChange={(e) => setHouse(e.target.value)} />
+      </label>
+      <Button
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            await backend.saveSalaryTerms(employee.id, {
+              basic: Number(basic) || 0,
+              allowances: Number(house) > 0 ? { "House rent": Number(house) } : {},
+            });
+            setOpen(false);
+            onDone(`${employee.name} earns ${formatTaka((Number(basic) || 0) + (Number(house) || 0))} a month.`);
+          } catch (e) { onFail(e); } finally { setBusy(false); }
+        }}
+      >
+        Save
+      </Button>
+      <label className="flex w-[120px] flex-col gap-1 text-[13px] text-muted">
+        Lend them
+        <Input inputMode="numeric" className="num" value={advance}
+               onChange={(e) => setAdvance(e.target.value)} placeholder="Advance" />
+      </label>
+      <Button
+        variant="outline"
+        disabled={busy || !(Number(advance) > 0)}
+        onClick={async () => {
+          setBusy(true);
+          try {
+            await backend.recordSalaryAdvance(employee.id, Number(advance) || 0, "cash");
+            setAdvance("");
+            setOpen(false);
+            onDone("Advance recorded. It comes off the next salary sheet.");
+          } catch (e) { onFail(e); } finally { setBusy(false); }
+        }}
+      >
+        Give an advance
+      </Button>
+      <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
+    </div>
   );
 }
 
@@ -262,6 +341,8 @@ function Attendance({ onDone, onFail }: { onDone: (s: string) => void; onFail: (
 
   return (
     <>
+      <BranchSettings onDone={onDone} onFail={onFail} />
+
       <section className="rounded-xl border border-line bg-white p-4">
         <h2 className="font-semibold">I&rsquo;m in</h2>
         <p className="mt-1 text-[13px] text-muted">
@@ -389,6 +470,73 @@ function Attendance({ onDone, onFail }: { onDone: (s: string) => void; onFail: (
         </div>
       )}
     </>
+  );
+}
+
+/** When this branch opens, and the code it takes check-ins with. */
+function BranchSettings({ onDone, onFail }: {
+  onDone: (s: string) => void; onFail: (e: unknown) => void;
+}) {
+  const { backend, branch } = useStaff();
+  const [open, setOpen] = React.useState(false);
+  const [opensAt, setOpensAt] = React.useState("10:00");
+  const [grace, setGrace] = React.useState("15");
+  const [pin, setPin] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+
+  if (!open) {
+    return (
+      <div>
+        <Button variant="outline" onClick={() => setOpen(true)}>
+          Set {branch.name}&rsquo;s opening time and code
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <section className="rounded-xl border border-line bg-white p-4">
+      <h2 className="font-semibold">{branch.name}</h2>
+      <p className="mt-1 text-[13px] text-muted">
+        Anybody arriving more than the grace period after opening is marked late. Leave
+        the code empty and this branch takes no check-ins at all — a manager marks
+        attendance instead.
+      </p>
+      <div className="mt-2 flex flex-wrap items-end gap-2">
+        <label className="flex w-[130px] flex-col gap-1 text-[13px] text-muted">
+          Opens at
+          <Input type="time" value={opensAt} onChange={(e) => setOpensAt(e.target.value)} />
+        </label>
+        <label className="flex w-[130px] flex-col gap-1 text-[13px] text-muted">
+          Grace (minutes)
+          <Input inputMode="numeric" className="num" value={grace}
+                 onChange={(e) => setGrace(e.target.value)} />
+        </label>
+        <label className="flex w-[150px] flex-col gap-1 text-[13px] text-muted">
+          Check-in code
+          <Input inputMode="numeric" className="num" value={pin}
+                 onChange={(e) => setPin(e.target.value)} placeholder="4 to 8 digits" />
+        </label>
+        <Button
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              const r = await backend.saveAttendanceSettings(branch.id, {
+                opens_at: opensAt, grace_minutes: Number(grace) || 0,
+                attendance_pin: pin,
+              });
+              setOpen(false);
+              onDone(r.takesCheckIns
+                ? `${branch.name} opens at ${r.opensAt} and takes check-ins.`
+                : `${branch.name} opens at ${r.opensAt}. A manager marks attendance here.`);
+            } catch (e) { onFail(e); } finally { setBusy(false); }
+          }}
+        >
+          Save
+        </Button>
+        <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
+      </div>
+    </section>
   );
 }
 
