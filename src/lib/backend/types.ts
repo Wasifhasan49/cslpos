@@ -21,6 +21,8 @@ import type {
   JournalExport, LayerRebuildResult, PeriodLock, ReportFilters, ReportListItem,
   ReportResult,
   AdvanceRow, BilledResult, ChallanRow, OrderRow, QuotationRow, SalesDocument,
+  AttendanceDay, AttendanceStatus, AttendanceTodayBranch, CheckInResult, Employee,
+  LeaveRow, SalarySheet, SalarySheetRow,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 
@@ -590,4 +592,48 @@ export interface Backend {
 
   /** One document with its lines, for the screen and for printing. */
   salesDocument(kind: "quotation" | "order" | "challan", id: string): Promise<SalesDocument>;
+
+  // --- HR: employees, attendance and salary (P14b) ---
+  /** The staff list. Pay figures are absent, not zero, unless this login may see them. */
+  listEmployees(input?: {
+    branchId?: string | null; active?: boolean | null; query?: string | null;
+  }): Promise<Employee[]>;
+  saveEmployee(id: string | null, values: Record<string, unknown>): Promise<void>;
+  /** What somebody earns. A separate permission from the rest of HR. */
+  saveSalaryTerms(employeeId: string, values: Record<string, unknown>): Promise<void>;
+  /** When a branch opens, its grace period, and the code it takes check-ins with. */
+  saveAttendanceSettings(
+    branchId: string, values: Record<string, unknown>,
+  ): Promise<{ opensAt: string; graceMinutes: number; takesCheckIns: boolean }>;
+  /** "I'm in", with the branch's own code. Late is worked out from the branch's
+   *  opening time, in Dhaka time. */
+  checkIn(branchId: string, pin: string, employeeId?: string | null): Promise<CheckInResult>;
+  checkOut(branchId: string, employeeId?: string | null): Promise<void>;
+  /** A manager's word: present, absent, on leave or half a day. */
+  markAttendance(
+    employeeId: string, date: string, status: AttendanceStatus, note?: string | null,
+  ): Promise<void>;
+  attendanceDay(date?: string | null, branchId?: string | null): Promise<AttendanceDay>;
+  /** Today's present / late / absent per branch, for the owner's dashboard. */
+  attendanceToday(branchId?: string | null): Promise<AttendanceTodayBranch[]>;
+  listLeave(status?: string | null, employeeId?: string | null): Promise<LeaveRow[]>;
+  askForLeave(input: {
+    employeeId: string; leaveTypeId: string; from: string; to: string;
+    reason?: string | null;
+  }): Promise<{ days: number }>;
+  /** Approving writes the attendance for those days, so the salary sheet knows. */
+  decideLeave(id: string, approve: boolean, note?: string | null): Promise<void>;
+  /** Money lent against a salary, to come off the next sheet. */
+  recordSalaryAdvance(
+    employeeId: string, amount: number, method?: string, note?: string | null,
+  ): Promise<void>;
+  /** Work the month out from the attendance that is there. Safe to run again. */
+  buildSalarySheet(
+    month: string, branchId?: string | null,
+  ): Promise<{ id: string; employees: number; total: number }>;
+  paySalarySheet(
+    sheetId: string, method?: string, note?: string | null,
+  ): Promise<{ total: number }>;
+  listSalarySheets(branchId?: string | null): Promise<SalarySheetRow[]>;
+  salarySheet(id: string): Promise<SalarySheet>;
 }

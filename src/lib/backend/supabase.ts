@@ -23,6 +23,8 @@ import type {
   ReportListItem, ReportResult, ReportRow, ReportSection, ReportRegisterKey,
   AdvanceRow, BilledResult, ChallanRow, OrderRow, QuotationRow, SalesDocLine,
   SalesDocument,
+  AttendanceDay, AttendanceRow, AttendanceStatus, AttendanceTodayBranch, CheckInResult,
+  Employee, LeaveRow, SalarySheet, SalarySheetRow,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
@@ -2434,6 +2436,205 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
       return readSalesDocument((data ?? {}) as Record<string, unknown>);
     },
 
+    // --- HR: employees, attendance and salary (P14b) ---
+
+    async listEmployees(input): Promise<Employee[]> {
+      const { data, error } = await sb.rpc("employee_list", {
+        p_branch_id: input?.branchId ?? null,
+        p_active: input?.active === undefined ? true : input.active,
+        p_query: input?.query ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map(readEmployee);
+    },
+
+    async saveEmployee(id, values): Promise<void> {
+      const { error } = await sb.rpc("save_employee", { p_id: id, p_values: values });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async saveSalaryTerms(employeeId, values): Promise<void> {
+      const { error } = await sb.rpc("save_salary_terms", {
+        p_employee_id: employeeId, p_values: values,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async saveAttendanceSettings(branchId, values) {
+      const { data, error } = await sb.rpc("save_attendance_settings", {
+        p_branch_id: branchId, p_values: values,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return { opensAt: String(r.opens_at ?? ""), graceMinutes: num(r.grace_minutes),
+               takesCheckIns: Boolean(r.takes_check_ins) };
+    },
+
+    async checkIn(branchId, pin, employeeId): Promise<CheckInResult> {
+      const { data, error } = await sb.rpc("check_in", {
+        p_branch_id: branchId, p_pin: pin, p_employee_id: employeeId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return {
+        employee: String(r.employee), branch: String(r.branch), date: String(r.date),
+        status: r.status as AttendanceStatus, minutesLate: num(r.minutes_late),
+        opensAt: String(r.opens_at), graceMinutes: num(r.grace_minutes),
+      };
+    },
+
+    async checkOut(branchId, employeeId): Promise<void> {
+      const { error } = await sb.rpc("check_out", {
+        p_branch_id: branchId, p_employee_id: employeeId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async markAttendance(employeeId, date, status, note): Promise<void> {
+      const { error } = await sb.rpc("mark_attendance", {
+        p_employee_id: employeeId, p_date: date, p_status: status, p_note: note ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async attendanceDay(date, branchId): Promise<AttendanceDay> {
+      const { data, error } = await sb.rpc("attendance_day", {
+        p_date: date ?? null, p_branch_id: branchId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const d = (data ?? {}) as Record<string, unknown>;
+      const c = (d.counts ?? {}) as Record<string, unknown>;
+      return {
+        date: String(d.date), holiday: (d.holiday as string | null) ?? null,
+        people: ((d.people as Record<string, unknown>[] | null) ?? []).map((p) => ({
+          employeeId: String(p.employee_id), name: String(p.name),
+          branch: (p.branch as string | null) ?? null,
+          branchId: (p.branch_id as string | null) ?? null,
+          designation: (p.designation as string | null) ?? null,
+          status: p.status as AttendanceRow["status"],
+          inAt: (p.in_at as string | null) ?? null,
+          outAt: (p.out_at as string | null) ?? null,
+          minutesLate: num(p.minutes_late),
+          source: (p.source as "self" | "manager" | null) ?? null,
+          note: (p.note as string | null) ?? null,
+          markedBy: (p.marked_by as string | null) ?? null,
+        })),
+        counts: {
+          present: num(c.present), late: num(c.late), absent: num(c.absent),
+          leave: num(c.leave), notRecorded: num(c.not_recorded), people: num(c.people),
+        },
+      };
+    },
+
+    async attendanceToday(branchId): Promise<AttendanceTodayBranch[]> {
+      const { data, error } = await sb.rpc("attendance_today", {
+        p_branch_id: branchId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const d = (data ?? {}) as Record<string, unknown>;
+      if (!d.on) return [];
+      return ((d.branches as Record<string, unknown>[] | null) ?? []).map((b) => ({
+        branch: String(b.branch), branchId: String(b.branch_id),
+        people: num(b.people), present: num(b.present), late: num(b.late),
+        absent: num(b.absent), onLeave: num(b.on_leave), notRecorded: num(b.not_recorded),
+      }));
+    },
+
+    async listLeave(status, employeeId): Promise<LeaveRow[]> {
+      const { data, error } = await sb.rpc("leave_list", {
+        p_status: status ?? null, p_employee_id: employeeId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((r) => ({
+        id: String(r.id), employee: String(r.employee), employeeId: String(r.employee_id),
+        kind: String(r.kind), isPaid: Boolean(r.is_paid),
+        fromDate: String(r.from_date), toDate: String(r.to_date), days: num(r.days),
+        reason: (r.reason as string | null) ?? null,
+        status: r.status as LeaveRow["status"],
+        note: (r.note as string | null) ?? null,
+        decidedBy: (r.decided_by as string | null) ?? null,
+        takenThisYear: num(r.taken_this_year), daysAYear: num(r.days_a_year),
+      }));
+    },
+
+    async askForLeave(input) {
+      const { data, error } = await sb.rpc("save_leave_request", {
+        p_employee_id: input.employeeId, p_leave_type_id: input.leaveTypeId,
+        p_from: input.from, p_to: input.to, p_reason: input.reason ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return { days: num(((data ?? {}) as Record<string, unknown>).days) };
+    },
+
+    async decideLeave(id, approve, note): Promise<void> {
+      const { error } = await sb.rpc("decide_leave", {
+        p_id: id, p_approve: approve, p_note: note ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async recordSalaryAdvance(employeeId, amount, method, note): Promise<void> {
+      const { error } = await sb.rpc("record_salary_advance", {
+        p_employee_id: employeeId, p_amount: amount,
+        p_method: method ?? "cash", p_note: note ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async buildSalarySheet(month, branchId) {
+      const { data, error } = await sb.rpc("build_salary_sheet", {
+        p_month: month, p_branch_id: branchId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return { id: String(r.id), employees: num(r.employees), total: num(r.total) };
+    },
+
+    async paySalarySheet(sheetId, method, note) {
+      const { data, error } = await sb.rpc("pay_salary_sheet", {
+        p_sheet_id: sheetId, p_method: method ?? "cash", p_note: note ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return { total: num(((data ?? {}) as Record<string, unknown>).total) };
+    },
+
+    async listSalarySheets(branchId): Promise<SalarySheetRow[]> {
+      const { data, error } = await sb.rpc("salary_sheet_list", {
+        p_branch_id: branchId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((r) => ({
+        id: String(r.id), month: String(r.month), status: r.status as "draft" | "paid",
+        total: num(r.total), branch: (r.branch as string | null) ?? null,
+        branchId: (r.branch_id as string | null) ?? null,
+        paidOn: (r.paid_on as string | null) ?? null, people: num(r.people),
+      }));
+    },
+
+    async salarySheet(id): Promise<SalarySheet> {
+      const { data, error } = await sb.rpc("salary_sheet", { p_id: id });
+      if (error) throw new Error(friendlyError(error.message));
+      const d = (data ?? {}) as Record<string, unknown>;
+      return {
+        id: String(d.id), month: String(d.month), status: d.status as "draft" | "paid",
+        total: num(d.total), branch: (d.branch as string | null) ?? null,
+        branchId: (d.branch_id as string | null) ?? null,
+        paidOn: (d.paid_on as string | null) ?? null,
+        method: (d.method as string | null) ?? null,
+        note: (d.note as string | null) ?? null, who: String(d.who ?? ""),
+        lines: ((d.lines as Record<string, unknown>[] | null) ?? []).map((l) => ({
+          id: String(l.id), employeeId: String(l.employee_id),
+          employee: String(l.employee),
+          designation: (l.designation as string | null) ?? null,
+          basic: num(l.basic), allowances: num(l.allowances),
+          absentDays: num(l.absent_days), absenceCut: num(l.absence_cut),
+          advanceCut: num(l.advance_cut), otherCut: num(l.other_cut),
+          daysWorked: num(l.days_worked), daysInMonth: num(l.days_in_month),
+          net: num(l.net),
+        })),
+      };
+    },
+
     async stockHistory(branchId: string, productId?: string | null, limit = 100): Promise<StockMovementRow[]> {
       const { data, error } = await sb.rpc("stock_history", {
         p_branch_id: branchId, p_product_id: productId ?? null, p_limit: limit,
@@ -2662,5 +2863,41 @@ function readSalesDocument(d: Record<string, unknown>): SalesDocument {
       id: String(c.id), challanNo: String(c.challan_no), date: String(c.date),
       status: String(c.status),
     })),
+  };
+}
+
+/** An employee row. Pay figures are absent rather than zero when they are not ours. */
+function readEmployee(e: Record<string, unknown>): Employee {
+  return {
+    id: String(e.id), code: (e.code as string | null) ?? null, name: String(e.name),
+    phone: (e.phone as string | null) ?? null,
+    photoUrl: (e.photo_url as string | null) ?? null,
+    address: (e.address as string | null) ?? null,
+    nid: (e.nid as string | null) ?? null,
+    dateOfBirth: (e.date_of_birth as string | null) ?? null,
+    joinedOn: String(e.joined_on),
+    branch: (e.branch as string | null) ?? null,
+    branchId: (e.branch_id as string | null) ?? null,
+    department: (e.department as string | null) ?? null,
+    departmentId: (e.department_id as string | null) ?? null,
+    designation: (e.designation as string | null) ?? null,
+    designationId: (e.designation_id as string | null) ?? null,
+    position: (e.position as string | null) ?? null,
+    positionId: (e.position_id as string | null) ?? null,
+    profession: (e.profession as string | null) ?? null,
+    professionId: (e.profession_id as string | null) ?? null,
+    emergencyName: (e.emergency_name as string | null) ?? null,
+    emergencyPhone: (e.emergency_phone as string | null) ?? null,
+    religion: (e.religion as string | null) ?? null,
+    nationality: (e.nationality as string | null) ?? null,
+    staffId: (e.staff_id as string | null) ?? null,
+    login: (e.login as string | null) ?? null,
+    active: Boolean(e.active), leftOn: (e.left_on as string | null) ?? null,
+    note: (e.note as string | null) ?? null,
+    basic: numOrNull(e.basic),
+    allowances: (e.allowances as Record<string, number> | null) ?? null,
+    dailyRate: numOrNull(e.daily_rate),
+    advanceOutstanding: numOrNull(e.advance_outstanding),
+    today: (e.today as Employee["today"]) ?? null,
   };
 }

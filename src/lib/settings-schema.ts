@@ -181,6 +181,66 @@ export const SETTING_LISTS: ListSpec[] = [
       { key: "active", label: "In use", type: "bool" },
     ],
   },
+  // The HR lists (P14b). They only appear once HR is on, and saving one needs the
+  // staff-records permission as well as settings.
+  {
+    table: "departments",
+    title: "Departments",
+    what: "Shop floor, office, workshop — whatever the shop divides itself into.",
+    feature: "hr",
+    nameField: "name",
+    fields: [
+      { key: "name", label: "Department", type: "text", required: true },
+      { key: "active", label: "In use", type: "bool" },
+    ],
+  },
+  {
+    table: "designations",
+    title: "Job titles",
+    what: "What it says on somebody's card: Salesman, Technician, Manager.",
+    feature: "hr",
+    nameField: "name",
+    fields: [
+      { key: "name", label: "Job title", type: "text", required: true },
+      { key: "active", label: "In use", type: "bool" },
+    ],
+  },
+  {
+    table: "positions",
+    title: "Positions",
+    what: "Where a job sits in the hierarchy. Most shops use job titles alone and leave this empty.",
+    feature: "hr",
+    nameField: "name",
+    fields: [
+      { key: "name", label: "Position", type: "text", required: true },
+      { key: "active", label: "In use", type: "bool" },
+    ],
+  },
+  {
+    table: "professions",
+    title: "Professions",
+    what: "A trade somebody is qualified in, if the shop records it.",
+    feature: "hr",
+    nameField: "name",
+    fields: [
+      { key: "name", label: "Profession", type: "text", required: true },
+      { key: "active", label: "In use", type: "bool" },
+    ],
+  },
+  {
+    table: "leave_types",
+    title: "Kinds of leave",
+    what: "Casual, sick, annual. Unpaid leave still comes off the salary; paid leave does not.",
+    feature: "hr",
+    nameField: "name",
+    fields: [
+      { key: "name", label: "Kind of leave", type: "text", required: true },
+      { key: "days_a_year", label: "Days a year", type: "number",
+        hint: "0 means as many as the owner allows, which is how most small shops work." },
+      { key: "is_paid", label: "Paid", type: "bool" },
+      { key: "active", label: "In use", type: "bool" },
+    ],
+  },
 ];
 
 export interface FeatureSpec {
@@ -200,6 +260,9 @@ export const FEATURE_SWITCHES: FeatureSpec[] = [
   { key: "extra_charges", label: "Extra charges on a sale", what: "Delivery, installation, service charges." },
   { key: "hs_codes", label: "HS codes", what: "Customs codes, for shops that import." },
   { key: "accounts", label: "Accounts", what: "Double-entry books, vouchers and cheques." },
+  { key: "sales_documents", label: "Sales documents", what: "Quotations, sales orders that hold stock, and delivery notes billed later. For shops that sell to companies." },
+  { key: "hr", label: "Staff records", what: "Employees, attendance, leave and the monthly salary sheet." },
+  { key: "hr_extra_fields", label: "Religion and nationality on a staff record", what: "BMS records these. Off unless the shop actually needs them." },
   { key: "sms", label: "SMS", what: "Receipts and due reminders by text message." },
 ];
 

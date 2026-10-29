@@ -22,7 +22,7 @@ export interface NavItem {
 export type IconName =
   | "counter" | "sales" | "warranty" | "stock" | "purchases" | "transfers"
   | "products" | "customers" | "suppliers" | "cash" | "dashboard" | "accounts"
-  | "reports" | "orders" | "settings";
+  | "reports" | "orders" | "people" | "settings";
 
 const EVERYONE: readonly Role[] = ["owner", "manager", "cashier"];
 const MANAGERS: readonly Role[] = ["owner", "manager"];
@@ -40,6 +40,9 @@ export const NAV: readonly NavItem[] = [
   // Quote, order, deliver, bill — for shops that sell to companies. Off by default,
   // because a shop that sells over the counter has no use for a quotation.
   { href: "/orders",    label: "Orders",    short: "Orders",  icon: "orders",    roles: MANAGERS, feature: "sales_documents" },
+  // Who works here, who was in, who is owed what. Everything on it needs the
+  // staff-records permission as well; the salary tab needs a second one.
+  { href: "/staff-records", label: "Staff records", short: "Staff", icon: "people", roles: MANAGERS, feature: "hr" },
   { href: "/products",  label: "Products",  short: "Items",    icon: "products",  roles: MANAGERS },
   { href: "/customers", label: "Customers", short: "People",   icon: "customers", roles: MANAGERS },
   { href: "/suppliers", label: "Suppliers", short: "Supply",   icon: "suppliers", roles: MANAGERS },

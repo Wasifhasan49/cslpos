@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 import {
   ArrowLeftRight, BookOpenCheck, Boxes, ChevronDown, Check, ClipboardList, FileText, KeyRound,
   LayoutDashboard, LogOut, MoreHorizontal, Package, Receipt, Settings, ShieldCheck,
-  ShoppingCart, Store, Truck, Users, Wallet,
+  ShoppingCart, Store, Truck, UserCog, Users, Wallet,
 } from "lucide-react";
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
@@ -28,6 +28,7 @@ const ICONS: Record<IconName, React.ComponentType<{ className?: string }>> = {
   accounts: BookOpenCheck,
   reports: FileText,
   orders: ClipboardList,
+  people: UserCog,
   settings: Settings,
 };
 

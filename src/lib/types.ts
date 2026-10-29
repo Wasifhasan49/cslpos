@@ -302,7 +302,9 @@ export interface Receipt {
 export type FeatureKey =
   | "vat" | "multi_location" | "price_lists" | "credit_sales" | "purchase_orders"
   | "transfers" | "accounts" | "sms" | "extra_charges" | "hs_codes"
-  | "managers_see_dashboard" | "managers_see_accounts" | "managers_see_settings";
+  | "managers_see_dashboard" | "managers_see_accounts" | "managers_see_settings"
+  // P14a and P14b.
+  | "sales_documents" | "hr" | "hr_extra_fields";
 
 export interface ShopDetails {
   name: string;
@@ -340,7 +342,9 @@ export interface ShopDetails {
 export type SettingTable =
   | "units" | "vat_rates" | "hs_codes" | "extra_charges" | "discount_types"
   | "payment_methods" | "card_types" | "bank_accounts" | "warranty_terms"
-  | "transaction_categories" | "sale_fields";
+  | "transaction_categories" | "sale_fields"
+  // P14b. The HR lists need the `manage_hr` permission, not just `edit_settings`.
+  | "departments" | "designations" | "positions" | "professions" | "leave_types";
 
 /** A row in one of the setup lists. Deliberately loose: the lists differ, and the
  *  database validates the field names, so the UI does not need ten interfaces. */
@@ -1675,4 +1679,154 @@ export interface BilledResult extends Receipt {
   challanNo: string | null;
   advanceUsed: number;
   stillOwed: number;
+}
+
+// --- HR: employees, attendance and salary (P14b) ---
+
+export type AttendanceStatus =
+  "present" | "late" | "absent" | "leave" | "holiday" | "half_day";
+
+export interface Employee {
+  id: string;
+  code: string | null;
+  name: string;
+  phone: string | null;
+  photoUrl: string | null;
+  address: string | null;
+  nid: string | null;
+  dateOfBirth: string | null;
+  joinedOn: string;
+  branch: string | null;
+  branchId: string | null;
+  department: string | null;
+  departmentId: string | null;
+  designation: string | null;
+  designationId: string | null;
+  position: string | null;
+  positionId: string | null;
+  profession: string | null;
+  professionId: string | null;
+  emergencyName: string | null;
+  emergencyPhone: string | null;
+  religion: string | null;
+  nationality: string | null;
+  /** The login, if this person has one. Most employees do not. */
+  staffId: string | null;
+  login: string | null;
+  active: boolean;
+  leftOn: string | null;
+  note: string | null;
+  /** Only sent to somebody allowed to see pay — null otherwise, not zero. */
+  basic: number | null;
+  allowances: Record<string, number> | null;
+  dailyRate: number | null;
+  advanceOutstanding: number | null;
+  /** Today's attendance, if there is any. */
+  today: AttendanceStatus | null;
+}
+
+export interface AttendanceRow {
+  employeeId: string;
+  name: string;
+  branch: string | null;
+  branchId: string | null;
+  designation: string | null;
+  /** "not recorded" when nobody marked it: a shop that forgot is not a shop where
+   *  everybody was absent, and guessing would dock somebody's salary. */
+  status: AttendanceStatus | "not recorded";
+  inAt: string | null;
+  outAt: string | null;
+  minutesLate: number;
+  source: "self" | "manager" | null;
+  note: string | null;
+  markedBy: string | null;
+}
+
+export interface AttendanceDay {
+  date: string;
+  holiday: string | null;
+  people: AttendanceRow[];
+  counts: {
+    present: number; late: number; absent: number; leave: number;
+    notRecorded: number; people: number;
+  };
+}
+
+export interface AttendanceTodayBranch {
+  branch: string;
+  branchId: string;
+  people: number;
+  present: number;
+  late: number;
+  absent: number;
+  onLeave: number;
+  notRecorded: number;
+}
+
+export interface LeaveRow {
+  id: string;
+  employee: string;
+  employeeId: string;
+  kind: string;
+  isPaid: boolean;
+  fromDate: string;
+  toDate: string;
+  days: number;
+  reason: string | null;
+  status: "asked" | "approved" | "refused" | "cancelled";
+  note: string | null;
+  decidedBy: string | null;
+  takenThisYear: number;
+  daysAYear: number;
+}
+
+export interface SalaryLine {
+  id: string;
+  employeeId: string;
+  employee: string;
+  designation: string | null;
+  basic: number;
+  allowances: number;
+  absentDays: number;
+  absenceCut: number;
+  advanceCut: number;
+  otherCut: number;
+  daysWorked: number;
+  daysInMonth: number;
+  net: number;
+}
+
+export interface SalarySheet {
+  id: string;
+  month: string;
+  status: "draft" | "paid";
+  total: number;
+  branch: string | null;
+  branchId: string | null;
+  paidOn: string | null;
+  method: string | null;
+  note: string | null;
+  who: string;
+  lines: SalaryLine[];
+}
+
+export interface SalarySheetRow {
+  id: string;
+  month: string;
+  status: "draft" | "paid";
+  total: number;
+  branch: string | null;
+  branchId: string | null;
+  paidOn: string | null;
+  people: number;
+}
+
+export interface CheckInResult {
+  employee: string;
+  branch: string;
+  date: string;
+  status: AttendanceStatus;
+  minutesLate: number;
+  opensAt: string;
+  graceMinutes: number;
 }

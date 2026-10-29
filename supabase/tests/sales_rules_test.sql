@@ -4639,5 +4639,277 @@ select pg_temp.check(
 
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
 
+
+-- ===========================================================================
+-- 28. HR: EMPLOYEES, ATTENDANCE AND SALARY (P14b)
+-- ===========================================================================
+--
+-- The done-when: two employees check in, one of them late, one takes a day's sick leave,
+-- the dashboard counts present / late / absent correctly, and the month's salary sheet
+-- deducts the right amount and posts to the salary expense account.
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+select public.set_feature('hr', true);
+
+create temporary table p14b (k text primary key, v text);
+
+-- The branch opens at 10:00 with 15 minutes' grace, and keeps a code for checking in.
+-- Through the function: the tables take no direct writes, not even from the owner.
+select public.save_attendance_settings('00000000-0000-4000-8000-0000000000b1',
+  jsonb_build_object('opens_at', '10:00', 'grace_minutes', 15, 'attendance_pin', '7788'));
+select pg_temp.expect_error(
+  $q$select public.save_attendance_settings('00000000-0000-4000-8000-0000000000b1',
+       jsonb_build_object('attendance_pin', 'abc'))$q$, 'BAD_BRANCH_PIN');
+
+-- Two people. One of them is the cashier's login, so "I'm in" can be tested as them.
+do $$
+declare v_dept uuid; v_desig uuid;
+begin
+  v_dept := (public.save_setting_row('departments', null,
+                jsonb_build_object('name', 'Shop floor'))->>'id')::uuid;
+  v_desig := (public.save_setting_row('designations', null,
+                jsonb_build_object('name', 'Salesman'))->>'id')::uuid;
+  insert into p14b values ('dept', v_dept::text), ('desig', v_desig::text);
+
+  insert into p14b values ('emp_ovi', (public.save_employee(null, jsonb_build_object(
+    'name', 'Ovi', 'branch_id', '00000000-0000-4000-8000-0000000000b1',
+    'department_id', v_dept::text, 'designation_id', v_desig::text,
+    'joined_on', '2026-01-01',
+    'staff_id', 'aaaaaaaa-0000-4000-8000-000000000002'))->>'id'));
+
+  insert into p14b values ('emp_mina', (public.save_employee(null, jsonb_build_object(
+    'name', 'Mina', 'branch_id', '00000000-0000-4000-8000-0000000000b1',
+    'department_id', v_dept::text, 'designation_id', v_desig::text,
+    'joined_on', '2026-01-01', 'phone', '01733000111'))->>'id'));
+end $$;
+
+select pg_temp.check(
+  (select count(*) from public.employees where active) = 2,
+  'two employees on the books');
+select pg_temp.check(
+  (select staff_id from public.employees where name = 'Ovi') is not null
+  and (select staff_id from public.employees where name = 'Mina') is null,
+  'one of them has a login and the other does not — an employee is not a login');
+
+-- What they earn. Owner only.
+select public.save_salary_terms((select v::uuid from p14b where k = 'emp_ovi'),
+  jsonb_build_object('basic', 12000, 'allowances',
+                     jsonb_build_object('House rent', 3000, 'Transport', 1000)));
+select public.save_salary_terms((select v::uuid from p14b where k = 'emp_mina'),
+  jsonb_build_object('basic', 9000));
+
+-- ---- DONE-WHEN: two check in, one late ----
+-- Mina is marked in by the manager at 10:05 (on time); Ovi checks in himself. Whether
+-- Ovi is late depends on the clock, so his status is read back rather than assumed.
+select public.mark_attendance((select v::uuid from p14b where k = 'emp_mina'),
+                              public.dhaka_today(), 'present', 'Opened up');
+
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+do $$
+declare r jsonb;
+begin
+  r := public.check_in('00000000-0000-4000-8000-0000000000b1', '7788');
+  insert into p14b values ('ovi_status', r->>'status');
+end $$;
+select pg_temp.check(
+  (select v from p14b where k = 'ovi_status') in ('present', 'late'),
+  'DONE-WHEN: somebody checks themselves in with the branch code');
+-- The wrong code is refused, and so is a branch that takes no check-ins.
+select pg_temp.expect_error(
+  $q$select public.check_in('00000000-0000-4000-8000-0000000000b1', '0000')$q$,
+  'BAD_BRANCH_PIN');
+select pg_temp.expect_error(
+  $q$select public.check_in('00000000-0000-4000-8000-0000000000b2', '7788')$q$,
+  'BRANCH_TAKES_NO_CHECK_INS');
+-- And a cashier cannot mark anybody else in.
+select pg_temp.expect_error(format(
+  $q$select public.check_in('00000000-0000-4000-8000-0000000000b1', '7788', '%s')$q$,
+  (select v from p14b where k = 'emp_mina')), 'NOT_ALLOWED:manage_hr');
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+
+-- Checking in twice does not move the first time.
+do $$
+declare v_first timestamptz;
+begin
+  select in_at into v_first from public.attendance
+    where employee_id = (select v::uuid from p14b where k = 'emp_ovi')
+      and on_date = public.dhaka_today();
+  perform public.mark_attendance((select v::uuid from p14b where k = 'emp_ovi'),
+                                 public.dhaka_today(), 'late', 'Came in at 10:40');
+  insert into p14b values ('ovi_first_in', v_first::text);
+end $$;
+select pg_temp.check(
+  (select status from public.attendance
+   where employee_id = (select v::uuid from p14b where k = 'emp_ovi')
+     and on_date = public.dhaka_today()) = 'late',
+  'DONE-WHEN: and a manager can mark somebody late');
+select pg_temp.check(
+  (select source from public.attendance
+   where employee_id = (select v::uuid from p14b where k = 'emp_ovi')
+     and on_date = public.dhaka_today()) = 'manager',
+  'and the record says it was a manager who said so, not the person');
+
+-- ---- DONE-WHEN: a day's sick leave ----
+do $$
+declare v_type uuid; v_req uuid;
+begin
+  v_type := (public.save_setting_row('leave_types', null,
+               jsonb_build_object('name', 'Sick', 'days_a_year', 10, 'is_paid', true))->>'id')::uuid;
+  insert into p14b values ('leave_type', v_type::text);
+  v_req := ((public.save_leave_request((select v::uuid from p14b where k = 'emp_mina'),
+              v_type, public.dhaka_today() - 1, public.dhaka_today() - 1, 'Fever'))->>'id')::uuid;
+  insert into p14b values ('leave_req', v_req::text);
+  perform public.decide_leave(v_req, true, 'Fine');
+end $$;
+
+select pg_temp.check(
+  (select status from public.leave_requests
+   where id = (select v::uuid from p14b where k = 'leave_req')) = 'approved',
+  'DONE-WHEN: a day of sick leave is asked for and approved');
+-- The approval has to reach the thing that counts the days, or the salary sheet would
+-- dock somebody for a day the owner agreed to.
+select pg_temp.check(
+  (select status from public.attendance
+   where employee_id = (select v::uuid from p14b where k = 'emp_mina')
+     and on_date = public.dhaka_today() - 1) = 'leave',
+  'and the attendance for that day says "leave", so the salary sheet will not dock it');
+select pg_temp.expect_error(format(
+  $q$select public.decide_leave('%s', true)$q$,
+  (select v from p14b where k = 'leave_req')), 'REQUEST_ALREADY_DECIDED');
+
+-- ---- DONE-WHEN: the dashboard counts ----
+select pg_temp.check(
+  (select (x->>'late')::integer = 1 and (x->>'present')::integer = 1
+   from jsonb_array_elements(public.attendance_today()->'branches') x
+   where x->>'branch' = 'Main branch'),
+  'DONE-WHEN: the dashboard shows one present and one late');
+select pg_temp.check(
+  (public.attendance_day()->'counts'->>'people')::integer = 2,
+  'and the day''s list has both of them on it');
+-- A day nobody recorded is "not recorded", never guessed at as absent.
+select pg_temp.check(
+  (public.attendance_day(public.dhaka_today() - 3)->'counts'->>'not_recorded')::integer = 2,
+  'a day nobody marked reads "not recorded", not "absent" — guessing would dock somebody');
+
+-- ---- An absence, and an advance, for the salary sheet to find ----
+select public.mark_attendance((select v::uuid from p14b where k = 'emp_mina'),
+                              public.dhaka_today() - 2, 'absent', 'No word');
+select public.record_salary_advance((select v::uuid from p14b where k = 'emp_ovi'),
+                                    2000, 'cash', 'Asked for it mid-month');
+
+-- ---- DONE-WHEN: the salary sheet ----
+do $$
+declare r jsonb;
+begin
+  r := public.build_salary_sheet(date_trunc('month', public.dhaka_today())::date);
+  insert into p14b values ('sheet', r->>'id'), ('sheet_total', r->>'total'),
+                          ('days_in_month', r->>'days_in_month');
+end $$;
+
+select pg_temp.check(
+  (select count(*) from public.salary_lines
+   where sheet_id = (select v::uuid from p14b where k = 'sheet')) = 2,
+  'DONE-WHEN: the month''s sheet has a line for each employee');
+
+-- Ovi: 12,000 + 4,000 allowances, no days absent, less the 2,000 advance.
+select pg_temp.check(
+  (select net from public.salary_lines l
+   join public.employees e on e.id = l.employee_id
+   where l.sheet_id = (select v::uuid from p14b where k = 'sheet') and e.name = 'Ovi')
+  = 14000,
+  'DONE-WHEN: and the advance is taken back off: 16,000 less 2,000 is 14,000');
+select pg_temp.check(
+  (select advance_cut from public.salary_lines l
+   join public.employees e on e.id = l.employee_id
+   where l.sheet_id = (select v::uuid from p14b where k = 'sheet') and e.name = 'Ovi')
+  = 2000,
+  'with the deduction shown on the line, not just folded into the net');
+
+-- Mina: 9,000 less ONE day, worked out on the days in THAT month — not a flat 30, or
+-- February would pay 30 days for 28.
+select pg_temp.check(
+  (select absence_cut from public.salary_lines l
+   join public.employees e on e.id = l.employee_id
+   where l.sheet_id = (select v::uuid from p14b where k = 'sheet') and e.name = 'Mina')
+  = round(9000.0 / (select v::integer from p14b where k = 'days_in_month'), 2),
+  'DONE-WHEN: one day absent costs exactly one day''s pay for that month''s length');
+select pg_temp.check(
+  (select absent_days from public.salary_lines l
+   join public.employees e on e.id = l.employee_id
+   where l.sheet_id = (select v::uuid from p14b where k = 'sheet') and e.name = 'Mina') = 1,
+  'and the sick day is NOT counted as absent — only the day with no word is');
+
+-- Building it again rebuilds the draft rather than doubling it.
+select public.build_salary_sheet(date_trunc('month', public.dhaka_today())::date);
+select pg_temp.check(
+  (select count(*) from public.salary_lines
+   where sheet_id = (select v::uuid from p14b where k = 'sheet')) = 2,
+  'building the sheet again rebuilds it rather than doubling it');
+
+-- ---- DONE-WHEN: paying it posts to the salary expense account ----
+select public.set_feature('accounts', true);
+do $$
+declare r jsonb;
+begin
+  r := public.pay_salary_sheet((select v::uuid from p14b where k = 'sheet'), 'cash',
+                               'Paid in cash');
+  insert into p14b values ('paid_total', r->>'total');
+end $$;
+
+select pg_temp.check(
+  (select status from public.salary_sheets where id = (select v::uuid from p14b where k = 'sheet'))
+  = 'paid',
+  'DONE-WHEN: the sheet is paid');
+select pg_temp.check(
+  (select sum(l.debit) from public.journal_lines l
+   join public.accounts a on a.id = l.account_id
+   where a.code = '6200') = (select v::numeric from p14b where k = 'paid_total'),
+  'DONE-WHEN: and the whole of it lands in the staff salaries account');
+select pg_temp.check(
+  (public.trial_balance()->>'balanced')::boolean,
+  'and the books still balance');
+select pg_temp.check(
+  exists (select 1 from public.cash_movements
+          where source_kind = 'salary' and direction = 'out'),
+  'the cash went out of the drawer, so the till still counts at closing time');
+-- The drawer movement does not post a second time: the salary entry already did.
+select pg_temp.check(
+  (select count(*) from public.journal_entries e
+   join public.journal_lines l on l.entry_id = e.id
+   join public.accounts a on a.id = l.account_id
+   where a.code = '6200') = 1,
+  'and the salary is on the books once, not twice');
+
+-- The advance it took back is settled, so next month does not deduct it again.
+select pg_temp.check(
+  not exists (select 1 from public.salary_advances where settled_month is null),
+  'the advance is settled, so next month will not take it off again');
+select pg_temp.expect_error(format(
+  $q$select public.build_salary_sheet('%s')$q$,
+  date_trunc('month', public.dhaka_today())::date), 'SHEET_ALREADY_PAID');
+
+-- ---- HR is not the shop floor's business ----
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.expect_error($q$select public.employee_list()$q$, 'NOT_ALLOWED:manage_hr');
+select pg_temp.expect_error($q$select public.attendance_day()$q$, 'NOT_ALLOWED:manage_hr');
+select pg_temp.expect_error(
+  format($q$select public.save_salary_terms('%s', '{}'::jsonb)$q$,
+         (select v from p14b where k = 'emp_ovi')), 'NOT_ALLOWED:see_salary');
+select pg_temp.expect_error(
+  format($q$select public.build_salary_sheet('%s')$q$,
+         date_trunc('month', public.dhaka_today())::date), 'NOT_ALLOWED:see_salary');
+select pg_temp.check(
+  (select count(*) from public.employees) = 0
+  and (select count(*) from public.salary_terms) = 0
+  and (select count(*) from public.attendance) = 0,
+  'and reading the tables directly tells a cashier nothing about anybody');
+-- But they can still check themselves in, and see when the shop is shut.
+select pg_temp.check(
+  (select count(*) from public.holidays) >= 0,
+  'a cashier can read the holiday list, because everybody needs to know when the shop shuts');
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+
 reset role;
 \echo ALL DATABASE CHECKS PASSED

@@ -27,6 +27,8 @@ import type {
   JournalExport, LayerRebuildResult, PeriodLock, ReportListItem, ReportResult,
   AdvanceRow, BilledResult, ChallanRow, ChallanStatus, OrderRow, OrderStatus,
   QuotationRow, QuotationStatus, SalesDocument,
+  AttendanceDay, AttendanceStatus, AttendanceTodayBranch, CheckInResult, Employee,
+  LeaveRow, SalarySheet, SalarySheetRow,
 } from "../types";
 import { DEFAULT_CHEQUE_LAYOUT, takaInWords } from "../cheque";
 import type { ImportKind } from "../import/schema";
@@ -88,6 +90,7 @@ export function createDemoBackend(): Backend {
     purchase_orders: false, transfers: false, accounts: false, sms: false,
     extra_charges: false, hs_codes: false, managers_see_dashboard: false,
     managers_see_accounts: false, managers_see_settings: false,
+    sales_documents: false, hr: false, hr_extra_fields: false,
   };
   const shopDetails = {
     name: DEMO_SHOP_NAME, address: "123 Example Road, Dhaka", phone: "01700-000000",
@@ -163,12 +166,24 @@ export function createDemoBackend(): Backend {
     ],
     // The shop's own extra fields on a sale (P10a).
     sale_fields: [row({ name: "PO number", show_on_invoice: true })],
+    // The HR lists (P14b). Empty until a shop turns HR on and fills them in.
+    departments: [row({ name: "Shop floor" }), row({ name: "Office" })],
+    designations: [row({ name: "Salesman" }), row({ name: "Technician" })],
+    positions: [],
+    professions: [],
+    leave_types: [
+      row({ name: "Casual", days_a_year: 10, is_paid: true }),
+      row({ name: "Sick", days_a_year: 14, is_paid: true }),
+      row({ name: "Unpaid", days_a_year: 0, is_paid: false }),
+    ],
   };
   const PERMISSION_KEYS = [
     { key: "sell", label: "Sell at the counter", area: "counter", hasLimit: false },
     { key: "give_discount", label: "Give a discount", area: "counter", hasLimit: true },
     { key: "change_price", label: "Change a price within the band", area: "counter", hasLimit: false },
     { key: "see_cost", label: "See cost prices", area: "counter", hasLimit: false },
+    { key: "manage_hr", label: "See and change staff records", area: "admin", hasLimit: false },
+    { key: "see_salary", label: "See and set what people earn", area: "admin", hasLimit: false },
     { key: "void_sale", label: "Void a sale", area: "counter", hasLimit: false },
     { key: "return_sale", label: "Take a return", area: "counter", hasLimit: false },
     { key: "reprint", label: "Print a receipt again", area: "counter", hasLimit: false },
@@ -797,6 +812,69 @@ export function createDemoBackend(): Backend {
     return { subtotal: sub, discountAmount: discount, vatAmount: 0,
              total: roundTaka(sub - discount) };
   };
+
+  // --- HR (P14b) --------------------------------------------------------------
+  // An employee is not a login: a delivery boy has no `staff` row and still has to be
+  // paid and marked present. The attendance a person records themselves is kept apart
+  // from a manager's word, because they are not the same kind of evidence.
+  interface DemoEmployee {
+    id: string; code: string | null; name: string; phone: string | null;
+    address: string | null; nid: string | null; joinedOn: string;
+    branchId: string | null; departmentId: string | null; designationId: string | null;
+    positionId: string | null; professionId: string | null;
+    emergencyName: string | null; emergencyPhone: string | null;
+    religion: string | null; nationality: string | null;
+    staffId: string | null; active: boolean; leftOn: string | null; note: string | null;
+  }
+  interface DemoAttendance {
+    employeeId: string; branchId: string; onDate: string;
+    inAt: string | null; outAt: string | null; status: AttendanceStatus;
+    source: "self" | "manager"; minutesLate: number; note: string | null;
+    markedBy: string | null;
+  }
+  interface DemoLeave {
+    id: string; employeeId: string; leaveTypeId: string; fromDate: string; toDate: string;
+    days: number; reason: string | null; status: "asked" | "approved" | "refused" | "cancelled";
+    note: string | null; decidedBy: string | null;
+  }
+  interface DemoSalaryTerms {
+    employeeId: string; basic: number; allowances: Record<string, number>;
+    dailyRate: number;
+  }
+  interface DemoSalaryLine {
+    id: string; employeeId: string; basic: number; allowances: number;
+    absentDays: number; absenceCut: number; advanceCut: number; otherCut: number;
+    daysWorked: number; daysInMonth: number; net: number;
+  }
+  interface DemoSheet {
+    id: string; month: string; branchId: string | null; status: "draft" | "paid";
+    total: number; paidOn: string | null; method: string | null; note: string | null;
+    who: string; lines: DemoSalaryLine[];
+  }
+  const employees: DemoEmployee[] = [];
+  const attendance: DemoAttendance[] = [];
+  const leaveRequests: DemoLeave[] = [];
+  const salaryTerms: DemoSalaryTerms[] = [];
+  const salaryAdvances: { id: string; employeeId: string; amount: number; method: string;
+                          takenOn: string; settledMonth: string | null }[] = [];
+  const salarySheets: DemoSheet[] = [];
+  // When each branch opens, and the code it takes check-ins with.
+  const attendanceSettings: Record<string, { opensAt: string; graceMinutes: number;
+                                             pin: string | null }> = {};
+  for (const b of branches) attendanceSettings[b.id] = { opensAt: "10:00", graceMinutes: 15, pin: null };
+
+  /** Is the shop shut that day? Demo mode keeps no holiday list, so never. */
+  const holidaysOn = (): boolean => false;
+
+  const hrAllowed = (): void => {
+    if (!features.hr) fail("FEATURE_OFF:hr");
+    if (staff.role === "cashier") fail("NOT_ALLOWED:manage_hr");
+  };
+  const payAllowed = (): void => {
+    if (staff.role !== "owner") fail("NOT_ALLOWED:see_salary");
+  };
+  const nameOfList = (table: SettingTable, id: string | null): string | null =>
+    id ? ((lists[table].find((r) => r.id === id)?.name as string | undefined) ?? null) : null;
 
   const api: Backend = {
     mode: "demo",
@@ -4774,6 +4852,465 @@ export function createDemoBackend(): Backend {
             const unit = serials.find((x) => x.id === sid);
             return { id: sid, serial: unit?.serial ?? "—", returned: !unit?.delivered };
           }),
+        })),
+      };
+    },
+
+    // --- HR: employees, attendance and salary (P14b) ---
+
+    async listEmployees(input): Promise<Employee[]> {
+      hrAllowed();
+      const pay = staff.role === "owner";
+      return employees
+        .filter((e) => (!input?.branchId || e.branchId === input.branchId)
+                       && (input?.active === null || e.active === (input?.active ?? true))
+                       && (!input?.query
+                           || `${e.name} ${e.phone ?? ""} ${e.code ?? ""}`
+                               .toLowerCase().includes(input.query.toLowerCase())))
+        .map((e): Employee => {
+          const t = salaryTerms.find((x) => x.employeeId === e.id);
+          const owed = salaryAdvances
+            .filter((a) => a.employeeId === e.id && !a.settledMonth)
+            .reduce((n, a) => n + a.amount, 0);
+          return {
+            id: e.id, code: e.code, name: e.name, phone: e.phone, photoUrl: null,
+            address: e.address, nid: e.nid, dateOfBirth: null, joinedOn: e.joinedOn,
+            branch: branches.find((b) => b.id === e.branchId)?.name ?? null,
+            branchId: e.branchId,
+            department: nameOfList("departments", e.departmentId),
+            departmentId: e.departmentId,
+            designation: nameOfList("designations", e.designationId),
+            designationId: e.designationId,
+            position: nameOfList("positions", e.positionId), positionId: e.positionId,
+            profession: nameOfList("professions", e.professionId),
+            professionId: e.professionId,
+            emergencyName: e.emergencyName, emergencyPhone: e.emergencyPhone,
+            religion: e.religion, nationality: e.nationality,
+            staffId: e.staffId,
+            login: team.find((x) => x.id === e.staffId)?.name ?? null,
+            active: e.active, leftOn: e.leftOn, note: e.note,
+            // Absent rather than zero when it is not this login's business.
+            basic: pay ? (t?.basic ?? 0) : null,
+            allowances: pay ? (t?.allowances ?? {}) : null,
+            dailyRate: pay ? (t?.dailyRate ?? 0) : null,
+            advanceOutstanding: pay ? owed : null,
+            today: attendance.find((a) => a.employeeId === e.id && a.onDate === dhakaToday())
+              ?.status ?? null,
+          };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name));
+    },
+
+    async saveEmployee(id, values): Promise<void> {
+      hrAllowed();
+      if (!String(values.name ?? "").trim()) fail("NAME_REQUIRED");
+      const found = id ? employees.find((e) => e.id === id) : undefined;
+      if (id && !found) fail("EMPLOYEE_NOT_FOUND");
+      const next: DemoEmployee = {
+        id: found?.id ?? crypto.randomUUID(),
+        code: (values.code as string | null) ?? found?.code ?? null,
+        name: String(values.name).trim(),
+        phone: (values.phone as string | null) ?? found?.phone ?? null,
+        address: (values.address as string | null) ?? found?.address ?? null,
+        nid: (values.nid as string | null) ?? found?.nid ?? null,
+        joinedOn: String(values.joined_on ?? found?.joinedOn ?? dhakaToday()),
+        branchId: (values.branch_id as string | null) ?? found?.branchId ?? null,
+        departmentId: (values.department_id as string | null) ?? found?.departmentId ?? null,
+        designationId: (values.designation_id as string | null) ?? found?.designationId ?? null,
+        positionId: (values.position_id as string | null) ?? found?.positionId ?? null,
+        professionId: (values.profession_id as string | null) ?? found?.professionId ?? null,
+        emergencyName: (values.emergency_name as string | null) ?? found?.emergencyName ?? null,
+        emergencyPhone: (values.emergency_phone as string | null) ?? found?.emergencyPhone ?? null,
+        religion: (values.religion as string | null) ?? found?.religion ?? null,
+        nationality: (values.nationality as string | null) ?? found?.nationality ?? null,
+        staffId: values.staff_id !== undefined
+          ? ((values.staff_id as string | null) ?? null) : (found?.staffId ?? null),
+        active: values.active === undefined ? (found?.active ?? true) : Boolean(values.active),
+        leftOn: null,
+        note: (values.note as string | null) ?? found?.note ?? null,
+      };
+      // Somebody who has left keeps their record: their attendance and the slips they
+      // were paid are part of the shop's books.
+      if (!next.active) next.leftOn = String(values.left_on ?? found?.leftOn ?? dhakaToday());
+      if (found) Object.assign(found, next); else employees.push(next);
+    },
+
+    async saveSalaryTerms(employeeId, values): Promise<void> {
+      payAllowed();
+      if (!employees.some((e) => e.id === employeeId)) fail("EMPLOYEE_NOT_FOUND");
+      const got = salaryTerms.find((t) => t.employeeId === employeeId);
+      const next: DemoSalaryTerms = {
+        employeeId,
+        basic: Number(values.basic ?? got?.basic ?? 0),
+        allowances: (values.allowances as Record<string, number> | undefined)
+          ?? got?.allowances ?? {},
+        dailyRate: Number(values.daily_rate ?? got?.dailyRate ?? 0),
+      };
+      if (got) Object.assign(got, next); else salaryTerms.push(next);
+    },
+
+    async saveAttendanceSettings(branchId, values) {
+      hrAllowed();
+      branchOr404(branchId);
+      const pin = values.attendance_pin === undefined
+        ? attendanceSettings[branchId].pin
+        : (String(values.attendance_pin ?? "") || null);
+      if (pin !== null && !/^[0-9]{4,8}$/.test(pin)) fail("BAD_BRANCH_PIN");
+      attendanceSettings[branchId] = {
+        opensAt: String(values.opens_at ?? attendanceSettings[branchId].opensAt),
+        graceMinutes: Number(values.grace_minutes ?? attendanceSettings[branchId].graceMinutes),
+        pin,
+      };
+      return {
+        opensAt: attendanceSettings[branchId].opensAt,
+        graceMinutes: attendanceSettings[branchId].graceMinutes,
+        takesCheckIns: pin !== null,
+      };
+    },
+
+    async checkIn(branchId, pin, employeeId): Promise<CheckInResult> {
+      if (!features.hr) fail("FEATURE_OFF:hr");
+      const branch = branchOr404(branchId);
+      const settings = attendanceSettings[branchId];
+      let emp: DemoEmployee | undefined;
+      if (!employeeId) {
+        emp = employees.find((e) => e.staffId === staff.id && e.active);
+        if (!emp) fail("NOT_AN_EMPLOYEE");
+        // The branch's own code is what makes this a record made AT THE BRANCH. It is
+        // not proof of presence, and the row says who recorded it.
+        if (!settings.pin) fail("BRANCH_TAKES_NO_CHECK_INS");
+        if (pin !== settings.pin) fail("BAD_BRANCH_PIN");
+      } else {
+        if (staff.role === "cashier") fail("NOT_ALLOWED:manage_hr");
+        emp = employees.find((e) => e.id === employeeId && e.active);
+        if (!emp) fail("EMPLOYEE_NOT_FOUND");
+      }
+
+      const now = new Date();
+      const localHm = now.toLocaleTimeString("en-GB", {
+        timeZone: "Asia/Dhaka", hour12: false, hour: "2-digit", minute: "2-digit" });
+      const mins = (t: string): number => {
+        const [h, m] = t.split(":").map(Number);
+        return h * 60 + m;
+      };
+      const late = Math.max(mins(localHm) - mins(settings.opensAt), 0);
+      let status: AttendanceStatus = late > settings.graceMinutes ? "late" : "present";
+      if (holidaysOn()) status = "holiday";
+
+      const existing = attendance.find(
+        (a) => a.employeeId === emp!.id && a.onDate === dhakaToday());
+      if (existing?.inAt) {
+        // Checking in twice does not move the first time: the first one is the record.
+        return {
+          employee: emp!.name, branch: branch.name, date: existing.onDate,
+          status: existing.status, minutesLate: existing.minutesLate,
+          opensAt: settings.opensAt, graceMinutes: settings.graceMinutes,
+        };
+      }
+      const row: DemoAttendance = {
+        employeeId: emp!.id, branchId, onDate: dhakaToday(),
+        inAt: now.toISOString(), outAt: null, status,
+        source: employeeId ? "manager" : "self",
+        minutesLate: status === "late" ? late : 0, note: null, markedBy: staff.id,
+      };
+      if (existing) Object.assign(existing, row); else attendance.push(row);
+      return {
+        employee: emp!.name, branch: branch.name, date: row.onDate, status: row.status,
+        minutesLate: row.minutesLate, opensAt: settings.opensAt,
+        graceMinutes: settings.graceMinutes,
+      };
+    },
+
+    async checkOut(branchId, employeeId): Promise<void> {
+      const id = employeeId
+        ?? employees.find((e) => e.staffId === staff.id && e.active)?.id;
+      if (!id) fail("NOT_AN_EMPLOYEE");
+      if (employeeId && staff.role === "cashier") fail("NOT_ALLOWED:manage_hr");
+      const row = attendance.find((a) => a.employeeId === id && a.onDate === dhakaToday());
+      if (!row) fail("NO_CHECK_IN_TODAY");
+      row!.outAt = new Date().toISOString();
+    },
+
+    async markAttendance(employeeId, date, status, note): Promise<void> {
+      hrAllowed();
+      const emp = employees.find((e) => e.id === employeeId);
+      if (!emp) fail("EMPLOYEE_NOT_FOUND");
+      if (date > dhakaToday()) fail("DATE_IN_FUTURE");
+      const row: DemoAttendance = {
+        employeeId, branchId: emp!.branchId ?? branches[0].id, onDate: date,
+        inAt: null, outAt: null, status, source: "manager", minutesLate: 0,
+        note: note ?? null, markedBy: staff.id,
+      };
+      const existing = attendance.find((a) => a.employeeId === employeeId && a.onDate === date);
+      if (existing) {
+        Object.assign(existing, { status, source: "manager", note: note ?? null });
+      } else {
+        attendance.push(row);
+      }
+    },
+
+    async attendanceDay(date, branchId): Promise<AttendanceDay> {
+      hrAllowed();
+      const on = date ?? dhakaToday();
+      const mine = employees.filter(
+        (e) => e.active && (!branchId || e.branchId === branchId));
+      const people = mine.map((e) => {
+        const a = attendance.find((x) => x.employeeId === e.id && x.onDate === on);
+        return {
+          employeeId: e.id, name: e.name,
+          branch: branches.find((b) => b.id === e.branchId)?.name ?? null,
+          branchId: e.branchId,
+          designation: nameOfList("designations", e.designationId),
+          // Nobody marked is NOT absent: guessing would put a deduction on somebody's
+          // salary that nobody decided.
+          status: (a?.status ?? "not recorded") as AttendanceDay["people"][number]["status"],
+          inAt: a?.inAt ?? null, outAt: a?.outAt ?? null,
+          minutesLate: a?.minutesLate ?? 0, source: a?.source ?? null,
+          note: a?.note ?? null,
+          markedBy: team.find((t) => t.id === a?.markedBy)?.name ?? null,
+        };
+      });
+      const count = (s: string): number => people.filter((p) => p.status === s).length;
+      return {
+        date: on, holiday: null, people,
+        counts: {
+          present: count("present"), late: count("late"), absent: count("absent"),
+          leave: count("leave"), notRecorded: count("not recorded"), people: people.length,
+        },
+      };
+    },
+
+    async attendanceToday(branchId): Promise<AttendanceTodayBranch[]> {
+      if (!features.hr || staff.role === "cashier") return [];
+      const on = dhakaToday();
+      return branches
+        .filter((b) => !branchId || b.id === branchId)
+        .map((b) => {
+          const mine = employees.filter((e) => e.active && e.branchId === b.id);
+          const of = (s: string): number => mine.filter((e) => attendance.some(
+            (a) => a.employeeId === e.id && a.onDate === on && a.status === s)).length;
+          return {
+            branch: b.name, branchId: b.id, people: mine.length,
+            present: of("present"), late: of("late"), absent: of("absent"),
+            onLeave: of("leave"),
+            notRecorded: mine.filter((e) => !attendance.some(
+              (a) => a.employeeId === e.id && a.onDate === on)).length,
+          };
+        });
+    },
+
+    async listLeave(status, employeeId): Promise<LeaveRow[]> {
+      hrAllowed();
+      return leaveRequests
+        .filter((r) => (!status || r.status === status)
+                       && (!employeeId || r.employeeId === employeeId))
+        .map((r) => {
+          const kind = lists.leave_types.find((t) => t.id === r.leaveTypeId);
+          return {
+            id: r.id, employee: employees.find((e) => e.id === r.employeeId)?.name ?? "—",
+            employeeId: r.employeeId,
+            kind: String(kind?.name ?? "—"), isPaid: kind?.is_paid !== false,
+            fromDate: r.fromDate, toDate: r.toDate, days: r.days, reason: r.reason,
+            status: r.status, note: r.note,
+            decidedBy: team.find((t) => t.id === r.decidedBy)?.name ?? null,
+            takenThisYear: leaveRequests
+              .filter((x) => x.employeeId === r.employeeId && x.leaveTypeId === r.leaveTypeId
+                             && x.status === "approved"
+                             && x.fromDate.slice(0, 4) === r.fromDate.slice(0, 4))
+              .reduce((n, x) => n + x.days, 0),
+            daysAYear: Number(kind?.days_a_year ?? 0),
+          };
+        });
+    },
+
+    async askForLeave(input) {
+      if (!features.hr) fail("FEATURE_OFF:hr");
+      const emp = employees.find((e) => e.id === input.employeeId && e.active);
+      if (!emp) fail("EMPLOYEE_NOT_FOUND");
+      if (emp!.staffId !== staff.id && staff.role === "cashier") fail("NOT_ALLOWED:manage_hr");
+      if (input.to < input.from) fail("BAD_DATE_RANGE");
+      const days = Math.round(
+        (Date.parse(input.to) - Date.parse(input.from)) / 86400000) + 1;
+      leaveRequests.unshift({
+        id: crypto.randomUUID(), employeeId: input.employeeId,
+        leaveTypeId: input.leaveTypeId, fromDate: input.from, toDate: input.to,
+        days, reason: input.reason ?? null, status: "asked", note: null, decidedBy: null,
+      });
+      return { days };
+    },
+
+    async decideLeave(id, approve, note): Promise<void> {
+      hrAllowed();
+      const r = leaveRequests.find((x) => x.id === id);
+      if (!r) fail("REQUEST_NOT_FOUND");
+      if (r!.status !== "asked") fail("REQUEST_ALREADY_DECIDED");
+      const emp = employees.find((e) => e.id === r!.employeeId);
+      if (emp?.staffId === staff.id) fail("NO_SELF_APPROVAL");
+      if (!approve && !note?.trim()) fail("REASON_REQUIRED");
+      r!.status = approve ? "approved" : "refused";
+      r!.note = note ?? null;
+      r!.decidedBy = staff.id;
+      if (approve) {
+        // The approval has to reach the thing that counts the days, or the salary sheet
+        // docks somebody for days the owner agreed to.
+        for (let d = new Date(r!.fromDate); d <= new Date(r!.toDate);
+             d = new Date(d.getTime() + 86400000)) {
+          const on = d.toISOString().slice(0, 10);
+          const existing = attendance.find(
+            (a) => a.employeeId === r!.employeeId && a.onDate === on);
+          if (existing) {
+            existing.status = "leave";
+            existing.source = "manager";
+          } else {
+            attendance.push({
+              employeeId: r!.employeeId, branchId: emp?.branchId ?? branches[0].id,
+              onDate: on, inAt: null, outAt: null, status: "leave", source: "manager",
+              minutesLate: 0,
+              note: String(lists.leave_types.find((t) => t.id === r!.leaveTypeId)?.name ?? ""),
+              markedBy: staff.id,
+            });
+          }
+        }
+      }
+    },
+
+    async recordSalaryAdvance(employeeId, amount, method, note): Promise<void> {
+      payAllowed();
+      if (!employees.some((e) => e.id === employeeId && e.active)) fail("EMPLOYEE_NOT_FOUND");
+      if (amount <= 0) fail("BAD_PAYMENT_AMOUNT");
+      salaryAdvances.push({
+        id: crypto.randomUUID(), employeeId, amount, method: method ?? "cash",
+        takenOn: dhakaToday(), settledMonth: null,
+      });
+      void note;
+    },
+
+    async buildSalarySheet(month, branchId) {
+      payAllowed();
+      const first = `${month.slice(0, 7)}-01`;
+      if (first > `${dhakaToday().slice(0, 7)}-01`) fail("MONTH_NOT_FINISHED");
+      const daysInMonth = new Date(Number(first.slice(0, 4)), Number(first.slice(5, 7)), 0)
+        .getDate();
+      const last = `${first.slice(0, 7)}-${String(daysInMonth).padStart(2, "0")}`;
+
+      let sheet = salarySheets.find(
+        (s) => s.month === first && (s.branchId ?? null) === (branchId ?? null));
+      if (sheet?.status === "paid") fail("SHEET_ALREADY_PAID");
+      if (!sheet) {
+        sheet = {
+          id: crypto.randomUUID(), month: first, branchId: branchId ?? null,
+          status: "draft", total: 0, paidOn: null, method: null, note: null,
+          who: staff.name, lines: [],
+        };
+        salarySheets.unshift(sheet);
+      }
+      sheet.lines = [];
+
+      for (const e of employees.filter(
+        (x) => (!branchId || x.branchId === branchId) && x.joinedOn <= last
+               && (x.active || (x.leftOn ?? "") >= first))) {
+        const t = salaryTerms.find((x) => x.employeeId === e.id);
+        if (!t) continue;
+        const allow = Object.values(t.allowances).reduce((n, v) => n + Number(v), 0);
+        const days = attendance.filter(
+          (a) => a.employeeId === e.id && a.onDate >= first && a.onDate <= last);
+        // Only a row that SAYS absent counts: a shop that forgot to mark attendance has
+        // not thereby stopped paying anybody.
+        const absent = days.reduce((n, a) => n + (a.status === "absent" ? 1
+          : a.status === "half_day" ? 0.5 : 0), 0);
+        const worked = days.reduce((n, a) => n + (["present", "late"].includes(a.status) ? 1
+          : a.status === "half_day" ? 0.5 : 0), 0);
+
+        let net: number;
+        let cut = 0;
+        if (t.dailyRate > 0) {
+          net = roundTaka(t.dailyRate * worked);
+        } else {
+          // A day's pay is the month divided by THAT month's days, never a flat 30.
+          cut = roundTaka(roundTaka((t.basic + allow) / daysInMonth) * absent);
+          net = roundTaka(t.basic + allow - cut);
+        }
+        const owed = salaryAdvances
+          .filter((a) => a.employeeId === e.id && !a.settledMonth && a.takenOn <= last)
+          .reduce((n, a) => n + a.amount, 0);
+        // Never take back more than the salary, or the shop lends money and then pays
+        // nothing at all.
+        const advanceCut = Math.min(owed, Math.max(net, 0));
+        net = roundTaka(net - advanceCut);
+
+        sheet.lines.push({
+          id: crypto.randomUUID(), employeeId: e.id, basic: t.basic, allowances: allow,
+          absentDays: absent, absenceCut: cut, advanceCut, otherCut: 0,
+          daysWorked: worked, daysInMonth, net,
+        });
+      }
+      sheet.total = roundTaka(sheet.lines.reduce((n, l) => n + l.net, 0));
+      return { id: sheet.id, employees: sheet.lines.length, total: sheet.total };
+    },
+
+    async paySalarySheet(sheetId, method, note) {
+      payAllowed();
+      const sheet = salarySheets.find((s) => s.id === sheetId);
+      if (!sheet) fail("SHEET_NOT_FOUND");
+      if (sheet!.status === "paid") fail("SHEET_ALREADY_PAID");
+      const total = roundTaka(sheet!.lines.reduce((n, l) => n + l.net, 0));
+      if (total <= 0) fail("NOTHING_TO_PAY");
+      sheet!.status = "paid";
+      sheet!.paidOn = dhakaToday();
+      sheet!.method = method ?? "cash";
+      sheet!.note = note ?? null;
+      sheet!.total = total;
+      // The advances this sheet took back are settled now, so next month does not
+      // deduct them all over again.
+      for (const a of salaryAdvances) {
+        if (!a.settledMonth && sheet!.lines.some(
+          (l) => l.employeeId === a.employeeId && l.advanceCut > 0)) {
+          a.settledMonth = sheet!.month;
+        }
+      }
+      if (features.accounts) {
+        const expense = accounts.find((a) => a.code === "6200")
+          ?? accounts.find((a) => a.nature === "expense");
+        post({
+          branchId: sheet!.branchId ?? branches[0].id,
+          narration: `Salary for ${sheet!.month.slice(0, 7)}`,
+          sourceKind: "voucher",
+          lines: [
+            { accountId: expense?.id, debit: total },
+            { accountId: accountForMethod(method ?? "cash",
+                                          sheet!.branchId ?? branches[0].id)?.id,
+              credit: total },
+          ],
+        });
+      }
+      return { total };
+    },
+
+    async listSalarySheets(branchId): Promise<SalarySheetRow[]> {
+      payAllowed();
+      return salarySheets
+        .filter((s) => !branchId || (s.branchId ?? null) === branchId)
+        .map((s) => ({
+          id: s.id, month: s.month, status: s.status, total: s.total,
+          branch: branches.find((b) => b.id === s.branchId)?.name ?? null,
+          branchId: s.branchId, paidOn: s.paidOn, people: s.lines.length,
+        }));
+    },
+
+    async salarySheet(id): Promise<SalarySheet> {
+      payAllowed();
+      const s = salarySheets.find((x) => x.id === id);
+      if (!s) fail("SHEET_NOT_FOUND");
+      return {
+        id: s!.id, month: s!.month, status: s!.status, total: s!.total,
+        branch: branches.find((b) => b.id === s!.branchId)?.name ?? null,
+        branchId: s!.branchId, paidOn: s!.paidOn, method: s!.method, note: s!.note,
+        who: s!.who,
+        lines: s!.lines.map((l) => ({
+          ...l,
+          employee: employees.find((e) => e.id === l.employeeId)?.name ?? "—",
+          designation: nameOfList("designations",
+            employees.find((e) => e.id === l.employeeId)?.designationId ?? null),
         })),
       };
     },

@@ -300,6 +300,10 @@ export const SALE_ERROR_CODES = [
   "ADVANCE_OVER_ORDER", "NOTHING_DELIVERED", "NOTHING_TO_BILL",
   "CHALLAN_NOT_FOUND", "CHALLAN_ALREADY_BILLED", "RESERVED_FOR_AN_ORDER",
   "BAD_DOCUMENT_KIND", "DOCUMENT_NOT_FOUND",
+  // P14b: staff records, attendance and salary.
+  "EMPLOYEE_NOT_FOUND", "NOT_AN_EMPLOYEE", "BAD_BRANCH_PIN", "BRANCH_TAKES_NO_CHECK_INS",
+  "NO_CHECK_IN_TODAY", "BAD_ATTENDANCE_STATUS", "DATE_IN_FUTURE",
+  "SHEET_NOT_FOUND", "SHEET_ALREADY_PAID", "NOTHING_TO_PAY",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -624,6 +628,21 @@ export function friendlyError(raw: string): string {
         + "Check Orders, or change that order first.";
     case "BAD_DOCUMENT_KIND": return "That isn't a kind of document.";
     case "DOCUMENT_NOT_FOUND": return "That document no longer exists. Reload and try again.";
+    case "EMPLOYEE_NOT_FOUND": return "That person isn't on the staff list.";
+    case "NOT_AN_EMPLOYEE":
+      return "Your login isn't linked to a staff record, so there is nothing to check in. "
+        + "Ask the owner to link it on Staff records.";
+    case "BAD_BRANCH_PIN": return "That isn't this branch's code. Ask whoever opened up.";
+    case "BRANCH_TAKES_NO_CHECK_INS":
+      return "This branch doesn't take check-ins. A manager marks attendance here.";
+    case "NO_CHECK_IN_TODAY": return "You haven't checked in today, so there is nothing to close.";
+    case "BAD_ATTENDANCE_STATUS": return "That isn't something a day can be marked as.";
+    case "DATE_IN_FUTURE": return "You can't mark attendance for a day that hasn't happened.";
+    case "SHEET_NOT_FOUND": return "That salary sheet no longer exists. Reload and try again.";
+    case "SHEET_ALREADY_PAID":
+      return "This month has been paid. Work out next month instead.";
+    case "NOTHING_TO_PAY":
+      return "Nothing to pay on this sheet. Set what people earn first, on Staff records.";
     case "PICK_AN_ACCOUNT": return "Pick which account's ledger you want.";
     case "PICK_A_PRODUCT": return "Pick which product you want the history of.";
     case "NO_SUCH_PRODUCT": return "That product isn't in this shop.";

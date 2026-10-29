@@ -51,6 +51,7 @@ studying it: **`docs/notes/bms.md`**. The three that matter most —
   **`docs/notes/accounts.md`**.
 - The report engine, the period lock, export: **`docs/notes/reports.md`**.
 - Quotations, orders, delivery notes, advances: **`docs/notes/sales-documents.md`**.
+- Employees, attendance, leave, salary: **`docs/notes/hr.md`**.
 
 ## Where things live
 
@@ -116,7 +117,8 @@ hand is `docs/PROGRESS.md`, which wins on detail. P0–P14 are done and committe
 | P11–P12 | Warranty lookup and claims · the owner dashboard |
 | P13–P14 | Double-entry books · 132 reports, the period lock, export |
 | P14a | Quotations, sales orders with advances, challans, reserved stock |
-| **next** | **P14b** HR → P14c sales reps and delivery points |
+| P14b | Employees, attendance, leave, salary sheets |
+| **next** | **P14c** sales reps, dealers and delivery points |
 | then | P15 SMS, P16 printing, P17 launch hardening, P18 multi-shop signup |
 
 Loose ends worth knowing about, each noted in PROGRESS.md where it belongs: a few P3
