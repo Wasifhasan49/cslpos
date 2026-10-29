@@ -22,7 +22,7 @@ export interface NavItem {
 export type IconName =
   | "counter" | "sales" | "warranty" | "stock" | "purchases" | "transfers"
   | "products" | "customers" | "suppliers" | "cash" | "dashboard" | "accounts"
-  | "reports" | "settings";
+  | "reports" | "orders" | "settings";
 
 const EVERYONE: readonly Role[] = ["owner", "manager", "cashier"];
 const MANAGERS: readonly Role[] = ["owner", "manager"];
@@ -37,6 +37,9 @@ export const NAV: readonly NavItem[] = [
   { href: "/stock",     label: "Stock",     short: "Stock",    icon: "stock",     roles: MANAGERS },
   { href: "/purchases", label: "Purchases", short: "Buy",      icon: "purchases", roles: MANAGERS, feature: "purchase_orders" },
   { href: "/transfers", label: "Transfers", short: "Moves",    icon: "transfers", roles: MANAGERS, feature: "transfers" },
+  // Quote, order, deliver, bill — for shops that sell to companies. Off by default,
+  // because a shop that sells over the counter has no use for a quotation.
+  { href: "/orders",    label: "Orders",    short: "Orders",  icon: "orders",    roles: MANAGERS, feature: "sales_documents" },
   { href: "/products",  label: "Products",  short: "Items",    icon: "products",  roles: MANAGERS },
   { href: "/customers", label: "Customers", short: "People",   icon: "customers", roles: MANAGERS },
   { href: "/suppliers", label: "Suppliers", short: "Supply",   icon: "suppliers", roles: MANAGERS },

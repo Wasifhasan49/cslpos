@@ -21,6 +21,8 @@ import type {
   MoneyBalance, TrialBalance, VoucherRow,
   JournalExport, LayerRebuildResult, PeriodLock, ReportColumnOut, ReportFilters,
   ReportListItem, ReportResult, ReportRow, ReportSection, ReportRegisterKey,
+  AdvanceRow, BilledResult, ChallanRow, OrderRow, QuotationRow, SalesDocLine,
+  SalesDocument,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
@@ -243,16 +245,19 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         id: string; code: string; barcode: string | null; name: string; brand: string | null;
         category_id: string | null; price: number | string; warranty_months: number;
         is_serial: boolean; is_inventory: boolean; reorder_level: number; stock: number | string;
+        reserved: number | string | null;
         mrp: number | string | null; min_price: number | string | null; max_price: number | string | null;
         serials: { id: string; serial: string }[];
+        delivered_serials: { id: string; serial: string }[] | null;
       };
       return ((data as Row[] | null) ?? []).map((r) => ({
         id: r.id, code: r.code, barcode: r.barcode, name: r.name, brand: r.brand,
         categoryId: r.category_id, price: num(r.price), warrantyMonths: r.warranty_months,
         isSerial: r.is_serial, isInventory: r.is_inventory,
-        reorderLevel: r.reorder_level, stock: num(r.stock),
+        reorderLevel: r.reorder_level, stock: num(r.stock), reserved: num(r.reserved),
         mrp: numOrNull(r.mrp), minPrice: numOrNull(r.min_price), maxPrice: numOrNull(r.max_price),
         serials: r.serials ?? [],
+        deliveredSerials: r.delivered_serials ?? [],
       }));
     },
 
@@ -364,52 +369,8 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         } : null,
       });
       if (error) throw new Error(friendlyError(error.message));
-      const r = data as Record<string, unknown>;
-      const items = (r.items as Record<string, unknown>[]).map((i) => ({
-        name: String(i.name), qty: num(i.qty), unitPrice: num(i.unit_price), lineTotal: num(i.line_total),
-        warrantyUntil: (i.warranty_until as string | null) ?? null, serials: (i.serials as string[]) ?? [],
-        vatPct: num(i.vat_pct), vatAmount: num(i.vat_amount), vatInclusive: i.vat_inclusive !== false,
-        listPrice: numOrNull(i.list_price), priceOverridden: Boolean(i.price_overridden),
-        isGift: Boolean(i.is_gift),
-      }));
-      return {
-        id: String(r.id), invoiceNo: String(r.invoice_no), createdAt: String(r.created_at),
-        staffName: String(r.staff_name), shopName: String(r.shop_name), shopAddress: (r.shop_address as string | null) ?? null,
-        branchName: String(r.branch_name ?? ""),
-        branchAddress: (r.branch_address as string | null) ?? null,
-        branchPhone: (r.branch_phone as string | null) ?? null,
-        subtotal: num(r.subtotal), discountPct: num(r.discount_pct), discountAmount: num(r.discount_amount), total: num(r.total),
-        vatAmount: num(r.vat_amount),
-        chargesAmount: num(r.charges_amount),
-        charges: ((r.charges as { name: string; amount: number | string }[] | null) ?? []).map((c) => ({ name: c.name, amount: num(c.amount) })),
-        receiptFooter: (r.receipt_footer as string | null) ?? null,
-        binVat: (r.bin_vat as string | null) ?? null,
-        priceListName: (r.price_list_name as string | null) ?? null,
-        customerName: (r.customer_name as string | null) ?? null,
-        customerDiscountPct: num(r.customer_discount_pct),
-        paymentMethod: r.payment_method as PaymentMethod,
-        cashReceived: numOrNull(r.cash_received), changeGiven: numOrNull(r.change_given),
-        paymentRef: (r.payment_ref as string | null) ?? null, customerPhone: (r.customer_phone as string | null) ?? null,
-        paidAmount: num(r.paid_amount), dueAmount: num(r.due_amount),
-        customerOwes: numOrNull(r.customer_owes),
-        cardCharge: num(r.card_charge), emiCharge: num(r.emi_charge),
-        exchangeValue: num(r.exchange_value),
-        emiMonths: numOrNull(r.emi_months),
-        emiBank: (r.emi_bank as string | null) ?? null,
-        cardType: (r.card_type as string | null) ?? null,
-        cardLast4: (r.card_last4 as string | null) ?? null,
-        attention: (r.attention as string | null) ?? null,
-        customerBin: (r.customer_bin as string | null) ?? null,
-        narration: (r.narration as string | null) ?? null,
-        soldBy: (r.sold_by as string | null) ?? null,
-        extraFields: (r.extra_fields as Record<string, string> | null) ?? null,
-        exchange: (r.exchange as Receipt["exchange"]) ?? null,
-        payments: ((r.payments as Record<string, unknown>[] | null) ?? []).map((x) => ({
-          method: String(x.method), amount: num(x.amount),
-          reference: (x.reference as string | null) ?? null,
-        })),
-        items,
-      };
+      if (!data) throw new Error("The sale did not come back. Check the sales list before trying again.");
+      return readReceipt(data as Record<string, unknown>);
     },
 
     async signOut() {
@@ -518,7 +479,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         "transaction_categories", "sale_fields",
       ];
       const [shopRes, featRes, keysRes, roleRes, staffPermRes, docRes, ...listRes] = await Promise.all([
-        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct, po_approval_limit, cash_short_limit, return_days, sale_approval_limit, approve_all_sales, card_charge_mode, claim_approval, voucher_approval").limit(1).maybeSingle(),
+        sb.from("shops").select("name, address, phone, email, logo_url, bin_vat, receipt_footer, invoice_prefix, currency, ait_pct, po_approval_limit, so_approval_limit, cash_short_limit, return_days, sale_approval_limit, approve_all_sales, card_charge_mode, claim_approval, voucher_approval").limit(1).maybeSingle(),
         sb.from("shop_features").select("feature, enabled"),
         sb.from("permission_keys").select("key, label, area, has_limit").order("sort"),
         sb.from("role_permissions").select("role, perm, allowed, num_limit"),
@@ -540,6 +501,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
           logoUrl: shop.logo_url, binVat: shop.bin_vat, receiptFooter: shop.receipt_footer,
           invoicePrefix: shop.invoice_prefix, currency: shop.currency, aitPct: num(shop.ait_pct),
           poApprovalLimit: num(shop.po_approval_limit),
+          soApprovalLimit: num(shop.so_approval_limit),
           cashShortLimit: num(shop.cash_short_limit),
           returnDays: num(shop.return_days),
           saleApprovalLimit: num(shop.sale_approval_limit),
@@ -2290,6 +2252,188 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
       };
     },
 
+    // --- Quotations, sales orders and challans (P14a) ---
+
+    async listQuotations(input): Promise<QuotationRow[]> {
+      const { data, error } = await sb.rpc("quotation_list", {
+        p_branch_id: input?.branchId ?? null, p_status: input?.status ?? null,
+        p_from: input?.from ?? null, p_to: input?.to ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((q) => ({
+        id: String(q.id), quoteNo: String(q.quote_no), date: String(q.date),
+        branch: String(q.branch), branchId: String(q.branch_id),
+        customer: String(q.customer), customerId: (q.customer_id as string | null) ?? null,
+        total: num(q.total), status: q.status as QuotationRow["status"],
+        validUntil: (q.valid_until as string | null) ?? null,
+        outOfDate: Boolean(q.out_of_date), lines: num(q.lines), who: String(q.who),
+      }));
+    },
+
+    async saveQuotation(id, values, lines) {
+      const { data, error } = await sb.rpc("save_quotation", {
+        p_id: id, p_values: values, p_lines: lines,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return { id: String(r.id), quoteNo: String(r.quote_no), total: num(r.total),
+               status: String(r.status) };
+    },
+
+    async setQuotationStatus(id, status, note): Promise<void> {
+      const { error } = await sb.rpc("set_quotation_status", {
+        p_id: id, p_status: status, p_note: note ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async listOrders(input): Promise<OrderRow[]> {
+      const { data, error } = await sb.rpc("order_list", {
+        p_branch_id: input?.branchId ?? null, p_status: input?.status ?? null,
+        p_from: input?.from ?? null, p_to: input?.to ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((o) => ({
+        id: String(o.id), soNo: String(o.so_no), date: String(o.date),
+        branch: String(o.branch), branchId: String(o.branch_id),
+        customer: String(o.customer), customerId: String(o.customer_id),
+        deliveryDate: (o.delivery_date as string | null) ?? null,
+        status: o.status as OrderRow["status"],
+        total: num(o.total), advance: num(o.advance),
+        ordered: num(o.ordered), delivered: num(o.delivered), pending: num(o.pending),
+        late: Boolean(o.late), daysLate: numOrNull(o.days_late),
+        quoteNo: (o.quote_no as string | null) ?? null,
+        who: String(o.who), soldBy: (o.sold_by as string | null) ?? null,
+      }));
+    },
+
+    async saveSalesOrder(id, values, lines, approvalId) {
+      const { data, error } = await sb.rpc("save_sales_order", {
+        p_id: id, p_values: values, p_lines: lines, p_approval_id: approvalId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return { id: String(r.id), soNo: String(r.so_no), total: num(r.total),
+               status: String(r.status), waitingForApproval: Boolean(r.waiting_for_approval) };
+    },
+
+    async adjustSalesOrder(orderId, lines, note): Promise<void> {
+      const { error } = await sb.rpc("adjust_sales_order", {
+        p_order_id: orderId,
+        p_lines: lines.map((l) => ({ id: l.id, qty: l.qty ?? null, cancel: l.cancel ?? false })),
+        p_note: note,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async setOrderStatus(orderId, action, reason): Promise<void> {
+      const { error } = await sb.rpc("set_order_status", {
+        p_order_id: orderId, p_action: action, p_reason: reason ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async recordAdvance(input) {
+      const { data, error } = await sb.rpc("record_advance", {
+        p_order_id: input.orderId, p_amount: input.amount,
+        p_method: input.method ?? "cash", p_reference: input.reference ?? null,
+        p_note: input.note ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return { amount: num(r.amount), advanceTotal: num(r.advance_total) };
+    },
+
+    async listAdvances(branchId): Promise<AdvanceRow[]> {
+      const { data, error } = await sb.rpc("advance_list", { p_branch_id: branchId ?? null });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((a) => ({
+        id: String(a.id), date: String(a.date), customer: String(a.customer),
+        customerId: String(a.customer_id),
+        orderNo: (a.order_no as string | null) ?? null,
+        orderId: (a.order_id as string | null) ?? null,
+        amount: num(a.amount), method: String(a.method),
+        reference: (a.reference as string | null) ?? null,
+        branch: String(a.branch), daysHeld: num(a.days_held), who: String(a.who),
+      }));
+    },
+
+    async listChallans(input): Promise<ChallanRow[]> {
+      const { data, error } = await sb.rpc("challan_list", {
+        p_branch_id: input?.branchId ?? null, p_status: input?.status ?? null,
+        p_from: input?.from ?? null, p_to: input?.to ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((c) => ({
+        id: String(c.id), challanNo: String(c.challan_no), date: String(c.date),
+        branch: String(c.branch), branchId: String(c.branch_id),
+        customer: String(c.customer), customerId: String(c.customer_id),
+        orderNo: (c.order_no as string | null) ?? null,
+        orderId: (c.order_id as string | null) ?? null,
+        status: c.status as ChallanRow["status"],
+        atCost: num(c.at_cost),
+        carrier: (c.carrier as string | null) ?? null,
+        vehicleNo: (c.vehicle_no as string | null) ?? null,
+        qty: num(c.qty), toBill: num(c.to_bill),
+        daysUnbilled: numOrNull(c.days_unbilled),
+        invoiceNo: (c.invoice_no as string | null) ?? null,
+        who: String(c.who),
+      }));
+    },
+
+    async saveChallan(branchId, values, lines) {
+      const { data, error } = await sb.rpc("save_challan", {
+        p_branch_id: branchId, p_values: values, p_lines: lines,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return { id: String(r.id), challanNo: String(r.challan_no), atCost: num(r.at_cost),
+               orderStatus: (r.order_status as string | null) ?? null };
+    },
+
+    async returnChallan(challanId, lines, reason) {
+      const { data, error } = await sb.rpc("return_challan", {
+        p_challan_id: challanId,
+        p_lines: lines.map((l) => ({ id: l.id, qty: l.qty ?? null,
+                                     serial_ids: l.serialIds ?? [] })),
+        p_reason: reason,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return { returned: num(((data ?? {}) as Record<string, unknown>).returned) };
+    },
+
+    async billChallan(input): Promise<BilledResult> {
+      const { data, error } = await sb.rpc("bill_challan", {
+        p_challan_id: input.challanId, p_payment_method: input.paymentMethod ?? "cash",
+        p_cash_received: input.cashReceived ?? null, p_payment_ref: input.paymentRef ?? null,
+        p_due_amount: input.dueAmount ?? null, p_approval_id: input.approvalId ?? null,
+        p_extras: input.extras ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return { ...readReceipt(r), challanNo: (r.challan_no as string | null) ?? null,
+               advanceUsed: num(r.advance_used), stillOwed: num(r.still_owed) };
+    },
+
+    async billOrder(input): Promise<BilledResult> {
+      const { data, error } = await sb.rpc("bill_order", {
+        p_order_id: input.orderId, p_payment_method: input.paymentMethod ?? "cash",
+        p_cash_received: input.cashReceived ?? null, p_payment_ref: input.paymentRef ?? null,
+        p_due_amount: input.dueAmount ?? null, p_approval_id: input.approvalId ?? null,
+        p_extras: input.extras ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return { ...readReceipt(r), challanNo: (r.challan_no as string | null) ?? null,
+               advanceUsed: num(r.advance_used), stillOwed: num(r.still_owed) };
+    },
+
+    async salesDocument(kind, id): Promise<SalesDocument> {
+      const { data, error } = await sb.rpc("sales_document", { p_kind: kind, p_id: id });
+      if (error) throw new Error(friendlyError(error.message));
+      return readSalesDocument((data ?? {}) as Record<string, unknown>);
+    },
+
     async stockHistory(branchId: string, productId?: string | null, limit = 100): Promise<StockMovementRow[]> {
       const { data, error } = await sb.rpc("stock_history", {
         p_branch_id: branchId, p_product_id: productId ?? null, p_limit: limit,
@@ -2412,5 +2556,111 @@ function readReport(
     runAt: String(d.run_at ?? new Date().toISOString()),
     runBy: String(d.run_by ?? ""),
     filters,
+  };
+}
+
+/**
+ * A completed sale, as the receipt the screen prints.
+ *
+ * One mapper, because two paths produce a sale: the till (`complete_sale`) and billing a
+ * delivery note (`bill_challan`, P14a). A second copy is the one that falls behind.
+ */
+function readReceipt(r: Record<string, unknown>): Receipt {
+    const items = (r.items as Record<string, unknown>[]).map((i) => ({
+      name: String(i.name), qty: num(i.qty), unitPrice: num(i.unit_price), lineTotal: num(i.line_total),
+      warrantyUntil: (i.warranty_until as string | null) ?? null, serials: (i.serials as string[]) ?? [],
+      vatPct: num(i.vat_pct), vatAmount: num(i.vat_amount), vatInclusive: i.vat_inclusive !== false,
+      listPrice: numOrNull(i.list_price), priceOverridden: Boolean(i.price_overridden),
+      isGift: Boolean(i.is_gift),
+    }));
+    return {
+      id: String(r.id), invoiceNo: String(r.invoice_no), createdAt: String(r.created_at),
+      staffName: String(r.staff_name), shopName: String(r.shop_name), shopAddress: (r.shop_address as string | null) ?? null,
+      branchName: String(r.branch_name ?? ""),
+      branchAddress: (r.branch_address as string | null) ?? null,
+      branchPhone: (r.branch_phone as string | null) ?? null,
+      subtotal: num(r.subtotal), discountPct: num(r.discount_pct), discountAmount: num(r.discount_amount), total: num(r.total),
+      vatAmount: num(r.vat_amount),
+      chargesAmount: num(r.charges_amount),
+      charges: ((r.charges as { name: string; amount: number | string }[] | null) ?? []).map((c) => ({ name: c.name, amount: num(c.amount) })),
+      receiptFooter: (r.receipt_footer as string | null) ?? null,
+      binVat: (r.bin_vat as string | null) ?? null,
+      priceListName: (r.price_list_name as string | null) ?? null,
+      customerName: (r.customer_name as string | null) ?? null,
+      customerDiscountPct: num(r.customer_discount_pct),
+      paymentMethod: r.payment_method as PaymentMethod,
+      cashReceived: numOrNull(r.cash_received), changeGiven: numOrNull(r.change_given),
+      paymentRef: (r.payment_ref as string | null) ?? null, customerPhone: (r.customer_phone as string | null) ?? null,
+      paidAmount: num(r.paid_amount), dueAmount: num(r.due_amount),
+      customerOwes: numOrNull(r.customer_owes),
+      cardCharge: num(r.card_charge), emiCharge: num(r.emi_charge),
+      exchangeValue: num(r.exchange_value),
+      emiMonths: numOrNull(r.emi_months),
+      emiBank: (r.emi_bank as string | null) ?? null,
+      cardType: (r.card_type as string | null) ?? null,
+      cardLast4: (r.card_last4 as string | null) ?? null,
+      attention: (r.attention as string | null) ?? null,
+      customerBin: (r.customer_bin as string | null) ?? null,
+      narration: (r.narration as string | null) ?? null,
+      soldBy: (r.sold_by as string | null) ?? null,
+      extraFields: (r.extra_fields as Record<string, string> | null) ?? null,
+      exchange: (r.exchange as Receipt["exchange"]) ?? null,
+      payments: ((r.payments as Record<string, unknown>[] | null) ?? []).map((x) => ({
+        method: String(x.method), amount: num(x.amount),
+        reference: (x.reference as string | null) ?? null,
+      })),
+      items,
+    };
+}
+
+/** One quotation, order or challan, with its lines. */
+function readSalesDocument(d: Record<string, unknown>): SalesDocument {
+  return {
+    kind: d.kind as SalesDocument["kind"],
+    id: String(d.id), no: String(d.no), date: String(d.date), status: String(d.status),
+    branch: String(d.branch), branchId: String(d.branch_id),
+    customer: String(d.customer ?? "—"),
+    customerId: (d.customer_id as string | null) ?? null,
+    phone: (d.phone as string | null) ?? null,
+    attention: (d.attention as string | null) ?? null,
+    address: (d.address as string | null) ?? null,
+    validUntil: (d.valid_until as string | null) ?? null,
+    deliveryDate: (d.delivery_date as string | null) ?? null,
+    paymentTermsDays: numOrNull(d.payment_terms_days),
+    terms: (d.terms as string | null) ?? null,
+    note: (d.note as string | null) ?? null,
+    carrier: (d.carrier as string | null) ?? null,
+    vehicleNo: (d.vehicle_no as string | null) ?? null,
+    subtotal: num(d.subtotal), discountPct: num(d.discount_pct),
+    discountAmount: num(d.discount_amount), vatAmount: num(d.vat_amount),
+    total: num(d.total), advance: num(d.advance),
+    advanceWaiting: num(d.advance_waiting),
+    quoteNo: (d.quote_no as string | null) ?? null,
+    orderNo: (d.order_no as string | null) ?? null,
+    orderId: (d.order_id as string | null) ?? null,
+    invoiceNo: (d.invoice_no as string | null) ?? null,
+    who: String(d.who ?? ""), soldBy: (d.sold_by as string | null) ?? null,
+    approvedBy: (d.approved_by as string | null) ?? null,
+    lines: ((d.lines as Record<string, unknown>[] | null) ?? []).map((l): SalesDocLine => ({
+      id: String(l.id), productId: String(l.product_id), product: String(l.product),
+      code: String(l.code), qty: num(l.qty), unitPrice: num(l.unit_price),
+      lineDiscount: num(l.line_discount), isFree: Boolean(l.is_free),
+      lineTotal: num(l.line_total), note: (l.note as string | null) ?? null,
+      isSerial: Boolean(l.is_serial),
+      deliveredQty: numOrNull(l.delivered_qty) ?? undefined,
+      billedQty: numOrNull(l.billed_qty) ?? undefined,
+      pendingQty: numOrNull(l.pending_qty) ?? undefined,
+      cancelled: l.cancelled === undefined ? undefined : Boolean(l.cancelled),
+      inStock: numOrNull(l.in_stock) ?? undefined,
+      returnedQty: numOrNull(l.returned_qty) ?? undefined,
+      toBill: numOrNull(l.to_bill) ?? undefined,
+      serials: ((l.serials as Record<string, unknown>[] | null) ?? undefined)?.map((x) => ({
+        id: String(x.id), serial: String(x.serial), returned: Boolean(x.returned),
+      })),
+    })),
+    challans: ((d.challans as Record<string, unknown>[] | null) ?? []).map((c) => ({
+      id: String(c.id), challanNo: String(c.challan_no), date: String(c.date),
+      status: String(c.status),
+    })),
   };
 }

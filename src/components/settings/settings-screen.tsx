@@ -313,6 +313,7 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
     bin_vat: s.binVat ?? "", receipt_footer: s.receiptFooter ?? "",
     invoice_prefix: s.invoicePrefix, ait_pct: String(s.aitPct),
     po_approval_limit: String(s.poApprovalLimit),
+    so_approval_limit: String(s.soApprovalLimit),
     cash_short_limit: String(s.cashShortLimit),
     return_days: String(s.returnDays),
     sale_approval_limit: String(s.saleApprovalLimit),
@@ -336,6 +337,7 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
           ...form,
           ait_pct: Number(form.ait_pct) || 0,
           po_approval_limit: Number(form.po_approval_limit) || 0,
+          so_approval_limit: Number(form.so_approval_limit) || 0,
           cash_short_limit: Number(form.cash_short_limit) || 0,
           return_days: Number(form.return_days) || 0,
           sale_approval_limit: Number(form.sale_approval_limit) || 0,
@@ -385,6 +387,15 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
         <Input
           inputMode="numeric" value={form.po_approval_limit}
           onChange={set("po_approval_limit")} disabled={readOnly} className="num"
+        />
+      </Field>
+      <Field
+        label="Sales orders over this need your approval"
+        hint="0 means never. A big order waits for the owner before it is promised to the customer and holds the stock."
+      >
+        <Input
+          inputMode="numeric" value={form.so_approval_limit}
+          onChange={set("so_approval_limit")} disabled={readOnly} className="num"
         />
       </Field>
       <Field

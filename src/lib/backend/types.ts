@@ -20,6 +20,7 @@ import type {
   VoucherRow,
   JournalExport, LayerRebuildResult, PeriodLock, ReportFilters, ReportListItem,
   ReportResult,
+  AdvanceRow, BilledResult, ChallanRow, OrderRow, QuotationRow, SalesDocument,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 
@@ -522,4 +523,71 @@ export interface Backend {
   /** Work out which delivery every unit on the shelf came in on, from the movements.
    *  Owner only, and safe to press twice because it rebuilds rather than patches. */
   rebuildStockLayers(): Promise<LayerRebuildResult>;
+
+  // --- Quotations, sales orders and challans (P14a) ---
+  listQuotations(input?: {
+    branchId?: string | null; status?: string | null;
+    from?: string | null; to?: string | null;
+  }): Promise<QuotationRow[]>;
+  /** New one when `id` is null. Prices come from the customer's list, like the till. */
+  saveQuotation(
+    id: string | null, values: Record<string, unknown>, lines: Record<string, unknown>[],
+  ): Promise<{ id: string; quoteNo: string; total: number; status: string }>;
+  /** Sent, accepted, expired or lost. "Lost" needs a reason, or the log teaches nothing. */
+  setQuotationStatus(id: string, status: string, note?: string | null): Promise<void>;
+
+  listOrders(input?: {
+    branchId?: string | null; status?: string | null;
+    from?: string | null; to?: string | null;
+  }): Promise<OrderRow[]>;
+  /** Reserves stock at the branch. Over the shop's limit, or over the seller's discount
+   *  limit, it waits for a manager instead of going out. */
+  saveSalesOrder(
+    id: string | null, values: Record<string, unknown>, lines: Record<string, unknown>[],
+    approvalId?: string | null,
+  ): Promise<{ id: string; soNo: string; total: number; status: string;
+               waitingForApproval: boolean }>;
+  /** Change quantities or call lines off, releasing what they were holding. */
+  adjustSalesOrder(
+    orderId: string, lines: { id: string; qty?: number; cancel?: boolean }[], note: string,
+  ): Promise<void>;
+  setOrderStatus(
+    orderId: string, action: "send" | "approve" | "cancel", reason?: string | null,
+  ): Promise<void>;
+  /** Money taken before the goods go: held, not earned. */
+  recordAdvance(input: {
+    orderId: string; amount: number; method?: string;
+    reference?: string | null; note?: string | null;
+  }): Promise<{ amount: number; advanceTotal: number }>;
+  /** What the shop is holding and has not yet set against a bill. Managers only. */
+  listAdvances(branchId?: string | null): Promise<AdvanceRow[]>;
+
+  listChallans(input?: {
+    branchId?: string | null; status?: string | null;
+    from?: string | null; to?: string | null;
+  }): Promise<ChallanRow[]>;
+  /** The goods leave now: off the shelf, into "delivered, not invoiced". */
+  saveChallan(
+    branchId: string, values: Record<string, unknown>, lines: Record<string, unknown>[],
+  ): Promise<{ id: string; challanNo: string; atCost: number; orderStatus: string | null }>;
+  /** Goods back off a delivery note before anybody billed them. Not a refund. */
+  returnChallan(
+    challanId: string, lines: { id: string; qty?: number; serialIds?: string[] }[],
+    reason: string,
+  ): Promise<{ returned: number }>;
+  /** Bill what has been delivered, applying whatever advance is waiting. */
+  billChallan(input: {
+    challanId: string; paymentMethod?: string; cashReceived?: number | null;
+    paymentRef?: string | null; dueAmount?: number | null; approvalId?: string | null;
+    extras?: Record<string, unknown> | null;
+  }): Promise<BilledResult>;
+  /** Deliver and bill an order in one go, for goods that go out over the counter. */
+  billOrder(input: {
+    orderId: string; paymentMethod?: string; cashReceived?: number | null;
+    paymentRef?: string | null; dueAmount?: number | null; approvalId?: string | null;
+    extras?: Record<string, unknown> | null;
+  }): Promise<BilledResult>;
+
+  /** One document with its lines, for the screen and for printing. */
+  salesDocument(kind: "quotation" | "order" | "challan", id: string): Promise<SalesDocument>;
 }

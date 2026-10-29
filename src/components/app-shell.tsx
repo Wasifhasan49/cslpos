@@ -4,7 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  ArrowLeftRight, BookOpenCheck, Boxes, ChevronDown, Check, FileText, KeyRound,
+  ArrowLeftRight, BookOpenCheck, Boxes, ChevronDown, Check, ClipboardList, FileText, KeyRound,
   LayoutDashboard, LogOut, MoreHorizontal, Package, Receipt, Settings, ShieldCheck,
   ShoppingCart, Store, Truck, Users, Wallet,
 } from "lucide-react";
@@ -27,6 +27,7 @@ const ICONS: Record<IconName, React.ComponentType<{ className?: string }>> = {
   dashboard: LayoutDashboard,
   accounts: BookOpenCheck,
   reports: FileText,
+  orders: ClipboardList,
   settings: Settings,
 };
 

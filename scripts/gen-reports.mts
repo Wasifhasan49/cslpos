@@ -15,7 +15,9 @@
 import { writeFileSync } from "node:fs";
 import { REPORTS, type ReportDef } from "../src/lib/reports.ts";
 
-const out = process.argv[2] ?? "supabase/migrations/20261026000019_report_defs.sql";
+// The NEWEST seed file: a later prompt that adds reports writes a new one and
+// changes this default, because an applied migration is never rewritten.
+const out = process.argv[2] ?? "supabase/migrations/20261026000021_report_defs.sql";
 
 const lit = (v: string | null | undefined): string =>
   v === null || v === undefined ? "null" : `'${v.replace(/'/g, "''")}'`;

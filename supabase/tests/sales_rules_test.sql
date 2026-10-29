@@ -4240,5 +4240,404 @@ select pg_temp.expect_error(
   $q$select public.report_run('S-1', jsonb_build_object('branch_id', '00000000-0000-4000-8000-0000000000b1'))$q$,
   'BRANCH_NOT_ALLOWED');
 
+
+-- ===========================================================================
+-- 27. QUOTATIONS, SALES ORDERS AND CHALLANS (P14a)
+-- ===========================================================================
+--
+-- The done-when, start to finish: quote a company 10 keyboards, turn it into an order
+-- with a 5,000 advance, see them reserved at the counter, deliver 6 on a challan, bill
+-- those 6 against the advance, then deliver and bill the last 4 — and every ledger
+-- balances the whole way through.
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+select public.set_feature('sales_documents', true);
+
+create temporary table p14a (k text primary key, v text);
+
+-- A company to sell to, and a product with plenty on the shelf.
+insert into public.customers (id, shop_id, phone, name_text, company, credit_allowed,
+                              credit_limit, payment_days)
+values ('00000000-0000-4000-8000-0000000000f1', :'SHOP', '01611222333',
+        'Orbit Technologies', 'Orbit Technologies Ltd', true, 500000, 30);
+\set ORBIT '00000000-0000-4000-8000-0000000000f1'
+
+do $$
+declare v_stock integer;
+begin
+  -- Top the keyboard up so there is definitely enough to reserve and deliver. Through
+  -- the function, like everything else: the tables take no direct writes.
+  perform public.correct_stock('00000000-0000-4000-8000-0000000000b1',
+                               '00000000-0000-4000-8000-0000000000a5', 20, 'found_in_count',
+                               'Top-up for P14a');
+  select qty into v_stock from public.branch_stock
+    where product_id = '00000000-0000-4000-8000-0000000000a5'
+      and location_id = '00000000-0000-4000-8000-0000000000e1';
+  insert into p14a values ('stock_before', v_stock::text),
+    ('avail_before', public.available_qty('00000000-0000-4000-8000-0000000000a5',
+                                          '00000000-0000-4000-8000-0000000000b1')::text);
+end $$;
+
+-- ---- The quotation ----
+do $$
+declare r jsonb;
+begin
+  r := public.save_quotation(null,
+    jsonb_build_object('branch_id', '00000000-0000-4000-8000-0000000000b1',
+                       'customer_id', '00000000-0000-4000-8000-0000000000f1',
+                       'attention', 'Mr Haque',
+                       'valid_until', (public.dhaka_today() + 14)::text,
+                       'terms', '30 days from delivery'),
+    jsonb_build_array(jsonb_build_object(
+      'product_id', '00000000-0000-4000-8000-0000000000a5', 'qty', 10)));
+  insert into p14a values ('quote_id', r->>'id'), ('quote_no', r->>'quote_no'),
+                          ('quote_total', r->>'total');
+end $$;
+
+select pg_temp.check(
+  (select v from p14a where k = 'quote_no') like 'QT-MB-%',
+  'a quotation is numbered QT-<branch>-<year><six digits>');
+select pg_temp.check(
+  (select v::numeric from p14a where k = 'quote_total') = 8500,
+  'and priced from the price list: 10 keyboards at 850');
+
+-- A quotation moves nothing: no stock, no money, no reservation.
+select pg_temp.check(
+  (select qty from public.branch_stock
+   where product_id = '00000000-0000-4000-8000-0000000000a5'
+     and location_id = '00000000-0000-4000-8000-0000000000e1')
+  = (select v::integer from p14a where k = 'stock_before'),
+  'a quotation moves no stock at all');
+select pg_temp.check(
+  public.reserved_qty('00000000-0000-4000-8000-0000000000a5',
+                      '00000000-0000-4000-8000-0000000000b1') = 0,
+  'and reserves nothing: it is a promise about prices, not about goods');
+
+-- Once it has gone out it cannot be quietly rewritten.
+select public.set_quotation_status((select v::uuid from p14a where k = 'quote_id'), 'sent');
+select pg_temp.expect_error(format(
+  $q$select public.save_quotation('%s', '{}'::jsonb,
+      jsonb_build_array(jsonb_build_object('product_id', '00000000-0000-4000-8000-0000000000a5', 'qty', 99)))$q$,
+  (select v from p14a where k = 'quote_id')), 'QUOTE_NOT_DRAFT');
+-- "Lost" has to say to whom, or the quotation log teaches the shop nothing.
+select pg_temp.expect_error(format(
+  $q$select public.set_quotation_status('%s', 'lost')$q$,
+  (select v from p14a where k = 'quote_id')), 'REASON_REQUIRED');
+
+-- ---- The order, and the reservation ----
+do $$
+declare r jsonb;
+begin
+  r := public.save_sales_order(null,
+    jsonb_build_object('branch_id', '00000000-0000-4000-8000-0000000000b1',
+                       'customer_id', '00000000-0000-4000-8000-0000000000f1',
+                       'quote_id', (select v from p14a where k = 'quote_id'),
+                       'delivery_date', (public.dhaka_today() + 7)::text,
+                       'send', 'true'),
+    jsonb_build_array(jsonb_build_object(
+      'product_id', '00000000-0000-4000-8000-0000000000a5', 'qty', 10)));
+  insert into p14a values ('order_id', r->>'id'), ('so_no', r->>'so_no'),
+                          ('order_status', r->>'status');
+end $$;
+
+select pg_temp.check(
+  (select v from p14a where k = 'so_no') like 'SO-MB-%'
+  and (select v from p14a where k = 'order_status') = 'open',
+  'DONE-WHEN: the quotation becomes an order, numbered SO-<branch>-…');
+select pg_temp.check(
+  public.reserved_qty('00000000-0000-4000-8000-0000000000a5',
+                      '00000000-0000-4000-8000-0000000000b1') = 10,
+  'DONE-WHEN: and the ten keyboards are reserved');
+select pg_temp.check(
+  public.available_qty('00000000-0000-4000-8000-0000000000a5',
+                       '00000000-0000-4000-8000-0000000000b1')
+  = (select v::integer from p14a where k = 'avail_before') - 10,
+  'so the counter has ten fewer to sell, while the shelf still holds them all');
+select pg_temp.check(
+  (select (x->>'reserved')::integer
+   from jsonb_array_elements(public.branch_products('00000000-0000-4000-8000-0000000000b1')) x
+   where x->>'code' = 'LOG-K120') = 10,
+  'DONE-WHEN: and the counter says so, in the product list itself');
+
+-- The reserved ten cannot be sold to somebody who walks in.
+select pg_temp.expect_error(format(
+  $q$select public.complete_sale('00000000-0000-4000-8000-0000000000b1',
+      jsonb_build_array(jsonb_build_object('product_id', '00000000-0000-4000-8000-0000000000a5',
+                                           'qty', %s)),
+      'cash', 0, null, null, 100000)$q$,
+  (select v::integer from p14a where k = 'stock_before')), 'RESERVED_FOR_AN_ORDER');
+
+-- ---- The advance ----
+do $$
+declare r jsonb;
+begin
+  r := public.record_advance((select v::uuid from p14a where k = 'order_id'), 5000, 'cash',
+                             null, 'Advance against the order');
+  insert into p14a values ('advance', r->>'amount');
+end $$;
+
+select pg_temp.check(
+  (select advance_amount from public.sales_orders
+   where id = (select v::uuid from p14a where k = 'order_id')) = 5000,
+  'DONE-WHEN: the order is holding a 5,000 advance');
+select pg_temp.check(
+  (select sum(l.credit) from public.journal_lines l
+   join public.accounts a on a.id = l.account_id
+   where a.role = 'customer_advance') = 5000,
+  'and the books show it as money HELD, not money earned');
+select pg_temp.expect_error(format(
+  $q$select public.record_advance('%s', 99000, 'cash')$q$,
+  (select v from p14a where k = 'order_id')), 'ADVANCE_OVER_ORDER');
+
+-- ---- The first delivery: 6 of the 10 ----
+do $$
+declare r jsonb;
+begin
+  r := public.save_challan('00000000-0000-4000-8000-0000000000b1',
+    jsonb_build_object('order_id', (select v from p14a where k = 'order_id'),
+                       'carrier', 'Sundarban Courier', 'vehicle_no', 'DHAKA-METRO-1234'),
+    jsonb_build_array(jsonb_build_object(
+      'product_id', '00000000-0000-4000-8000-0000000000a5',
+      'order_item_id', (select i.id from public.sales_order_items i
+                        where i.order_id = (select v::uuid from p14a where k = 'order_id')),
+      'qty', 6)));
+  insert into p14a values ('challan1', r->>'id'), ('challan1_no', r->>'challan_no'),
+                          ('challan1_status', r->>'order_status');
+end $$;
+
+select pg_temp.check(
+  (select v from p14a where k = 'challan1_no') like 'CH-MB-%'
+  and (select v from p14a where k = 'challan1_status') = 'part_delivered',
+  'DONE-WHEN: six go out on a challan, and the order says part delivered');
+select pg_temp.check(
+  (select qty from public.branch_stock
+   where product_id = '00000000-0000-4000-8000-0000000000a5'
+     and location_id = '00000000-0000-4000-8000-0000000000e1')
+  = (select v::integer from p14a where k = 'stock_before') - 6,
+  'the six have left the shelf, because they have physically gone');
+select pg_temp.check(
+  public.reserved_qty('00000000-0000-4000-8000-0000000000a5',
+                      '00000000-0000-4000-8000-0000000000b1') = 4,
+  'and only the four still to come are reserved');
+select pg_temp.check(
+  (select sum(l.debit) - coalesce(sum(l.credit), 0) from public.journal_lines l
+   join public.accounts a on a.id = l.account_id
+   where a.role = 'goods_delivered') > 0,
+  'and on the books they sit in "delivered, not invoiced" — still the shop''s, not on a shelf');
+
+-- ---- Billing those six, against the advance ----
+do $$
+declare r jsonb;
+begin
+  r := public.bill_challan((select v::uuid from p14a where k = 'challan1'),
+                           'cash', 0, null, 5100);
+  insert into p14a values ('bill1', r->>'invoice_no'), ('bill1_total', r->>'total'),
+                          ('bill1_advance', r->>'advance_used'),
+                          ('bill1_owed', r->>'still_owed'),
+                          ('bill1_sale', r->>'id');
+end $$;
+
+select pg_temp.check(
+  (select v::numeric from p14a where k = 'bill1_total') = 5100,
+  'DONE-WHEN: the bill for six is 5,100');
+select pg_temp.check(
+  (select v::numeric from p14a where k = 'bill1_advance') = 5000,
+  'DONE-WHEN: and the 5,000 advance is applied to it');
+select pg_temp.check(
+  (select v::numeric from p14a where k = 'bill1_owed') = 100,
+  'so the customer owes 100, not 5,100');
+select pg_temp.check(
+  (select count(*) from public.stock_movements m
+   where m.product_id = '00000000-0000-4000-8000-0000000000a5'
+     and m.reason = 'sale'
+     and m.ref_id = (select v::uuid from p14a where k = 'bill1_sale')) = 0,
+  'and the bill moved no stock a second time: the challan had already moved it');
+select pg_temp.check(
+  (select qty from public.branch_stock
+   where product_id = '00000000-0000-4000-8000-0000000000a5'
+     and location_id = '00000000-0000-4000-8000-0000000000e1')
+  = (select v::integer from p14a where k = 'stock_before') - 6,
+  'the shelf is down by six in total, not twelve');
+
+-- ---- The last four, a week later ----
+do $$
+declare r jsonb; v_ch jsonb;
+begin
+  v_ch := public.save_challan('00000000-0000-4000-8000-0000000000b1',
+    jsonb_build_object('order_id', (select v from p14a where k = 'order_id')),
+    jsonb_build_array(jsonb_build_object(
+      'product_id', '00000000-0000-4000-8000-0000000000a5',
+      'order_item_id', (select i.id from public.sales_order_items i
+                        where i.order_id = (select v::uuid from p14a where k = 'order_id')),
+      'qty', 4)));
+  r := public.bill_challan((v_ch->>'id')::uuid, 'cash', 3400);
+  insert into p14a values ('bill2_total', r->>'total'), ('bill2_advance', r->>'advance_used');
+end $$;
+
+select pg_temp.check(
+  (select v::numeric from p14a where k = 'bill2_total') = 3400,
+  'DONE-WHEN: the last four are billed at 3,400');
+select pg_temp.check(
+  (select v::numeric from p14a where k = 'bill2_advance') = 0,
+  'with no advance left to apply — it was spent on the first bill');
+select pg_temp.check(
+  (select status from public.sales_orders
+   where id = (select v::uuid from p14a where k = 'order_id')) = 'billed',
+  'DONE-WHEN: and the order is finished');
+select pg_temp.check(
+  public.reserved_qty('00000000-0000-4000-8000-0000000000a5',
+                      '00000000-0000-4000-8000-0000000000b1') = 0,
+  'nothing is reserved any more');
+select pg_temp.check(
+  (select qty from public.branch_stock
+   where product_id = '00000000-0000-4000-8000-0000000000a5'
+     and location_id = '00000000-0000-4000-8000-0000000000e1')
+  = (select v::integer from p14a where k = 'stock_before') - 10,
+  'and exactly ten keyboards left the shop');
+
+-- ---- DONE-WHEN: every ledger balances ----
+select pg_temp.check(
+  (public.trial_balance()->>'balanced')::boolean,
+  'DONE-WHEN: the trial balance still balances after all of that');
+select pg_temp.check(
+  not exists (
+    select 1 from public.journal_entries e
+    join public.journal_lines l on l.entry_id = e.id
+    group by e.id having sum(l.debit) <> sum(l.credit)),
+  'and every single entry in it balances');
+select pg_temp.check(
+  coalesce((select sum(l.debit) - sum(l.credit) from public.journal_lines l
+            join public.accounts a on a.id = l.account_id
+            where a.role = 'goods_delivered'), 0) = 0,
+  'DONE-WHEN: nothing is left sitting in "delivered, not invoiced" — it all got billed');
+select pg_temp.check(
+  coalesce((select sum(l.credit) - sum(l.debit) from public.journal_lines l
+            join public.accounts a on a.id = l.account_id
+            where a.role = 'customer_advance'), 0) = 0,
+  'and the shop is holding none of their money any more');
+
+-- ---- Changing and cancelling an order ----
+do $$
+declare r jsonb; v_order uuid;
+begin
+  r := public.save_sales_order(null,
+    jsonb_build_object('branch_id', '00000000-0000-4000-8000-0000000000b1',
+                       'customer_id', '00000000-0000-4000-8000-0000000000f1',
+                       'send', 'true'),
+    jsonb_build_array(jsonb_build_object(
+      'product_id', '00000000-0000-4000-8000-0000000000a5', 'qty', 5)));
+  v_order := (r->>'id')::uuid;
+  insert into p14a values ('order2', v_order::text);
+
+  -- Cutting it to 3 releases two of the five.
+  perform public.adjust_sales_order(v_order,
+    jsonb_build_array(jsonb_build_object(
+      'id', (select i.id from public.sales_order_items i where i.order_id = v_order),
+      'qty', 3)),
+    'They only need three now');
+end $$;
+
+select pg_temp.check(
+  public.reserved_qty('00000000-0000-4000-8000-0000000000a5',
+                      '00000000-0000-4000-8000-0000000000b1') = 3,
+  'cutting an order down releases the stock it was holding');
+select pg_temp.check(
+  (select total from public.sales_orders where id = (select v::uuid from p14a where k = 'order2'))
+  = 2550,
+  'and the order is worth three keyboards, not five');
+select pg_temp.expect_error(format(
+  $q$select public.adjust_sales_order('%s', '[]'::jsonb, '')$q$,
+  (select v from p14a where k = 'order2')), 'REASON_REQUIRED');
+
+-- Cancelling it releases the rest.
+select public.set_order_status((select v::uuid from p14a where k = 'order2'), 'cancel',
+                               'The customer changed their mind');
+select pg_temp.check(
+  public.reserved_qty('00000000-0000-4000-8000-0000000000a5',
+                      '00000000-0000-4000-8000-0000000000b1') = 0,
+  'and calling the order off releases all of it');
+
+-- ---- Goods coming back off a delivery note ----
+do $$
+declare v_ch jsonb; v_order uuid;
+begin
+  v_order := public.save_sales_order(null,
+    jsonb_build_object('branch_id', '00000000-0000-4000-8000-0000000000b1',
+                       'customer_id', '00000000-0000-4000-8000-0000000000f1',
+                       'send', 'true'),
+    jsonb_build_array(jsonb_build_object(
+      'product_id', '00000000-0000-4000-8000-0000000000a5', 'qty', 2)))->>'id';
+  v_ch := public.save_challan('00000000-0000-4000-8000-0000000000b1',
+    jsonb_build_object('order_id', v_order),
+    jsonb_build_array(jsonb_build_object(
+      'product_id', '00000000-0000-4000-8000-0000000000a5',
+      'order_item_id', (select i.id from public.sales_order_items i where i.order_id = v_order::uuid),
+      'qty', 2)));
+  insert into p14a values ('challan3', v_ch->>'id');
+  perform public.return_challan((v_ch->>'id')::uuid,
+    jsonb_build_array(jsonb_build_object('id',
+      (select i.id from public.challan_items i where i.challan_id = (v_ch->>'id')::uuid),
+      'qty', 2)),
+    'Wrong model sent');
+end $$;
+
+select pg_temp.check(
+  (select qty from public.branch_stock
+   where product_id = '00000000-0000-4000-8000-0000000000a5'
+     and location_id = '00000000-0000-4000-8000-0000000000e1')
+  = (select v::integer from p14a where k = 'stock_before') - 10,
+  'goods returned off a delivery note go back on the shelf');
+select pg_temp.check(
+  (select status from public.challans where id = (select v::uuid from p14a where k = 'challan3'))
+  = 'returned',
+  'and the challan says so');
+select pg_temp.check(
+  coalesce((select sum(l.debit) - sum(l.credit) from public.journal_lines l
+            join public.accounts a on a.id = l.account_id
+            where a.role = 'goods_delivered'), 0) = 0,
+  'and "delivered, not invoiced" is empty again, because nothing is out there');
+select pg_temp.check(
+  (public.trial_balance()->>'balanced')::boolean,
+  'and the books still balance');
+
+-- ---- The lists, and who may see them ----
+select pg_temp.check(
+  jsonb_array_length(public.quotation_list()) >= 1
+  and jsonb_array_length(public.order_list()) >= 3
+  and jsonb_array_length(public.challan_list()) >= 3,
+  'the three lists all come back with what was just created');
+select pg_temp.check(
+  (select x->>'no' from jsonb_array_elements(
+     jsonb_build_array(public.sales_document('order', (select v::uuid from p14a where k = 'order_id')))) x)
+  = (select v from p14a where k = 'so_no'),
+  'and one order opens with its lines');
+select pg_temp.check(
+  jsonb_array_length(public.advance_list()) = 0,
+  'no money is being held, now that every advance has been used');
+
+-- Goods that came back off a delivery note are outstanding on the order again, so they
+-- are reserved again: the customer is still expecting them.
+insert into p14a values ('reserved_now',
+  public.reserved_qty('00000000-0000-4000-8000-0000000000a5',
+                      '00000000-0000-4000-8000-0000000000b1')::text);
+select pg_temp.check(
+  (select v::integer from p14a where k = 'reserved_now') = 2,
+  'and the two that came back are reserved again, because the order still wants them');
+
+-- A cashier may see that stock is reserved, but not what the shop is holding in advances.
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.check(
+  (select (x->>'reserved')::integer
+   from jsonb_array_elements(public.branch_products('00000000-0000-4000-8000-0000000000b1')) x
+   where x->>'code' = 'LOG-K120')
+  = (select v::integer from p14a where k = 'reserved_now'),
+  'a cashier sees the same reserved figure, because the counter needs it');
+select pg_temp.expect_error($q$select public.advance_list()$q$, 'NOT_ALLOWED:view_reports');
+select pg_temp.check(
+  (select count(*) from public.customer_advances) = 0,
+  'but reading the advances table directly tells a cashier nothing');
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+
 reset role;
 \echo ALL DATABASE CHECKS PASSED

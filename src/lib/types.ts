@@ -105,8 +105,13 @@ export interface Product {
   isSerial: boolean;
   /** Stock AT THE CURRENT BRANCH, not the shop total. */
   stock: number;
+  /** Of that stock, how much is promised to an open sales order (P14a) and must not be
+   *  sold to a walk-in. */
+  reserved?: number;
   reorderLevel: number;
   serials: SerialUnit[]; // in-stock units at this branch, for serial items
+  /** Units out at a customer's on a delivery note: not sellable, but billable. */
+  deliveredSerials?: SerialUnit[];
   /** Maximum Retail Price, if the shop records it. */
   mrp?: number | null;
   /** The band a seller may move the price inside. Below `minPrice` needs a manager.
@@ -313,6 +318,8 @@ export interface ShopDetails {
   aitPct: number;
   /** Purchase orders over this need the owner's sign-off. 0 means never. */
   poApprovalLimit: number;
+  /** An order over this waits for the owner instead of going out (P14a). */
+  soApprovalLimit: number;
   /** How far out the cash drawer can be before it is flagged. */
   cashShortLimit: number;
   /** How long after a sale a return is routine. Past it, a manager approves. */
@@ -992,6 +999,12 @@ export interface SplitPayment {
 
 /** Everything the advanced counter adds to a sale. One object, not twelve fields. */
 export interface SaleExtras {
+  /** This bill is for goods already delivered on a challan (P14a), so the stock must
+   *  not move again and the serials come from `delivered` rather than the shelf. */
+  challanId?: string | null;
+  orderId?: string | null;
+  /** Serial ids to deliver, per product, when billing an order straight out. */
+  serials?: Record<string, string[]> | null;
   attention?: string | null;
   customerAddress?: string | null;
   customerBin?: string | null;
@@ -1199,7 +1212,11 @@ export type AccountRole =
   | "cash_in_hand" | "bank" | "wallet" | "receivable" | "payable" | "inventory"
   | "vat_payable" | "sales" | "sales_return" | "cogs" | "discount_given"
   | "purchase_return" | "stock_loss" | "stock_gain" | "inter_branch"
-  | "card_charge" | "opening_equity" | "rounding";
+  | "card_charge" | "opening_equity" | "rounding"
+  // P14: proving the books against the shelves needed these three.
+  | "vat_input" | "ait_advance" | "stock_in_transit"
+  // P14a: money held for a customer, and goods gone but not yet billed.
+  | "customer_advance" | "goods_delivered";
 
 export interface ChartAccount {
   id: string;
@@ -1504,4 +1521,158 @@ export interface LayerRebuildResult {
   movements: number;
   layers: number;
   openLayers: number;
+}
+
+// --- Quotations, sales orders and challans (P14a) ---
+
+export type QuotationStatus = "draft" | "sent" | "accepted" | "expired" | "lost";
+export type OrderStatus =
+  "draft" | "awaiting_approval" | "open" | "part_delivered" | "delivered" | "billed" | "cancelled";
+export type ChallanStatus = "delivered" | "part_billed" | "billed" | "returned" | "cancelled";
+
+export interface QuotationRow {
+  id: string;
+  quoteNo: string;
+  date: string;
+  branch: string;
+  branchId: string;
+  customer: string;
+  customerId: string | null;
+  total: number;
+  status: QuotationStatus;
+  validUntil: string | null;
+  /** Past its date and still open, so the prices are not promised any more. */
+  outOfDate: boolean;
+  lines: number;
+  who: string;
+}
+
+export interface OrderRow {
+  id: string;
+  soNo: string;
+  date: string;
+  branch: string;
+  branchId: string;
+  customer: string;
+  customerId: string;
+  deliveryDate: string | null;
+  status: OrderStatus;
+  total: number;
+  advance: number;
+  ordered: number;
+  delivered: number;
+  pending: number;
+  /** Promised for a day that has gone, with something still to deliver. */
+  late: boolean;
+  daysLate: number | null;
+  quoteNo: string | null;
+  who: string;
+  soldBy: string | null;
+}
+
+export interface ChallanRow {
+  id: string;
+  challanNo: string;
+  date: string;
+  branch: string;
+  branchId: string;
+  customer: string;
+  customerId: string;
+  orderNo: string | null;
+  orderId: string | null;
+  status: ChallanStatus;
+  atCost: number;
+  carrier: string | null;
+  vehicleNo: string | null;
+  qty: number;
+  toBill: number;
+  /** Goods gone, money not asked for. The figure to chase on. */
+  daysUnbilled: number | null;
+  invoiceNo: string | null;
+  who: string;
+}
+
+export interface AdvanceRow {
+  id: string;
+  date: string;
+  customer: string;
+  customerId: string;
+  orderNo: string | null;
+  orderId: string | null;
+  amount: number;
+  method: string;
+  reference: string | null;
+  branch: string;
+  daysHeld: number;
+  who: string;
+}
+
+export interface SalesDocLine {
+  id: string;
+  productId: string;
+  product: string;
+  code: string;
+  qty: number;
+  unitPrice: number;
+  lineDiscount: number;
+  isFree: boolean;
+  lineTotal: number;
+  note: string | null;
+  isSerial: boolean;
+  /** Orders only. */
+  deliveredQty?: number;
+  billedQty?: number;
+  pendingQty?: number;
+  cancelled?: boolean;
+  inStock?: number;
+  /** Challans only. */
+  returnedQty?: number;
+  toBill?: number;
+  serials?: { id: string; serial: string; returned: boolean }[];
+}
+
+/** One quotation, order or challan with its lines — for the screen and for printing. */
+export interface SalesDocument {
+  kind: "quotation" | "order" | "challan";
+  id: string;
+  no: string;
+  date: string;
+  status: string;
+  branch: string;
+  branchId: string;
+  customer: string;
+  customerId: string | null;
+  phone: string | null;
+  attention: string | null;
+  address: string | null;
+  validUntil: string | null;
+  deliveryDate: string | null;
+  paymentTermsDays: number | null;
+  terms: string | null;
+  note: string | null;
+  carrier: string | null;
+  vehicleNo: string | null;
+  subtotal: number;
+  discountPct: number;
+  discountAmount: number;
+  vatAmount: number;
+  total: number;
+  advance: number;
+  /** An advance on the order behind this challan, still waiting to be used. */
+  advanceWaiting: number;
+  quoteNo: string | null;
+  orderNo: string | null;
+  orderId: string | null;
+  invoiceNo: string | null;
+  who: string;
+  soldBy: string | null;
+  approvedBy: string | null;
+  lines: SalesDocLine[];
+  challans: { id: string; challanNo: string; date: string; status: string }[];
+}
+
+export interface BilledResult extends Receipt {
+  challanNo: string | null;
+  advanceUsed: number;
+  stillOwed: number;
 }

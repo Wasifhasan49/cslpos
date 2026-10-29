@@ -294,6 +294,12 @@ export const SALE_ERROR_CODES = [
   "NO_SUCH_DATASET", "NO_SUCH_FIELD", "NO_SUCH_BUILDER", "REPORT_HAS_NO_GROUPING",
   // P14a: quotations, sales orders and challans.
   "QUOTE_NOT_FOUND", "QUOTE_NOT_DRAFT", "BAD_QUOTE_STATUS",
+  "ORDER_NOT_FOUND", "ORDER_ALREADY_MOVING", "ORDER_CLOSED", "ORDER_NOT_DRAFT",
+  "ORDER_NOT_WAITING", "ORDER_NOT_OPEN", "BAD_ORDER_ACTION", "NO_SELF_APPROVAL",
+  "ALREADY_DELIVERED", "LESS_THAN_DELIVERED", "MORE_THAN_DELIVERED",
+  "ADVANCE_OVER_ORDER", "NOTHING_DELIVERED", "NOTHING_TO_BILL",
+  "CHALLAN_NOT_FOUND", "CHALLAN_ALREADY_BILLED", "RESERVED_FOR_AN_ORDER",
+  "BAD_DOCUMENT_KIND", "DOCUMENT_NOT_FOUND",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -588,6 +594,36 @@ export function friendlyError(raw: string): string {
       return "This quotation has already gone out. Copy it into a new one rather than "
         + "changing what the customer was sent.";
     case "BAD_QUOTE_STATUS": return "That isn't something a quotation can be.";
+    case "ORDER_NOT_FOUND": return "That order no longer exists. Reload and try again.";
+    case "ORDER_ALREADY_MOVING":
+      return "Goods have already gone out against this order, so it cannot be rewritten. "
+        + "Change the quantities instead, and say why.";
+    case "ORDER_CLOSED": return "This order is finished. Nothing more can be done to it.";
+    case "ORDER_NOT_DRAFT": return "This order has already gone out.";
+    case "ORDER_NOT_WAITING": return "This order is not waiting for anybody.";
+    case "ORDER_NOT_OPEN":
+      return "This order is not open for delivery. Send it first, or it has been billed already.";
+    case "BAD_ORDER_ACTION": return "That isn't something you can do to an order.";
+    case "NO_SELF_APPROVAL":
+      return "You can't approve your own order. Ask the owner or another manager.";
+    case "ALREADY_DELIVERED":
+      return "Some of this has already gone out of the door, so it can't be called off. "
+        + "Take it back on the delivery note first.";
+    case "LESS_THAN_DELIVERED":
+      return `${detail ?? "Some"} have already been delivered, so the order can't go below that.`;
+    case "MORE_THAN_DELIVERED":
+      return `More ${detail ?? "of that"} is coming back than ever went out.`;
+    case "ADVANCE_OVER_ORDER":
+      return "That is more than the order is worth. Check the figure.";
+    case "NOTHING_DELIVERED": return "Put something on the delivery note first.";
+    case "NOTHING_TO_BILL": return "Everything on this has been billed already.";
+    case "CHALLAN_NOT_FOUND": return "That delivery note no longer exists. Reload and try again.";
+    case "CHALLAN_ALREADY_BILLED": return "This delivery has already been billed.";
+    case "RESERVED_FOR_AN_ORDER":
+      return `${detail ?? "Those"} are on the shelf but promised to a customer's order. `
+        + "Check Orders, or change that order first.";
+    case "BAD_DOCUMENT_KIND": return "That isn't a kind of document.";
+    case "DOCUMENT_NOT_FOUND": return "That document no longer exists. Reload and try again.";
     case "PICK_AN_ACCOUNT": return "Pick which account's ledger you want.";
     case "PICK_A_PRODUCT": return "Pick which product you want the history of.";
     case "NO_SUCH_PRODUCT": return "That product isn't in this shop.";

@@ -25,6 +25,8 @@ import type {
   ChequeLayout, ChequePrint, ChequeRow, ChequeStatus, EntryStatus, LedgerLine,
   MoneyBalance, TrialBalance, TrialBalanceRow, VoucherRow,
   JournalExport, LayerRebuildResult, PeriodLock, ReportListItem, ReportResult,
+  AdvanceRow, BilledResult, ChallanRow, ChallanStatus, OrderRow, OrderStatus,
+  QuotationRow, QuotationStatus, SalesDocument,
 } from "../types";
 import { DEFAULT_CHEQUE_LAYOUT, takaInWords } from "../cheque";
 import type { ImportKind } from "../import/schema";
@@ -47,6 +49,9 @@ interface DemoSerial extends SerialUnit {
   sold: boolean;
   /** On the road between branches: not on either shelf, not sellable anywhere. */
   inTransit?: boolean;
+  /** Out at a customer's on a delivery note, not yet billed: still the shop's, but
+   *  not on a shelf and not sellable to anybody else (P14a). */
+  delivered?: boolean;
 }
 
 export function createDemoBackend(): Backend {
@@ -89,6 +94,7 @@ export function createDemoBackend(): Backend {
     email: null as string | null, logoUrl: null as string | null, binVat: null as string | null,
     receiptFooter: "Thank you. Keep this receipt for warranty claims.",
     invoicePrefix: "DEMO", currency: "BDT", aitPct: 0, poApprovalLimit: 0,
+    soApprovalLimit: 0,
     cashShortLimit: 50, returnDays: 7, saleApprovalLimit: 0, approveAllSales: false,
     cardChargeMode: "absorb" as "absorb" | "add", claimApproval: false,
     voucherApproval: false,
@@ -609,7 +615,12 @@ export function createDemoBackend(): Backend {
     catalogue.map((p) => {
       const pr = priceFor(p.id, listId);
       const mine: SerialUnit[] = serials
-        .filter((s) => s.productId === p.id && s.branchId === branchId && !s.sold && !s.inTransit)
+        .filter((s) => s.productId === p.id && s.branchId === branchId
+                       && !s.sold && !s.inTransit && !s.delivered)
+        .map(({ id, serial }) => ({ id, serial }));
+      // Out at a customer's on a delivery note: not sellable, but billable (P14a).
+      const out: SerialUnit[] = serials
+        .filter((s) => s.productId === p.id && s.branchId === branchId && s.delivered && !s.sold)
         .map(({ id, serial }) => ({ id, serial }));
       return {
         id: p.id, code: p.code, barcode: p.barcode, name: p.name, brand: p.brand,
@@ -617,7 +628,9 @@ export function createDemoBackend(): Backend {
         isSerial: p.isSerial, reorderLevel: p.reorderLevel,
         mrp: pr.mrp, minPrice: pr.min, maxPrice: pr.max, isInventory: true,
         stock: p.isSerial ? mine.length : (stock[branchId]?.[p.id] ?? 0),
+        reserved: reservedQty(p.id, branchId),
         serials: mine,
+        deliveredSerials: out,
       };
     });
 
@@ -707,6 +720,83 @@ export function createDemoBackend(): Backend {
     settings: reportSettings,
     features,
   });
+
+  // --- Quotations, sales orders and challans (P14a) ---------------------------
+  // The same rules the database keeps: a quotation moves nothing, an order RESERVES
+  // (worked out from the open lines, never stored), a challan takes the stock off the
+  // shelf, and the bill does not move it again.
+  interface DemoDocLine {
+    id: string; productId: string; qty: number; unitPrice: number; lineDiscount: number;
+    isFree: boolean; lineTotal: number; note: string | null;
+    deliveredQty?: number; billedQty?: number; returnedQty?: number; cancelled?: boolean;
+    orderItemId?: string | null; serialIds?: string[];
+  }
+  interface DemoQuotation {
+    id: string; quoteNo: string; createdAt: string; branchId: string;
+    customerId: string | null; customerName: string | null; attention: string | null;
+    address: string | null; validUntil: string | null; terms: string | null;
+    note: string | null; discountPct: number; subtotal: number; discountAmount: number;
+    vatAmount: number; total: number; status: QuotationStatus; statusNote: string | null;
+    who: string; lines: DemoDocLine[];
+  }
+  interface DemoOrder {
+    id: string; soNo: string; createdAt: string; branchId: string; quoteId: string | null;
+    customerId: string; attention: string | null; address: string | null;
+    deliveryDate: string | null; paymentTermsDays: number; discountPct: number;
+    subtotal: number; discountAmount: number; vatAmount: number; total: number;
+    advanceAmount: number; status: OrderStatus; cancelReason: string | null;
+    note: string | null; terms: string | null; who: string; soldBy: string | null;
+    approvedBy: string | null; lines: DemoDocLine[];
+  }
+  interface DemoChallan {
+    id: string; challanNo: string; deliveredOn: string; branchId: string;
+    orderId: string | null; customerId: string; attention: string | null;
+    address: string | null; carrier: string | null; vehicleNo: string | null;
+    note: string | null; status: ChallanStatus; totalCost: number; who: string;
+    invoiceNo: string | null; lines: DemoDocLine[];
+  }
+  interface DemoAdvance {
+    id: string; createdAt: string; branchId: string; orderId: string | null;
+    customerId: string; amount: number; method: string; reference: string | null;
+    note: string | null; usedOnSaleId: string | null; who: string;
+  }
+  const quotations: DemoQuotation[] = [];
+  const orders: DemoOrder[] = [];
+  const challans: DemoChallan[] = [];
+  const advances: DemoAdvance[] = [];
+  let quoteCounter = 1;
+  let orderCounter = 1;
+  let challanCounter = 1;
+
+  const docsOn = (): void => {
+    if (!features.sales_documents) fail("FEATURE_OFF:sales_documents");
+  };
+
+  /** Promised to an open order and not yet gone. Worked out, never stored. */
+  const reservedQty = (productId: string, branchId: string, ignoreOrder?: string): number => {
+    if (!features.sales_documents) return 0;
+    return orders
+      .filter((o) => o.branchId === branchId && o.id !== ignoreOrder
+                     && ["open", "part_delivered", "awaiting_approval"].includes(o.status))
+      .flatMap((o) => o.lines)
+      .filter((l) => l.productId === productId && !l.cancelled)
+      .reduce((n, l) => n + Math.max(l.qty - (l.deliveredQty ?? 0), 0), 0);
+  };
+
+  const availableQty = (productId: string, branchId: string, ignoreOrder?: string): number =>
+    Math.max((stock[branchId]?.[productId] ?? 0)
+             + serials.filter((x) => x.productId === productId && x.branchId === branchId
+                                     && !x.sold && !x.inTransit && !x.delivered).length
+             - reservedQty(productId, branchId, ignoreOrder), 0);
+
+  /** Add a document up from its lines, the one place that does it. */
+  const addUp = (doc: { discountPct: number; lines: DemoDocLine[] }) => {
+    const sub = roundTaka(doc.lines.filter((l) => !l.cancelled)
+      .reduce((n, l) => n + l.lineTotal, 0));
+    const discount = roundTaka((sub * doc.discountPct) / 100);
+    return { subtotal: sub, discountAmount: discount, vatAmount: 0,
+             total: roundTaka(sub - discount) };
+  };
 
   const api: Backend = {
     mode: "demo",
@@ -1196,6 +1286,8 @@ export function createDemoBackend(): Backend {
         aitPct: values.ait_pct !== undefined ? Number(values.ait_pct) || 0 : shopDetails.aitPct,
         poApprovalLimit: values.po_approval_limit !== undefined
           ? Number(values.po_approval_limit) || 0 : shopDetails.poApprovalLimit,
+        soApprovalLimit: values.so_approval_limit !== undefined
+          ? Number(values.so_approval_limit) || 0 : shopDetails.soApprovalLimit,
         cashShortLimit: values.cash_short_limit !== undefined
           ? Number(values.cash_short_limit) || 0 : shopDetails.cashShortLimit,
         returnDays: values.return_days !== undefined
@@ -4043,6 +4135,647 @@ export function createDemoBackend(): Backend {
           branch: branches.find((b) => b.id === e.branchId)?.name ?? "—",
         })));
       return { shop: DEMO_SHOP_NAME, from: from ?? null, to: to ?? null, lines };
+    },
+
+
+    // --- Quotations, sales orders and challans (P14a) ---
+
+    async listQuotations(input): Promise<QuotationRow[]> {
+      return quotations
+        .filter((q) => (!input?.branchId || q.branchId === input.branchId)
+                       && (!input?.status || q.status === input.status))
+        .map((q) => ({
+          id: q.id, quoteNo: q.quoteNo, date: dhakaDate(q.createdAt),
+          branch: branchOr404(q.branchId).name, branchId: q.branchId,
+          customer: q.customerId
+            ? (customers.find((c) => c.id === q.customerId)?.name ?? "—")
+            : (q.customerName ?? "—"),
+          customerId: q.customerId, total: q.total, status: q.status,
+          validUntil: q.validUntil,
+          outOfDate: Boolean(q.validUntil && q.validUntil < dhakaToday()
+                             && ["draft", "sent"].includes(q.status)),
+          lines: q.lines.length, who: q.who,
+        }))
+        .sort((a, b) => b.date.localeCompare(a.date));
+    },
+
+    async saveQuotation(id, values, lines) {
+      docsOn();
+      if (lines.length === 0) fail("EMPTY_SALE");
+      const branchId = String(values.branch_id ?? branches[0].id);
+      const customerId = (values.customer_id as string | null) ?? null;
+      const listId = customerId
+        ? (customers.find((c) => c.id === customerId)?.priceListId ?? "pl-retail")
+        : "pl-retail";
+      const pct = Number(values.discount_pct ?? 0);
+
+      let q = id ? quotations.find((x) => x.id === id) : undefined;
+      if (id && !q) fail("QUOTE_NOT_FOUND");
+      // Once it has gone out, it is a promise somebody is relying on.
+      if (q && q.status !== "draft") fail("QUOTE_NOT_DRAFT");
+      if (!q) {
+        q = {
+          id: crypto.randomUUID(),
+          quoteNo: `QT-${branchOr404(branchId).code}-${new Date().getFullYear()}${String(quoteCounter++).padStart(6, "0")}`,
+          createdAt: new Date().toISOString(), branchId,
+          customerId, customerName: (values.customer_name as string | null) ?? null,
+          attention: (values.attention as string | null) ?? null,
+          address: (values.address as string | null) ?? null,
+          validUntil: (values.valid_until as string | null) ?? null,
+          terms: (values.terms as string | null) ?? null,
+          note: (values.note as string | null) ?? null,
+          discountPct: pct, subtotal: 0, discountAmount: 0, vatAmount: 0, total: 0,
+          status: "draft", statusNote: null, who: staff.name, lines: [],
+        };
+        quotations.unshift(q);
+      }
+      q.customerId = customerId;
+      q.discountPct = pct;
+      q.attention = (values.attention as string | null) ?? q.attention;
+      q.validUntil = (values.valid_until as string | null) ?? q.validUntil;
+      q.terms = (values.terms as string | null) ?? q.terms;
+      q.lines = lines.map((l) => {
+        const productId = String(l.product_id);
+        const product = catalogue.find((x) => x.id === productId);
+        if (!product) fail("PRODUCT_NOT_FOUND");
+        const qty = Number(l.qty ?? 0);
+        if (qty <= 0) fail(`BAD_QTY:${product!.name}`);
+        const isFree = Boolean(l.is_free);
+        const unitPrice = isFree ? 0
+          : Number(l.unit_price ?? priceFor(productId, listId).price);
+        const lineDiscount = Number(l.line_discount ?? 0);
+        return {
+          id: crypto.randomUUID(), productId, qty, unitPrice, lineDiscount, isFree,
+          lineTotal: roundTaka(unitPrice * qty - lineDiscount),
+          note: (l.note as string | null) ?? null,
+        };
+      });
+      Object.assign(q, addUp(q));
+      return { id: q.id, quoteNo: q.quoteNo, total: q.total, status: q.status };
+    },
+
+    async setQuotationStatus(id, status, note): Promise<void> {
+      const q = quotations.find((x) => x.id === id);
+      if (!q) fail("QUOTE_NOT_FOUND");
+      if (!["draft", "sent", "accepted", "expired", "lost"].includes(status)) {
+        fail(`BAD_QUOTE_STATUS:${status}`);
+      }
+      // "Lost" wants a reason: to whom, and on what. Otherwise the log teaches nothing.
+      if (status === "lost" && !note?.trim()) fail("REASON_REQUIRED");
+      q!.status = status as QuotationStatus;
+      q!.statusNote = note ?? null;
+    },
+
+    async listOrders(input): Promise<OrderRow[]> {
+      return orders
+        .filter((o) => (!input?.branchId || o.branchId === input.branchId)
+                       && (!input?.status || o.status === input.status
+                           || (input.status === "open"
+                               && ["open", "part_delivered"].includes(o.status))))
+        .map((o) => {
+          const live = o.lines.filter((l) => !l.cancelled);
+          const pending = live.reduce((n, l) => n + Math.max(l.qty - (l.deliveredQty ?? 0), 0), 0);
+          const late = Boolean(o.deliveryDate && o.deliveryDate < dhakaToday()
+                               && ["open", "part_delivered"].includes(o.status));
+          return {
+            id: o.id, soNo: o.soNo, date: dhakaDate(o.createdAt),
+            branch: branchOr404(o.branchId).name, branchId: o.branchId,
+            customer: customers.find((c) => c.id === o.customerId)?.name ?? "—",
+            customerId: o.customerId, deliveryDate: o.deliveryDate, status: o.status,
+            total: o.total, advance: o.advanceAmount,
+            ordered: live.reduce((n, l) => n + l.qty, 0),
+            delivered: live.reduce((n, l) => n + (l.deliveredQty ?? 0), 0),
+            pending, late,
+            daysLate: late && o.deliveryDate
+              ? Math.round((Date.parse(dhakaToday()) - Date.parse(o.deliveryDate)) / 86400000)
+              : null,
+            quoteNo: quotations.find((q) => q.id === o.quoteId)?.quoteNo ?? null,
+            who: o.who, soldBy: o.soldBy,
+          };
+        });
+    },
+
+    async saveSalesOrder(id, values, lines, approvalId) {
+      docsOn();
+      if (lines.length === 0) fail("EMPTY_SALE");
+      // A promise and a debt belonging to nobody is the thing BMS gets wrong.
+      const customerId = (values.customer_id as string | null) ?? null;
+      if (!customerId) fail("CREDIT_NEEDS_CUSTOMER");
+      const branchId = String(values.branch_id ?? branches[0].id);
+      const listId = customers.find((c) => c.id === customerId)?.priceListId ?? "pl-retail";
+      const pct = Number(values.discount_pct ?? 0);
+
+      const existing = id ? orders.find((x) => x.id === id) : undefined;
+      if (id && !existing) fail("ORDER_NOT_FOUND");
+      if (existing && !["draft", "awaiting_approval", "open"].includes(existing.status)) {
+        fail("ORDER_ALREADY_MOVING");
+      }
+
+      const built: DemoDocLine[] = lines.map((l) => {
+        const productId = String(l.product_id);
+        const product = catalogue.find((x) => x.id === productId);
+        if (!product) fail("PRODUCT_NOT_FOUND");
+        const qty = Number(l.qty ?? 0);
+        if (qty <= 0) fail(`BAD_QTY:${product!.name}`);
+        const isFree = Boolean(l.is_free);
+        const unitPrice = isFree ? 0 : Number(l.unit_price ?? priceFor(productId, listId).price);
+        const lineDiscount = Number(l.line_discount ?? 0);
+        return {
+          id: crypto.randomUUID(), productId, qty, unitPrice, lineDiscount, isFree,
+          lineTotal: roundTaka(unitPrice * qty - lineDiscount),
+          note: (l.note as string | null) ?? null, deliveredQty: 0, billedQty: 0,
+          cancelled: false,
+        };
+      });
+
+      // Over the seller's discount limit, or over the shop's order ceiling, it waits
+      // for a manager rather than going out.
+      const totals = addUp({ discountPct: pct, lines: built });
+      // Over the seller's own discount limit, a manager has to sign it.
+      let needsOk = pct > staff.discountLimitPct;
+      if (shopDetails.soApprovalLimit > 0 && totals.total > shopDetails.soApprovalLimit) {
+        needsOk = true;
+      }
+      if (needsOk && approvalId) {
+        if (!approvals.has(approvalId)) fail("APPROVAL_NOT_VALID");
+        approvals.delete(approvalId);
+        needsOk = false;
+      }
+      const wantsSending = String(values.send ?? "false") === "true";
+
+      let o: DemoOrder;
+      if (!existing) {
+        o = {
+          id: crypto.randomUUID(),
+          soNo: `SO-${branchOr404(branchId).code}-${new Date().getFullYear()}${String(orderCounter++).padStart(6, "0")}`,
+          createdAt: new Date().toISOString(), branchId,
+          quoteId: (values.quote_id as string | null) ?? null,
+          customerId: customerId!, attention: (values.attention as string | null) ?? null,
+          address: (values.address as string | null) ?? null,
+          deliveryDate: (values.delivery_date as string | null) ?? null,
+          paymentTermsDays: Number(values.payment_terms_days
+            ?? customers.find((c) => c.id === customerId)?.paymentDays ?? 0),
+          discountPct: pct, subtotal: 0, discountAmount: 0, vatAmount: 0, total: 0,
+          advanceAmount: 0, status: "draft", cancelReason: null,
+          note: (values.note as string | null) ?? null,
+          terms: (values.terms as string | null) ?? null,
+          who: staff.name, soldBy: staff.name, approvedBy: null, lines: [],
+        };
+        orders.unshift(o);
+      } else {
+        o = existing;
+      }
+      o.customerId = customerId!;
+      o.discountPct = pct;
+      o.deliveryDate = (values.delivery_date as string | null) ?? o.deliveryDate;
+      o.lines = built;
+      Object.assign(o, addUp(o));
+      o.status = !wantsSending ? "draft" : needsOk ? "awaiting_approval" : "open";
+      return { id: o.id, soNo: o.soNo, total: o.total, status: o.status,
+               waitingForApproval: o.status === "awaiting_approval" };
+    },
+
+    async adjustSalesOrder(orderId, lines, note): Promise<void> {
+      if (staff.role === "cashier") fail("NOT_MANAGER");
+      const o = orders.find((x) => x.id === orderId);
+      if (!o) fail("ORDER_NOT_FOUND");
+      if (["billed", "cancelled"].includes(o!.status)) fail("ORDER_CLOSED");
+      if (!note?.trim()) fail("REASON_REQUIRED");
+      for (const change of lines) {
+        const line = o!.lines.find((l) => l.id === change.id);
+        if (!line) fail("SALE_LINE_NOT_FOUND");
+        if (change.cancel) {
+          if ((line!.deliveredQty ?? 0) > 0) fail(`ALREADY_DELIVERED:${line!.id}`);
+          line!.cancelled = true;
+        } else {
+          const qty = change.qty ?? line!.qty;
+          // Never below what has already gone out of the door.
+          if (qty < (line!.deliveredQty ?? 0)) fail(`LESS_THAN_DELIVERED:${line!.deliveredQty}`);
+          if (qty <= 0) fail("BAD_QTY");
+          line!.qty = qty;
+          line!.lineTotal = roundTaka(line!.unitPrice * qty - line!.lineDiscount);
+        }
+      }
+      Object.assign(o!, addUp(o!));
+      o!.note = `${o!.note ? `${o!.note} · ` : ""}${note}`;
+    },
+
+    async setOrderStatus(orderId, action, reason): Promise<void> {
+      const o = orders.find((x) => x.id === orderId);
+      if (!o) fail("ORDER_NOT_FOUND");
+      if (action === "send") {
+        if (o!.status !== "draft") fail("ORDER_NOT_DRAFT");
+        o!.status = "open";
+      } else if (action === "approve") {
+        if (o!.status !== "awaiting_approval") fail("ORDER_NOT_WAITING");
+        if (staff.role === "cashier") fail("NOT_MANAGER");
+        o!.status = "open";
+        o!.approvedBy = staff.name;
+      } else {
+        if (["billed", "cancelled"].includes(o!.status)) fail("ORDER_CLOSED");
+        if (o!.lines.some((l) => (l.deliveredQty ?? 0) > 0)) {
+          fail(`ALREADY_DELIVERED:${o!.soNo}`);
+        }
+        if (!reason?.trim()) fail("REASON_REQUIRED");
+        if (staff.role === "cashier") fail("NOT_MANAGER");
+        o!.status = "cancelled";
+        o!.cancelReason = reason ?? null;
+      }
+    },
+
+    async recordAdvance(input) {
+      const o = orders.find((x) => x.id === input.orderId);
+      if (!o) fail("ORDER_NOT_FOUND");
+      if (o!.status === "cancelled") fail("ORDER_CLOSED");
+      if (input.amount <= 0) fail("BAD_PAYMENT_AMOUNT");
+      // More than the order is worth is a decimal point in the wrong place.
+      if (o!.total > 0 && o!.advanceAmount + input.amount > o!.total) fail("ADVANCE_OVER_ORDER");
+      advances.push({
+        id: crypto.randomUUID(), createdAt: new Date().toISOString(),
+        branchId: o!.branchId, orderId: o!.id, customerId: o!.customerId,
+        amount: input.amount, method: input.method ?? "cash",
+        reference: input.reference ?? null, note: input.note ?? null,
+        usedOnSaleId: null, who: staff.name,
+      });
+      o!.advanceAmount = roundTaka(o!.advanceAmount + input.amount);
+      if (features.accounts) {
+        // Money HELD, not money earned: a liability until there is a bill.
+        post({
+          branchId: o!.branchId, narration: `Advance received on ${o!.soNo}`,
+          sourceKind: "customer_payment",
+          lines: [
+            { accountId: accountForMethod(input.method ?? "cash", o!.branchId)?.id,
+              debit: input.amount },
+            { role: "customer_advance", credit: input.amount, customerId: o!.customerId },
+          ],
+        });
+      }
+      return { amount: input.amount, advanceTotal: o!.advanceAmount };
+    },
+
+    async listAdvances(branchId): Promise<AdvanceRow[]> {
+      if (staff.role === "cashier") fail("NOT_ALLOWED:view_reports");
+      return advances
+        .filter((a) => !a.usedOnSaleId && (!branchId || a.branchId === branchId))
+        .map((a) => ({
+          id: a.id, date: dhakaDate(a.createdAt),
+          customer: customers.find((c) => c.id === a.customerId)?.name ?? "—",
+          customerId: a.customerId,
+          orderNo: orders.find((o) => o.id === a.orderId)?.soNo ?? null,
+          orderId: a.orderId, amount: a.amount, method: a.method,
+          reference: a.reference, branch: branchOr404(a.branchId).name,
+          daysHeld: Math.round((Date.now() - Date.parse(a.createdAt)) / 86400000),
+          who: a.who,
+        }));
+    },
+
+    async listChallans(input): Promise<ChallanRow[]> {
+      return challans
+        .filter((ch) => (!input?.branchId || ch.branchId === input.branchId)
+                        && (!input?.status || ch.status === input.status
+                            || (input.status === "unbilled"
+                                && ["delivered", "part_billed"].includes(ch.status))))
+        .map((ch) => ({
+          id: ch.id, challanNo: ch.challanNo, date: ch.deliveredOn,
+          branch: branchOr404(ch.branchId).name, branchId: ch.branchId,
+          customer: customers.find((c) => c.id === ch.customerId)?.name ?? "—",
+          customerId: ch.customerId,
+          orderNo: orders.find((o) => o.id === ch.orderId)?.soNo ?? null,
+          orderId: ch.orderId, status: ch.status, atCost: ch.totalCost,
+          carrier: ch.carrier, vehicleNo: ch.vehicleNo,
+          qty: ch.lines.reduce((n, l) => n + l.qty - (l.returnedQty ?? 0), 0),
+          toBill: ch.lines.reduce(
+            (n, l) => n + l.qty - (l.returnedQty ?? 0) - (l.billedQty ?? 0), 0),
+          daysUnbilled: ["delivered", "part_billed"].includes(ch.status)
+            ? Math.round((Date.parse(dhakaToday()) - Date.parse(ch.deliveredOn)) / 86400000)
+            : null,
+          invoiceNo: ch.invoiceNo, who: ch.who,
+        }));
+    },
+
+    async saveChallan(branchId, values, lines) {
+      docsOn();
+      const branch = branchOr404(branchId);
+      if (lines.length === 0) fail("NOTHING_DELIVERED");
+      const order = values.order_id
+        ? orders.find((o) => o.id === values.order_id) : undefined;
+      if (values.order_id && !order) fail("ORDER_NOT_FOUND");
+      if (order && !["open", "part_delivered"].includes(order.status)) fail("ORDER_NOT_OPEN");
+      const customerId = order?.customerId ?? (values.customer_id as string | null);
+      if (!customerId) fail("CREDIT_NEEDS_CUSTOMER");
+
+      const built: DemoDocLine[] = [];
+      let atCost = 0;
+      for (const l of lines) {
+        const productId = String(l.product_id);
+        const product = catalogue.find((x) => x.id === productId);
+        if (!product) fail("PRODUCT_NOT_FOUND");
+        const orderLine = l.order_item_id
+          ? order?.lines.find((x) => x.id === l.order_item_id) : undefined;
+        if (l.order_item_id && !orderLine) fail("SALE_LINE_NOT_FOUND");
+        const serialIds = (l.serial_ids as string[] | undefined) ?? [];
+        const qty = product!.isSerial ? serialIds.length : Number(l.qty ?? 0);
+        if (product!.isSerial && qty === 0) fail(`SERIAL_REQUIRED:${product!.name}`);
+        if (qty <= 0) fail(`BAD_QTY:${product!.name}`);
+        if (orderLine && qty > orderLine.qty - (orderLine.deliveredQty ?? 0)) {
+          fail(`MORE_THAN_ORDERED:${product!.name}`);
+        }
+        // The goods physically go, so they come off the shelf now.
+        if (product!.isSerial) {
+          for (const sid of serialIds) {
+            const unit = serials.find((x) => x.id === sid && !x.sold && !x.delivered
+                                            && !x.inTransit && x.branchId === branchId);
+            if (!unit) fail(`SERIAL_NOT_AVAILABLE:${product!.name}`);
+            unit!.delivered = true;
+          }
+        } else {
+          const have = stock[branchId]?.[productId] ?? 0;
+          if (have < qty) fail(`OUT_OF_STOCK:${product!.name}`);
+          stock[branchId][productId] = have - qty;
+        }
+        const unitCost = costs[productId] ?? 0;
+        atCost = roundTaka(atCost + unitCost * qty);
+        built.push({
+          id: crypto.randomUUID(), productId, qty,
+          unitPrice: orderLine?.unitPrice
+            ?? Number(l.unit_price ?? priceFor(productId,
+                 customers.find((c) => c.id === customerId)?.priceListId ?? "pl-retail").price),
+          lineDiscount: orderLine?.lineDiscount ?? 0,
+          isFree: orderLine?.isFree ?? Boolean(l.is_free),
+          lineTotal: 0, note: (l.note as string | null) ?? null,
+          returnedQty: 0, billedQty: 0, orderItemId: orderLine?.id ?? null,
+          serialIds,
+        });
+        if (orderLine) orderLine.deliveredQty = (orderLine.deliveredQty ?? 0) + qty;
+      }
+
+      const ch: DemoChallan = {
+        id: crypto.randomUUID(),
+        challanNo: `CH-${branch.code}-${new Date().getFullYear()}${String(challanCounter++).padStart(6, "0")}`,
+        deliveredOn: String(values.delivered_on ?? dhakaToday()), branchId,
+        orderId: order?.id ?? null, customerId: customerId!,
+        attention: (values.attention as string | null) ?? order?.attention ?? null,
+        address: (values.address as string | null) ?? order?.address ?? null,
+        carrier: (values.carrier as string | null) ?? null,
+        vehicleNo: (values.vehicle_no as string | null) ?? null,
+        note: (values.note as string | null) ?? null,
+        status: "delivered", totalCost: atCost, who: staff.name, invoiceNo: null,
+        lines: built,
+      };
+      challans.unshift(ch);
+
+      if (order) {
+        order.status = order.lines.filter((l) => !l.cancelled)
+          .every((l) => (l.deliveredQty ?? 0) >= l.qty) ? "delivered" : "part_delivered";
+      }
+      if (features.accounts && atCost > 0) {
+        // Off the shelf, but still the shop's until a bill says who bought it.
+        post({
+          branchId, narration: `Delivered on ${ch.challanNo}`, sourceKind: "stock_adjust",
+          lines: [{ role: "goods_delivered", debit: atCost },
+                  { role: "inventory", credit: atCost }],
+        });
+      }
+      return { id: ch.id, challanNo: ch.challanNo, atCost,
+               orderStatus: order?.status ?? null };
+    },
+
+    async returnChallan(challanId, lines, reason) {
+      const ch = challans.find((x) => x.id === challanId);
+      if (!ch) fail("CHALLAN_NOT_FOUND");
+      if (!reason?.trim()) fail("REASON_REQUIRED");
+      let back = 0;
+      let value = 0;
+      for (const change of lines) {
+        const line = ch!.lines.find((l) => l.id === change.id);
+        if (!line) fail("SALE_LINE_NOT_FOUND");
+        const product = catalogue.find((p) => p.id === line!.productId);
+        const serialIds = change.serialIds ?? [];
+        const qty = product?.isSerial ? serialIds.length : (change.qty ?? 0);
+        if (qty <= 0) continue;
+        // Billed goods are a sales return, which refunds money. This does not.
+        if (qty > line!.qty - (line!.returnedQty ?? 0) - (line!.billedQty ?? 0)) {
+          fail(`MORE_THAN_DELIVERED:${product?.name ?? ""}`);
+        }
+        if (product?.isSerial) {
+          for (const sid of serialIds) {
+            const unit = serials.find((x) => x.id === sid);
+            if (unit) { unit.delivered = false; unit.branchId = ch!.branchId; }
+          }
+        } else {
+          stock[ch!.branchId][line!.productId] =
+            (stock[ch!.branchId]?.[line!.productId] ?? 0) + qty;
+        }
+        line!.returnedQty = (line!.returnedQty ?? 0) + qty;
+        const orderLine = orders.find((o) => o.id === ch!.orderId)?.lines
+          .find((l) => l.id === line!.orderItemId);
+        if (orderLine) {
+          orderLine.deliveredQty = Math.max((orderLine.deliveredQty ?? 0) - qty, 0);
+        }
+        value = roundTaka(value + (costs[line!.productId] ?? 0) * qty);
+        back += qty;
+      }
+      if (back === 0) fail("NOTHING_RETURNED");
+      if (ch!.lines.every((l) => l.qty <= (l.returnedQty ?? 0))) ch!.status = "returned";
+      ch!.note = `${ch!.note ? `${ch!.note} · ` : ""}${reason}`;
+      const order = orders.find((o) => o.id === ch!.orderId);
+      if (order && order.status === "delivered"
+          && order.lines.some((l) => !l.cancelled && (l.deliveredQty ?? 0) < l.qty)) {
+        order.status = "part_delivered";
+      }
+      if (features.accounts && value > 0) {
+        post({
+          branchId: ch!.branchId, narration: `${ch!.challanNo}: came back`,
+          sourceKind: "stock_adjust",
+          lines: [{ role: "inventory", debit: value },
+                  { role: "goods_delivered", credit: value }],
+        });
+      }
+      return { returned: back };
+    },
+
+    async billChallan(input): Promise<BilledResult> {
+      const ch = challans.find((x) => x.id === input.challanId);
+      if (!ch) fail("CHALLAN_NOT_FOUND");
+      if (["billed", "cancelled"].includes(ch!.status)) fail("CHALLAN_ALREADY_BILLED");
+      const toBill = ch!.lines.filter(
+        (l) => l.qty - (l.returnedQty ?? 0) - (l.billedQty ?? 0) > 0);
+      if (toBill.length === 0) fail("NOTHING_TO_BILL");
+      const order = orders.find((o) => o.id === ch!.orderId);
+      const waiting = advances.filter((a) => a.orderId === ch!.orderId && !a.usedOnSaleId);
+      const held = roundTaka(waiting.reduce((n, a) => n + a.amount, 0));
+
+      const receipt = await api.completeSale({
+        branchId: ch!.branchId,
+        lines: toBill.map((l) => ({
+          productId: l.productId,
+          qty: l.qty - (l.returnedQty ?? 0) - (l.billedQty ?? 0),
+          serialIds: (l.serialIds ?? []).filter(
+            (sid) => serials.find((x) => x.id === sid)?.delivered),
+          unitPrice: l.unitPrice,
+        })),
+        paymentMethod: (input.paymentMethod ?? "cash") as Receipt["paymentMethod"],
+        discountPct: order?.discountPct ?? 0,
+        approvalId: input.approvalId ?? null,
+        customerPhone: customers.find((c) => c.id === ch!.customerId)?.phone ?? null,
+        cashReceived: input.cashReceived ?? null,
+        paymentRef: input.paymentRef ?? null,
+        dueAmount: input.dueAmount ?? 0,
+        // The stock already went out on the delivery note, so the bill must not move it
+        // again — the same flag the database takes.
+        extras: { ...(input.extras ?? {}), challanId: ch!.id, orderId: ch!.orderId },
+      });
+
+      const used = Math.min(held, receipt.total);
+      let stillOwed = receipt.dueAmount;
+      if (used > 0) {
+        const sale = sales.find((s) => s.id === receipt.id);
+        for (const a of waiting) a.usedOnSaleId = receipt.id;
+        if (sale) {
+          sale.paidAmount = Math.min(roundTaka(sale.paidAmount + used), sale.total);
+          sale.dueAmount = Math.max(roundTaka(sale.total - sale.paidAmount), 0);
+          stillOwed = sale.dueAmount;
+        }
+        if (features.accounts) {
+          // The money the shop was holding now settles what the bill says they owe.
+          post({
+            branchId: ch!.branchId,
+            narration: `Advance applied to ${receipt.invoiceNo}`,
+            sourceKind: "customer_payment",
+            lines: [{ role: "customer_advance", debit: used, customerId: ch!.customerId },
+                    { role: "receivable", credit: used, customerId: ch!.customerId }],
+          });
+        }
+      }
+
+      for (const l of ch!.lines) l.billedQty = l.qty - (l.returnedQty ?? 0);
+      ch!.status = "billed";
+      ch!.invoiceNo = receipt.invoiceNo;
+      if (order) {
+        for (const l of order.lines) l.billedQty = Math.min(l.deliveredQty ?? 0, l.qty);
+        if (order.lines.filter((l) => !l.cancelled)
+            .every((l) => (l.billedQty ?? 0) >= l.qty)) {
+          order.status = "billed";
+        }
+      }
+      return { ...receipt, challanNo: ch!.challanNo, advanceUsed: used,
+               stillOwed: stillOwed ?? 0 };
+    },
+
+    async billOrder(input): Promise<BilledResult> {
+      const order = orders.find((o) => o.id === input.orderId);
+      if (!order) fail("ORDER_NOT_FOUND");
+      if (!["open", "part_delivered"].includes(order!.status)) fail("ORDER_NOT_OPEN");
+      const lines = order!.lines
+        .filter((l) => !l.cancelled && l.qty > (l.deliveredQty ?? 0))
+        .map((l) => ({
+          product_id: l.productId, order_item_id: l.id,
+          qty: l.qty - (l.deliveredQty ?? 0),
+          serial_ids: ((input.extras?.serials as Record<string, string[]> | undefined)
+            ?? {})[l.productId] ?? [],
+        }));
+      if (lines.length === 0) fail("NOTHING_TO_BILL");
+      // Always a delivery note behind a bill: one path for the goods leaving.
+      const ch = await api.saveChallan(order!.branchId, { order_id: order!.id }, lines);
+      return api.billChallan({ ...input, challanId: ch.id });
+    },
+
+    async salesDocument(kind, id): Promise<SalesDocument> {
+      const nameOf = (productId: string): { product: string; code: string; isSerial: boolean } => {
+        const p = catalogue.find((x) => x.id === productId);
+        return { product: p?.name ?? "—", code: p?.code ?? "—", isSerial: Boolean(p?.isSerial) };
+      };
+      const base = {
+        validUntil: null as string | null, deliveryDate: null as string | null,
+        paymentTermsDays: null as number | null, carrier: null as string | null,
+        vehicleNo: null as string | null, advance: 0, advanceWaiting: 0,
+        quoteNo: null as string | null, orderNo: null as string | null,
+        orderId: null as string | null, invoiceNo: null as string | null,
+        soldBy: null as string | null, approvedBy: null as string | null,
+        challans: [] as SalesDocument["challans"],
+      };
+
+      if (kind === "quotation") {
+        const q = quotations.find((x) => x.id === id);
+        if (!q) fail("DOCUMENT_NOT_FOUND");
+        const c = customers.find((x) => x.id === q!.customerId);
+        return {
+          ...base, kind, id: q!.id, no: q!.quoteNo, date: dhakaDate(q!.createdAt),
+          status: q!.status, branch: branchOr404(q!.branchId).name, branchId: q!.branchId,
+          customer: c?.name ?? q!.customerName ?? "—", customerId: q!.customerId,
+          phone: c?.phone ?? null, attention: q!.attention,
+          address: q!.address ?? c?.address ?? null,
+          validUntil: q!.validUntil, terms: q!.terms, note: q!.note,
+          subtotal: q!.subtotal, discountPct: q!.discountPct,
+          discountAmount: q!.discountAmount, vatAmount: q!.vatAmount, total: q!.total,
+          who: q!.who,
+          lines: q!.lines.map((l) => ({
+            ...nameOf(l.productId), id: l.id, productId: l.productId, qty: l.qty,
+            unitPrice: l.unitPrice, lineDiscount: l.lineDiscount, isFree: l.isFree,
+            lineTotal: l.lineTotal, note: l.note,
+          })),
+        };
+      }
+
+      if (kind === "order") {
+        const o = orders.find((x) => x.id === id);
+        if (!o) fail("DOCUMENT_NOT_FOUND");
+        const c = customers.find((x) => x.id === o!.customerId);
+        return {
+          ...base, kind, id: o!.id, no: o!.soNo, date: dhakaDate(o!.createdAt),
+          status: o!.status, branch: branchOr404(o!.branchId).name, branchId: o!.branchId,
+          customer: c?.name ?? "—", customerId: o!.customerId, phone: c?.phone ?? null,
+          attention: o!.attention, address: o!.address ?? c?.address ?? null,
+          deliveryDate: o!.deliveryDate, paymentTermsDays: o!.paymentTermsDays,
+          terms: o!.terms, note: o!.note,
+          subtotal: o!.subtotal, discountPct: o!.discountPct,
+          discountAmount: o!.discountAmount, vatAmount: o!.vatAmount, total: o!.total,
+          advance: o!.advanceAmount,
+          quoteNo: quotations.find((q) => q.id === o!.quoteId)?.quoteNo ?? null,
+          who: o!.who, soldBy: o!.soldBy, approvedBy: o!.approvedBy,
+          lines: o!.lines.map((l) => ({
+            ...nameOf(l.productId), id: l.id, productId: l.productId, qty: l.qty,
+            unitPrice: l.unitPrice, lineDiscount: l.lineDiscount, isFree: l.isFree,
+            lineTotal: l.lineTotal, note: l.note,
+            deliveredQty: l.deliveredQty ?? 0, billedQty: l.billedQty ?? 0,
+            pendingQty: Math.max(l.qty - (l.deliveredQty ?? 0), 0),
+            cancelled: Boolean(l.cancelled),
+            inStock: availableQty(l.productId, o!.branchId, o!.id),
+          })),
+          challans: challans.filter((ch) => ch.orderId === o!.id).map((ch) => ({
+            id: ch.id, challanNo: ch.challanNo, date: ch.deliveredOn, status: ch.status,
+          })),
+        };
+      }
+
+      const ch = challans.find((x) => x.id === id);
+      if (!ch) fail("DOCUMENT_NOT_FOUND");
+      const c = customers.find((x) => x.id === ch!.customerId);
+      return {
+        ...base, kind: "challan", id: ch!.id, no: ch!.challanNo, date: ch!.deliveredOn,
+        status: ch!.status, branch: branchOr404(ch!.branchId).name, branchId: ch!.branchId,
+        customer: c?.name ?? "—", customerId: ch!.customerId, phone: c?.phone ?? null,
+        attention: ch!.attention, address: ch!.address ?? c?.address ?? null,
+        carrier: ch!.carrier, vehicleNo: ch!.vehicleNo, terms: null, note: ch!.note,
+        subtotal: 0, discountPct: 0, discountAmount: 0, vatAmount: 0, total: 0,
+        orderNo: orders.find((o) => o.id === ch!.orderId)?.soNo ?? null,
+        orderId: ch!.orderId, invoiceNo: ch!.invoiceNo,
+        advanceWaiting: roundTaka(advances
+          .filter((a) => a.orderId === ch!.orderId && !a.usedOnSaleId)
+          .reduce((n, a) => n + a.amount, 0)),
+        who: ch!.who,
+        lines: ch!.lines.map((l) => ({
+          ...nameOf(l.productId), id: l.id, productId: l.productId, qty: l.qty,
+          unitPrice: l.unitPrice, lineDiscount: l.lineDiscount, isFree: l.isFree,
+          lineTotal: l.lineTotal, note: l.note,
+          returnedQty: l.returnedQty ?? 0, billedQty: l.billedQty ?? 0,
+          toBill: l.qty - (l.returnedQty ?? 0) - (l.billedQty ?? 0),
+          serials: (l.serialIds ?? []).map((sid) => {
+            const unit = serials.find((x) => x.id === sid);
+            return { id: sid, serial: unit?.serial ?? "—", returned: !unit?.delivered };
+          }),
+        })),
+      };
     },
 
     async rebuildStockLayers(): Promise<LayerRebuildResult> {
