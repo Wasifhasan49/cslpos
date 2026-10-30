@@ -25,6 +25,7 @@ import type {
   SalesDocument,
   AttendanceDay, AttendanceRow, AttendanceStatus, AttendanceTodayBranch, CheckInResult,
   Employee, LeaveRow, SalarySheet, SalarySheetRow,
+  CustomerKind, CustomerSearchRow, DeliveryPoint, RepMonth, RepRow,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 import { classifyStaffLookup, type CurrentStaffRow } from "./staff-lookup";
@@ -2633,6 +2634,141 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
           net: num(l.net),
         })),
       };
+    },
+
+    // --- Sales reps, dealers and delivery points (P14c) ---
+
+    async listReps(): Promise<RepRow[]> {
+      const { data, error } = await sb.rpc("rep_list");
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((r) => ({
+        employeeId: String(r.employee_id), name: String(r.name),
+        phone: (r.phone as string | null) ?? null,
+        branch: (r.branch as string | null) ?? null,
+        branchId: (r.branch_id as string | null) ?? null,
+        commissionPct: num(r.commission_pct),
+        commissionOn: r.commission_on as RepRow["commissionOn"],
+        customers: num(r.customers),
+        areas: ((r.areas as Record<string, unknown>[] | null) ?? []).map((a) => ({
+          districtId: numOrNull(a.district_id),
+          district: (a.district as string | null) ?? null,
+          upazilaId: numOrNull(a.upazila_id),
+          upazila: (a.upazila as string | null) ?? null,
+        })),
+      }));
+    },
+
+    async saveRep(employeeId, values): Promise<void> {
+      const { error } = await sb.rpc("save_rep", {
+        p_employee_id: employeeId, p_values: values,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async saveRepTarget(employeeId, month, values): Promise<void> {
+      const { error } = await sb.rpc("save_rep_target", {
+        p_employee_id: employeeId, p_month: month, p_values: values,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async repAchievement(month, employeeId): Promise<RepMonth> {
+      const { data, error } = await sb.rpc("rep_achievement", {
+        p_month: month ?? null, p_employee_id: employeeId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const d = (data ?? {}) as Record<string, unknown>;
+      return {
+        month: String(d.month), daysInMonth: num(d.days_in_month),
+        daysLeft: num(d.days_left),
+        reps: ((d.reps as Record<string, unknown>[] | null) ?? []).map((r) => ({
+          employeeId: String(r.employee_id), name: String(r.name),
+          commissionPct: num(r.commission_pct),
+          commissionOn: r.commission_on as RepRow["commissionOn"],
+          target: num(r.target), targetQty: num(r.target_qty),
+          sold: num(r.sold), qty: num(r.qty),
+          profit: numOrNull(r.profit), donePct: numOrNull(r.done_pct),
+          shortBy: numOrNull(r.short_by), aDayNeeded: numOrNull(r.a_day_needed),
+          commission: numOrNull(r.commission), customers: num(r.customers),
+        })),
+      };
+    },
+
+    async listDeliveryPoints(customerId): Promise<DeliveryPoint[]> {
+      const { data, error } = await sb.rpc("delivery_point_list", {
+        p_customer_id: customerId,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((d) => ({
+        id: String(d.id), name: String(d.name),
+        address: (d.address as string | null) ?? null,
+        contactName: (d.contact_name as string | null) ?? null,
+        contactPhone: (d.contact_phone as string | null) ?? null,
+        isDefault: Boolean(d.is_default), active: Boolean(d.active),
+        note: (d.note as string | null) ?? null,
+      }));
+    },
+
+    async saveDeliveryPoint(id, customerId, values): Promise<void> {
+      const { error } = await sb.rpc("save_delivery_point", {
+        p_id: id, p_customer_id: customerId, p_values: values,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async recordDeposit(input) {
+      const { data, error } = await sb.rpc("record_deposit", {
+        p_customer_id: input.customerId, p_amount: input.amount,
+        p_method: input.method ?? "cash", p_reference: input.reference ?? null,
+        p_note: input.note ?? null, p_branch_id: input.branchId ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      const r = (data ?? {}) as Record<string, unknown>;
+      return { amount: num(r.amount), held: num(r.held) };
+    },
+
+    async convertCustomer(id, values): Promise<void> {
+      const { error } = await sb.rpc("convert_customer", { p_id: id, p_values: values });
+      if (error) throw new Error(friendlyError(error.message));
+    },
+
+    async moveCustomerBranch(id, branchId, reason) {
+      const { data, error } = await sb.rpc("move_customer_branch", {
+        p_id: id, p_branch_id: branchId, p_reason: reason ?? null,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return { owed: num(((data ?? {}) as Record<string, unknown>).owed) };
+    },
+
+    async searchCustomers(input): Promise<CustomerSearchRow[]> {
+      const { data, error } = await sb.rpc("customer_search", {
+        p_query: input?.query ?? null, p_kind: input?.kind ?? null,
+        p_rep_id: input?.repId ?? null, p_district_id: input?.districtId ?? null,
+        p_flag: input?.flag ?? null, p_limit: input?.limit ?? 100,
+      });
+      if (error) throw new Error(friendlyError(error.message));
+      return ((data as Record<string, unknown>[] | null) ?? []).map((c) => ({
+        id: String(c.id), phone: String(c.phone), name: String(c.name),
+        company: (c.company as string | null) ?? null,
+        address: (c.address as string | null) ?? null,
+        kind: c.kind as CustomerKind,
+        group: (c.group as string | null) ?? null,
+        groupId: (c.group_id as string | null) ?? null,
+        rep: (c.rep as string | null) ?? null,
+        repId: (c.rep_id as string | null) ?? null,
+        parent: (c.parent as string | null) ?? null,
+        parentId: (c.parent_id as string | null) ?? null,
+        homeBranch: (c.home_branch as string | null) ?? null,
+        homeBranchId: (c.home_branch_id as string | null) ?? null,
+        districtId: numOrNull(c.district_id),
+        district: (c.district as string | null) ?? null,
+        blocked: Boolean(c.blocked),
+        blockReason: (c.block_reason as string | null) ?? null,
+        cashOnly: Boolean(c.cash_only), isVip: Boolean(c.is_vip),
+        creditAllowed: Boolean(c.credit_allowed), creditLimit: num(c.credit_limit),
+        paymentDays: num(c.payment_days), owed: num(c.owed), deposit: num(c.deposit),
+        deliveryPoints: num(c.delivery_points), active: Boolean(c.active),
+      }));
     },
 
     async stockHistory(branchId: string, productId?: string | null, limit = 100): Promise<StockMovementRow[]> {

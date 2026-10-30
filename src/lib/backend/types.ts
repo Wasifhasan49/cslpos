@@ -23,6 +23,7 @@ import type {
   AdvanceRow, BilledResult, ChallanRow, OrderRow, QuotationRow, SalesDocument,
   AttendanceDay, AttendanceStatus, AttendanceTodayBranch, CheckInResult, Employee,
   LeaveRow, SalarySheet, SalarySheetRow,
+  CustomerKind, CustomerSearchRow, DeliveryPoint, RepMonth, RepRow,
 } from "../types";
 import type { ImportKind } from "../import/schema";
 
@@ -636,4 +637,38 @@ export interface Backend {
   ): Promise<{ total: number }>;
   listSalarySheets(branchId?: string | null): Promise<SalarySheetRow[]>;
   salarySheet(id: string): Promise<SalarySheet>;
+
+  // --- Sales reps, dealers and delivery points (P14c) ---
+  listReps(): Promise<RepRow[]>;
+  /** Make somebody a rep, set their territory and what they are paid on. */
+  saveRep(employeeId: string, values: Record<string, unknown>): Promise<void>;
+  /** What a rep was asked to do in a month. Stored as given, never recalculated. */
+  saveRepTarget(
+    employeeId: string, month: string, values: Record<string, unknown>,
+  ): Promise<void>;
+  /** Target against actual. No employee means "me", and seeing anybody else's needs
+   *  the staff-records permission. */
+  repAchievement(month?: string | null, employeeId?: string | null): Promise<RepMonth>;
+
+  listDeliveryPoints(customerId: string): Promise<DeliveryPoint[]>;
+  saveDeliveryPoint(
+    id: string | null, customerId: string, values: Record<string, unknown>,
+  ): Promise<void>;
+
+  /** Money a dealer leaves with the shop. Negative gives it back. */
+  recordDeposit(input: {
+    customerId: string; amount: number; method?: string;
+    reference?: string | null; note?: string | null; branchId?: string | null;
+  }): Promise<{ amount: number; held: number }>;
+
+  /** Retail → dealer, cash → credit, blocked, cash-only, VIP. Always logged. */
+  convertCustomer(id: string, values: Record<string, unknown>): Promise<void>;
+  moveCustomerBranch(
+    id: string, branchId: string, reason?: string | null,
+  ): Promise<{ owed: number }>;
+  /** One box across name, phone, company, address and the rep's name. */
+  searchCustomers(input?: {
+    query?: string | null; kind?: CustomerKind | null; repId?: string | null;
+    districtId?: number | null; flag?: string | null; limit?: number;
+  }): Promise<CustomerSearchRow[]>;
 }

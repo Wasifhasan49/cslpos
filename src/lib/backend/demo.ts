@@ -29,6 +29,7 @@ import type {
   QuotationRow, QuotationStatus, SalesDocument,
   AttendanceDay, AttendanceStatus, AttendanceTodayBranch, CheckInResult, Employee,
   LeaveRow, SalarySheet, SalarySheetRow,
+  CustomerKind, CustomerSearchRow, DeliveryPoint, RepMonth, RepRow,
 } from "../types";
 import { DEFAULT_CHEQUE_LAYOUT, takaInWords } from "../cheque";
 import type { ImportKind } from "../import/schema";
@@ -90,7 +91,7 @@ export function createDemoBackend(): Backend {
     purchase_orders: false, transfers: false, accounts: false, sms: false,
     extra_charges: false, hs_codes: false, managers_see_dashboard: false,
     managers_see_accounts: false, managers_see_settings: false,
-    sales_documents: false, hr: false, hr_extra_fields: false,
+    sales_documents: false, hr: false, hr_extra_fields: false, distribution: false,
   };
   const shopDetails = {
     name: DEMO_SHOP_NAME, address: "123 Example Road, Dhaka", phone: "01700-000000",
@@ -456,6 +457,11 @@ export function createDemoBackend(): Backend {
     ["6400", "Shop rent", "Running costs", "expense", null],
     ["6500", "Card charges", "Running costs", "expense", "card_charge"],
     ["6900", "Other expenses", "Running costs", "expense", null],
+    // P14a and P14c: money the shop is HOLDING, and goods that have gone but are not
+    // yet billed. Both are somebody else's until the paperwork says otherwise.
+    ["2150", "Money held for customers", "Current liabilities", "liability", "customer_advance"],
+    ["2160", "Dealer security deposits", "Current liabilities", "liability", "customer_deposit"],
+    ["1360", "Goods delivered, not invoiced", "Current assets", "asset", "goods_delivered"],
   ];
   const accounts: DemoAccount[] = CHART.flatMap(([code, name, group, nature, role]): DemoAccount[] =>
     role === "cash_in_hand"
@@ -825,6 +831,8 @@ export function createDemoBackend(): Backend {
     emergencyName: string | null; emergencyPhone: string | null;
     religion: string | null; nationality: string | null;
     staffId: string | null; active: boolean; leftOn: string | null; note: string | null;
+    // P14c: a rep is an employee with a territory and a commission.
+    isRep?: boolean; commissionPct?: number; commissionOn?: string;
   }
   interface DemoAttendance {
     employeeId: string; branchId: string; onDate: string;
@@ -875,6 +883,34 @@ export function createDemoBackend(): Backend {
   };
   const nameOfList = (table: SettingTable, id: string | null): string | null =>
     id ? ((lists[table].find((r) => r.id === id)?.name as string | undefined) ?? null) : null;
+
+  // --- Sales reps, dealers and delivery points (P14c) -------------------------
+  // A rep is an employee with a territory, and a sale counts towards them if they made
+  // it OR it went to one of their customers — matched on ids, never on names.
+  interface DemoRepTarget {
+    employeeId: string; month: string; targetAmount: number; targetQty: number;
+  }
+  interface DemoDeliveryPoint {
+    id: string; customerId: string; name: string; address: string | null;
+    contactName: string | null; contactPhone: string | null; isDefault: boolean;
+    active: boolean; note: string | null;
+  }
+  const repAreas: { employeeId: string; districtId: number | null;
+                    upazilaId: number | null }[] = [];
+  const repTargets: DemoRepTarget[] = [];
+  const deliveryPoints: DemoDeliveryPoint[] = [];
+  const deposits: { id: string; customerId: string; amount: number; method: string;
+                    at: string }[] = [];
+  const depositHeld = (customerId: string): number =>
+    roundTaka(deposits.filter((d) => d.customerId === customerId)
+      .reduce((n, d) => n + d.amount, 0));
+
+  const distributionOn = (): void => {
+    if (!features.distribution) fail("FEATURE_OFF:distribution");
+  };
+  const mayManageCustomers = (): void => {
+    if (staff.role === "cashier") fail("NOT_ALLOWED:manage_customers");
+  };
 
   const api: Backend = {
     mode: "demo",
@@ -1074,6 +1110,10 @@ export function createDemoBackend(): Backend {
         if (!customer) fail("DUE_NEEDS_CUSTOMER");
         const buyer = customer!;
         if (!buyer.creditAllowed) fail(`CUSTOMER_HAS_NO_CREDIT:${buyer.name ?? buyer.phone}`);
+        // The trader flags (P14c), enforced at the till rather than shown as a note
+        // somebody has to notice.
+        if (buyer.blocked) fail(`CUSTOMER_BLOCKED:${buyer.blockReason ?? "no reason given"}`);
+        if (buyer.cashOnly) fail(`CUSTOMER_IS_CASH_ONLY:${buyer.name ?? buyer.phone}`);
         // The limit is on what they will owe AFTER this sale, not on this sale alone.
         const owed = dueFor(buyer.id);
         const limit = buyer.creditLimit ?? 0;
@@ -5313,6 +5353,276 @@ export function createDemoBackend(): Backend {
             employees.find((e) => e.id === l.employeeId)?.designationId ?? null),
         })),
       };
+    },
+
+    // --- Sales reps, dealers and delivery points (P14c) ---
+
+    async listReps(): Promise<RepRow[]> {
+      return employees.filter((e) => e.active && e.isRep).map((e) => ({
+        employeeId: e.id, name: e.name, phone: e.phone,
+        branch: branches.find((b) => b.id === e.branchId)?.name ?? null,
+        branchId: e.branchId,
+        commissionPct: e.commissionPct ?? 0,
+        commissionOn: (e.commissionOn ?? "sales") as RepRow["commissionOn"],
+        customers: customers.filter((c) => c.repId === e.id).length,
+        areas: repAreas.filter((a) => a.employeeId === e.id).map((a) => ({
+          districtId: a.districtId, district: null,
+          upazilaId: a.upazilaId, upazila: null,
+        })),
+      }));
+    },
+
+    async saveRep(employeeId, values): Promise<void> {
+      distributionOn();
+      if (staff.role === "cashier") fail("NOT_ALLOWED:manage_hr");
+      const e = employees.find((x) => x.id === employeeId);
+      if (!e) fail("EMPLOYEE_NOT_FOUND");
+      e!.isRep = values.is_rep === undefined ? true : Boolean(values.is_rep);
+      e!.commissionPct = Number(values.commission_pct ?? e!.commissionPct ?? 0);
+      e!.commissionOn = String(values.commission_on ?? e!.commissionOn ?? "sales");
+      if (values.areas) {
+        // Replaced wholesale: "these are the areas" is easier to get right than adding
+        // and removing one at a time.
+        for (let i = repAreas.length - 1; i >= 0; i -= 1) {
+          if (repAreas[i].employeeId === employeeId) repAreas.splice(i, 1);
+        }
+        for (const a of values.areas as Record<string, unknown>[]) {
+          repAreas.push({
+            employeeId,
+            districtId: a.district_id === undefined ? null : Number(a.district_id),
+            upazilaId: a.upazila_id === undefined ? null : Number(a.upazila_id),
+          });
+        }
+      }
+    },
+
+    async saveRepTarget(employeeId, month, values): Promise<void> {
+      distributionOn();
+      if (staff.role === "cashier") fail("NOT_MANAGER");
+      if (!employees.some((e) => e.id === employeeId)) fail("EMPLOYEE_NOT_FOUND");
+      const amount = Number(values.target_amount ?? 0);
+      const qty = Number(values.target_qty ?? 0);
+      if (amount <= 0 && qty <= 0) fail("TARGET_NEEDS_A_FIGURE");
+      const first = `${month.slice(0, 7)}-01`;
+      const got = repTargets.find((t) => t.employeeId === employeeId && t.month === first);
+      if (got) {
+        got.targetAmount = amount;
+        got.targetQty = qty;
+      } else {
+        repTargets.push({ employeeId, month: first, targetAmount: amount, targetQty: qty });
+      }
+    },
+
+    async repAchievement(month, employeeId): Promise<RepMonth> {
+      distributionOn();
+      const first = `${(month ?? dhakaToday()).slice(0, 7)}-01`;
+      const daysInMonth = new Date(Number(first.slice(0, 4)), Number(first.slice(5, 7)), 0)
+        .getDate();
+      const last = `${first.slice(0, 7)}-${String(daysInMonth).padStart(2, "0")}`;
+      const today = dhakaToday();
+      const daysLeft = today >= first && today <= last
+        ? daysInMonth - Number(today.slice(8, 10)) : 0;
+
+      const mine = employees.find((e) => e.staffId === staff.id && e.active)?.id ?? null;
+      if (employeeId && employeeId !== mine && staff.role === "cashier") {
+        fail("NOT_ALLOWED:manage_hr");
+      }
+      if (!employeeId && staff.role === "cashier" && !mine) fail("NOT_AN_EMPLOYEE");
+
+      const reps = employees
+        .filter((e) => e.active && e.isRep
+                       && (!employeeId || e.id === employeeId)
+                       && (staff.role !== "cashier" || e.id === mine))
+        .map((e) => {
+          const target = repTargets.find(
+            (t) => t.employeeId === e.id && t.month === first);
+          // Made by them, or sold to one of their customers.
+          const theirs = sales.filter((sa) => sa.status === "completed"
+            && dhakaDate(sa.createdAt) >= first && dhakaDate(sa.createdAt) <= last
+            && ((e.staffId && sa.staffId === e.staffId)
+                || customers.find((c) => c.id === sa.customerId)?.repId === e.id));
+          const sold = roundTaka(theirs.reduce((n, sa) => n + sa.total, 0));
+          const qty = theirs.flatMap((sa) => sa.items).reduce((n, l) => n + l.qty, 0);
+          const profit = roundTaka(theirs.reduce((n, sa) => n + sa.total
+            - sa.items.reduce((m, l) => m + (sa.lineCosts[l.id] ?? 0) * l.qty, 0), 0));
+          const pct = target?.targetAmount
+            ? Math.round((sold / target.targetAmount) * 1000) / 10 : null;
+          const short = target?.targetAmount
+            ? Math.max(target.targetAmount - sold, 0) : null;
+          return {
+            employeeId: e.id, name: e.name,
+            commissionPct: e.commissionPct ?? 0,
+            commissionOn: (e.commissionOn ?? "sales") as RepRow["commissionOn"],
+            target: target?.targetAmount ?? 0, targetQty: target?.targetQty ?? 0,
+            sold, qty, profit,
+            donePct: pct, shortBy: short,
+            aDayNeeded: short !== null && daysLeft > 0 ? Math.round(short / daysLeft) : null,
+            commission: (e.commissionPct ?? 0) > 0
+              ? roundTaka(((e.commissionOn === "profit" ? profit : sold)
+                           * (e.commissionPct ?? 0)) / 100)
+              : null,
+            customers: customers.filter((c) => c.repId === e.id).length,
+          };
+        });
+      return { month: first, daysInMonth, daysLeft, reps };
+    },
+
+    async listDeliveryPoints(customerId): Promise<DeliveryPoint[]> {
+      return deliveryPoints
+        .filter((d) => d.customerId === customerId && d.active)
+        .map((d) => ({
+          id: d.id, name: d.name, address: d.address, contactName: d.contactName,
+          contactPhone: d.contactPhone, isDefault: d.isDefault, active: d.active,
+          note: d.note,
+        }))
+        .sort((a, b) => Number(b.isDefault) - Number(a.isDefault)
+                        || a.name.localeCompare(b.name));
+    },
+
+    async saveDeliveryPoint(id, customerId, values): Promise<void> {
+      distributionOn();
+      mayManageCustomers();
+      if (!String(values.name ?? "").trim()) fail("NAME_REQUIRED");
+      if (!customers.some((c) => c.id === customerId)) fail("CUSTOMER_NOT_FOUND");
+      // One default per customer, so "where does this go?" always has an answer.
+      const wantsDefault = Boolean(values.is_default)
+        || !deliveryPoints.some((d) => d.customerId === customerId);
+      if (wantsDefault) {
+        for (const d of deliveryPoints) {
+          if (d.customerId === customerId) d.isDefault = false;
+        }
+      }
+      const found = id ? deliveryPoints.find((d) => d.id === id) : undefined;
+      if (id && !found) fail("DELIVERY_POINT_NOT_FOUND");
+      const next: DemoDeliveryPoint = {
+        id: found?.id ?? crypto.randomUUID(), customerId,
+        name: String(values.name).trim(),
+        address: (values.address as string | null) ?? found?.address ?? null,
+        contactName: (values.contact_name as string | null) ?? found?.contactName ?? null,
+        contactPhone: (values.contact_phone as string | null) ?? found?.contactPhone ?? null,
+        isDefault: wantsDefault || (found?.isDefault ?? false),
+        active: values.active === undefined ? (found?.active ?? true) : Boolean(values.active),
+        note: (values.note as string | null) ?? found?.note ?? null,
+      };
+      if (found) Object.assign(found, next); else deliveryPoints.push(next);
+    },
+
+    async recordDeposit(input) {
+      distributionOn();
+      mayManageCustomers();
+      const c = customers.find((x) => x.id === input.customerId);
+      if (!c) fail("CUSTOMER_NOT_FOUND");
+      if (!input.amount) fail("BAD_PAYMENT_AMOUNT");
+      const held = depositHeld(input.customerId);
+      // Never hand back more than is being held: the rest would be a loan.
+      if (input.amount < 0 && held + input.amount < 0) fail(`MORE_THAN_HELD:${held}`);
+      deposits.push({
+        id: crypto.randomUUID(), customerId: input.customerId, amount: input.amount,
+        method: input.method ?? "cash", at: new Date().toISOString(),
+      });
+      if (features.accounts) {
+        // The dealer's money, held — never income.
+        const money = accountForMethod(input.method ?? "cash", branches[0].id)?.id;
+        post({
+          branchId: branches[0].id,
+          narration: input.amount > 0
+            ? `Security deposit from ${c!.name ?? c!.phone}`
+            : `Security deposit returned to ${c!.name ?? c!.phone}`,
+          sourceKind: "customer_payment",
+          lines: input.amount > 0
+            ? [{ accountId: money, debit: input.amount },
+               { role: "customer_deposit", credit: input.amount, customerId: c!.id }]
+            : [{ role: "customer_deposit", debit: -input.amount, customerId: c!.id },
+               { accountId: money, credit: -input.amount }],
+        });
+      }
+      return { amount: input.amount, held: roundTaka(held + input.amount) };
+    },
+
+    async convertCustomer(id, values): Promise<void> {
+      mayManageCustomers();
+      const c = customers.find((x) => x.id === id);
+      if (!c) fail("CUSTOMER_NOT_FOUND");
+      const kind = values.kind as string | undefined;
+      if (kind && !["retail", "dealer", "retailer", "corporate"].includes(kind)) {
+        fail(`BAD_CUSTOMER_KIND:${kind}`);
+      }
+      // Blocking needs a reason: "why can this customer not buy?" is asked at the till,
+      // by somebody who was not there when it was decided.
+      if (values.blocked === true && !String(values.block_reason ?? "").trim()) {
+        fail("REASON_REQUIRED");
+      }
+      if (kind) c!.kind = kind as CustomerKind;
+      if (values.rep_id !== undefined) c!.repId = (values.rep_id as string | null) ?? null;
+      if (values.parent_id !== undefined) {
+        if (values.parent_id === id) fail("CUSTOMER_CANNOT_BE_ITS_OWN_DEALER");
+        c!.parentId = (values.parent_id as string | null) ?? null;
+      }
+      if (values.blocked !== undefined) {
+        c!.blocked = Boolean(values.blocked);
+        c!.blockReason = c!.blocked ? String(values.block_reason ?? "") : null;
+      }
+      if (values.cash_only !== undefined) c!.cashOnly = Boolean(values.cash_only);
+      if (values.is_vip !== undefined) c!.isVip = Boolean(values.is_vip);
+      if (values.group_id !== undefined) c!.groupId = (values.group_id as string | null) ?? null;
+      if (values.price_list_id !== undefined) {
+        c!.priceListId = (values.price_list_id as string | null) ?? null;
+      }
+      if (values.credit_allowed !== undefined) c!.creditAllowed = Boolean(values.credit_allowed);
+      if (values.credit_limit !== undefined) c!.creditLimit = Number(values.credit_limit);
+      if (values.payment_days !== undefined) c!.paymentDays = Number(values.payment_days);
+    },
+
+    async moveCustomerBranch(id, branchId, reason) {
+      mayManageCustomers();
+      const c = customers.find((x) => x.id === id);
+      if (!c) fail("CUSTOMER_NOT_FOUND");
+      branchOr404(branchId);
+      // The debt goes with them; the sales stay where they happened, or last month's
+      // branch figures would change every time somebody moved a customer.
+      const owed = dueFor(id);
+      c!.homeBranchId = branchId;
+      void reason;
+      return { owed };
+    },
+
+    async searchCustomers(input): Promise<CustomerSearchRow[]> {
+      const q = (input?.query ?? "").trim().toLowerCase();
+      return customers
+        .filter((c) => {
+          const rep = employees.find((e) => e.id === c.repId)?.name ?? "";
+          const hit = !q
+            || `${c.name ?? ""} ${c.phone} ${c.company ?? ""} ${c.address ?? ""} ${rep}`
+                .toLowerCase().includes(q);
+          const kindOk = !input?.kind || (c.kind ?? "retail") === input.kind;
+          const repOk = !input?.repId || c.repId === input.repId;
+          const flagOk = !input?.flag
+            || (input.flag === "blocked" && c.blocked)
+            || (input.flag === "cash_only" && c.cashOnly)
+            || (input.flag === "vip" && c.isVip)
+            || (input.flag === "has_deposit" && depositHeld(c.id) > 0);
+          return hit && kindOk && repOk && flagOk;
+        })
+        .map((c): CustomerSearchRow => ({
+          id: c.id, phone: c.phone, name: c.name ?? c.phone, company: c.company,
+          address: c.address, kind: (c.kind ?? "retail") as CustomerKind,
+          group: c.group, groupId: c.groupId,
+          rep: employees.find((e) => e.id === c.repId)?.name ?? null,
+          repId: c.repId ?? null,
+          parent: customers.find((x) => x.id === c.parentId)?.name ?? null,
+          parentId: c.parentId ?? null,
+          homeBranch: branches.find((b) => b.id === c.homeBranchId)?.name ?? null,
+          homeBranchId: c.homeBranchId ?? null,
+          districtId: null, district: null,
+          blocked: Boolean(c.blocked), blockReason: c.blockReason ?? null,
+          cashOnly: Boolean(c.cashOnly), isVip: Boolean(c.isVip),
+          creditAllowed: c.creditAllowed, creditLimit: c.creditLimit,
+          paymentDays: c.paymentDays, owed: dueFor(c.id), deposit: depositHeld(c.id),
+          deliveryPoints: deliveryPoints.filter(
+            (d) => d.customerId === c.id && d.active).length,
+          active: c.active !== false,
+        }))
+        .slice(0, input?.limit ?? 100);
     },
 
     async rebuildStockLayers(): Promise<LayerRebuildResult> {

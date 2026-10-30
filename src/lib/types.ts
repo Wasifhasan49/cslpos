@@ -304,7 +304,7 @@ export type FeatureKey =
   | "transfers" | "accounts" | "sms" | "extra_charges" | "hs_codes"
   | "managers_see_dashboard" | "managers_see_accounts" | "managers_see_settings"
   // P14a and P14b.
-  | "sales_documents" | "hr" | "hr_extra_fields";
+  | "sales_documents" | "hr" | "hr_extra_fields" | "distribution";
 
 export interface ShopDetails {
   name: string;
@@ -881,6 +881,17 @@ export interface CustomerRow {
   /** What they owe right now, worked out from the documents. */
   owed: number;
   totalSpent: number;
+  // Set by P14c for shops that sell through reps and dealers. Optional, so a shop with
+  // the distribution switch off never sees any of it.
+  kind?: CustomerKind;
+  repId?: string | null;
+  parentId?: string | null;
+  homeBranchId?: string | null;
+  /** The till refuses a sale on due to a blocked or cash-only customer. */
+  blocked?: boolean;
+  blockReason?: string | null;
+  cashOnly?: boolean;
+  isVip?: boolean;
 }
 
 export interface CustomerAging {
@@ -1220,7 +1231,9 @@ export type AccountRole =
   // P14: proving the books against the shelves needed these three.
   | "vat_input" | "ait_advance" | "stock_in_transit"
   // P14a: money held for a customer, and goods gone but not yet billed.
-  | "customer_advance" | "goods_delivered";
+  | "customer_advance" | "goods_delivered"
+  // P14c: money a dealer has left with the shop.
+  | "customer_deposit";
 
 export interface ChartAccount {
   id: string;
@@ -1829,4 +1842,93 @@ export interface CheckInResult {
   minutesLate: number;
   opensAt: string;
   graceMinutes: number;
+}
+
+// --- Sales reps, dealers and delivery points (P14c) ---
+
+export type CustomerKind = "retail" | "dealer" | "retailer" | "corporate";
+
+export interface RepRow {
+  employeeId: string;
+  name: string;
+  phone: string | null;
+  branch: string | null;
+  branchId: string | null;
+  commissionPct: number;
+  commissionOn: "sales" | "profit";
+  customers: number;
+  areas: { districtId: number | null; district: string | null;
+           upazilaId: number | null; upazila: string | null }[];
+}
+
+export interface RepAchievement {
+  employeeId: string;
+  name: string;
+  commissionPct: number;
+  commissionOn: "sales" | "profit";
+  target: number;
+  targetQty: number;
+  sold: number;
+  qty: number;
+  /** Only for somebody allowed to see cost. */
+  profit: number | null;
+  donePct: number | null;
+  shortBy: number | null;
+  /** What they must average for the rest of the month. Null once the month is over. */
+  aDayNeeded: number | null;
+  /** Only for somebody allowed to see pay. */
+  commission: number | null;
+  customers: number;
+}
+
+export interface RepMonth {
+  month: string;
+  daysInMonth: number;
+  daysLeft: number;
+  reps: RepAchievement[];
+}
+
+export interface DeliveryPoint {
+  id: string;
+  name: string;
+  address: string | null;
+  contactName: string | null;
+  contactPhone: string | null;
+  isDefault: boolean;
+  active: boolean;
+  note: string | null;
+}
+
+/** A customer as the distribution screens see them: kind, rep, flags, what they owe. */
+export interface CustomerSearchRow {
+  id: string;
+  phone: string;
+  name: string;
+  company: string | null;
+  address: string | null;
+  kind: CustomerKind;
+  group: string | null;
+  groupId: string | null;
+  rep: string | null;
+  repId: string | null;
+  parent: string | null;
+  parentId: string | null;
+  homeBranch: string | null;
+  homeBranchId: string | null;
+  districtId: number | null;
+  district: string | null;
+  /** BMS's trader flags, which the till enforces: blocked and cash-only both refuse
+   *  a sale on due. */
+  blocked: boolean;
+  blockReason: string | null;
+  cashOnly: boolean;
+  isVip: boolean;
+  creditAllowed: boolean;
+  creditLimit: number;
+  paymentDays: number;
+  owed: number;
+  /** Money the shop is holding for them: theirs, not the shop's. */
+  deposit: number;
+  deliveryPoints: number;
+  active: boolean;
 }

@@ -4911,5 +4911,257 @@ select pg_temp.check(
 
 select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
 
+
+-- ===========================================================================
+-- 29. SALES REPS, DEALERS AND DELIVERY POINTS (P14c)
+-- ===========================================================================
+--
+-- The done-when: a rep with a 5 lakh monthly target sees 40% done after their dealers'
+-- orders are recorded, a dealer with a 50,000 security deposit shows it on their profile
+-- and in the accounts, and a blocked customer cannot buy on due.
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+select public.set_feature('distribution', true);
+
+create temporary table p14c (k text primary key, v text);
+
+-- A rep: an employee, with a territory and a commission. Not a new kind of person.
+do $$
+declare v_rep uuid;
+begin
+  -- No login: a rep in the field usually has none, and it keeps this test about the
+  -- customer link rather than about everything the owner happened to sell today.
+  v_rep := (public.save_employee(null, jsonb_build_object(
+    'name', 'Shanto', 'branch_id', '00000000-0000-4000-8000-0000000000b1',
+    'joined_on', '2026-01-01'))->>'id')::uuid;
+  insert into p14c values ('rep', v_rep::text);
+  perform public.save_rep(v_rep, jsonb_build_object(
+    'is_rep', true, 'commission_pct', 2, 'commission_on', 'sales',
+    'areas', jsonb_build_array(jsonb_build_object('district_id', 1))));
+  perform public.save_rep_target(v_rep, public.dhaka_today(),
+    jsonb_build_object('target_amount', 500000));
+end $$;
+
+select pg_temp.check(
+  (select is_rep from public.employees where id = (select v::uuid from p14c where k = 'rep')),
+  'a rep is an employee with the rep flag, not a separate list');
+select pg_temp.check(
+  (select count(*) from public.rep_areas
+   where employee_id = (select v::uuid from p14c where k = 'rep')) = 1,
+  'with a territory');
+select pg_temp.expect_error(format(
+  $q$select public.save_rep_target('%s', public.dhaka_today(), '{}'::jsonb)$q$,
+  (select v from p14c where k = 'rep')), 'TARGET_NEEDS_A_FIGURE');
+
+-- A dealer of theirs, and a sub-dealer under that dealer.
+insert into public.customers (id, shop_id, phone, name_text, company, credit_allowed,
+                              credit_limit, payment_days)
+values ('00000000-0000-4000-8000-0000000000f2', :'SHOP', '01711444555',
+        'Hasan Electronics', 'Hasan Electronics', true, 900000, 30);
+\set DEALER '00000000-0000-4000-8000-0000000000f2'
+
+select public.convert_customer(:'DEALER', jsonb_build_object(
+  'kind', 'dealer', 'rep_id', (select v from p14c where k = 'rep')));
+select pg_temp.check(
+  (select kind from public.customers where id = :'DEALER') = 'dealer'
+  and (select rep_id from public.customers where id = :'DEALER')
+      = (select v::uuid from p14c where k = 'rep'),
+  'a retail customer can be converted to a dealer and given to a rep');
+select pg_temp.check(
+  exists (select 1 from public.audit_log where action = 'customer_converted'),
+  'and the conversion is on the record, because somebody will ask who did it');
+
+-- ---- DONE-WHEN: 40% of a 5 lakh target ----
+-- Two lakh of the dealer's orders, billed. The rep did not ring them up; they count
+-- because it is their customer.
+do $$
+declare v_item uuid; v_i integer;
+begin
+  -- A non-serial line, so the test is about the rep rather than about serial picking.
+  select id into v_item from public.products where code = 'LOG-K120';
+  perform public.correct_stock('00000000-0000-4000-8000-0000000000b1', v_item, 10,
+                               'found_in_count', 'Stock for the P14c rep test');
+  for v_i in 1..2 loop
+    perform public.complete_sale(
+      p_branch_id      => '00000000-0000-4000-8000-0000000000b1',
+      p_items          => jsonb_build_array(jsonb_build_object(
+                            'product_id', v_item, 'qty', 1, 'unit_price', 100000)),
+      p_payment_method => 'cash',
+      p_customer_phone => '01711444555',
+      p_cash_received  => 100000);
+  end loop;
+end $$;
+
+select pg_temp.check(
+  (select (r->>'sold')::numeric from jsonb_array_elements(
+     public.rep_achievement()->'reps') r
+   where r->>'employee_id' = (select v from p14c where k = 'rep')) = 200000,
+  'the dealer''s orders count towards their rep, whoever rang them up');
+select pg_temp.check(
+  (select (r->>'done_pct')::numeric from jsonb_array_elements(
+     public.rep_achievement()->'reps') r
+   where r->>'employee_id' = (select v from p14c where k = 'rep')) = 40,
+  'DONE-WHEN: a 5 lakh target shows 40% done after 2 lakh of orders');
+select pg_temp.check(
+  (select (r->>'short_by')::numeric from jsonb_array_elements(
+     public.rep_achievement()->'reps') r
+   where r->>'employee_id' = (select v from p14c where k = 'rep')) = 300000,
+  'and says how much is still to find');
+-- 2% of 200,000, for a rep paid on sales.
+select pg_temp.check(
+  (select (r->>'commission')::numeric from jsonb_array_elements(
+     public.rep_achievement()->'reps') r
+   where r->>'employee_id' = (select v from p14c where k = 'rep')) = 4000,
+  'and what they have earned on it, for whoever may see pay');
+
+-- ---- DONE-WHEN: a 50,000 security deposit ----
+select public.set_feature('accounts', true);
+do $$
+declare r jsonb;
+begin
+  r := public.record_deposit('00000000-0000-4000-8000-0000000000f2', 50000, 'cash',
+                             null, 'Security against the dealership');
+  insert into p14c values ('held', r->>'held');
+end $$;
+
+select pg_temp.check(
+  (select v::numeric from p14c where k = 'held') = 50000
+  and public.deposit_held(:'DEALER') = 50000,
+  'DONE-WHEN: the dealer''s 50,000 deposit is held');
+select pg_temp.check(
+  (select (x->>'deposit')::numeric from jsonb_array_elements(
+     public.customer_search('Hasan')) x) = 50000,
+  'DONE-WHEN: and it shows on their profile');
+select pg_temp.check(
+  (select sum(l.credit) - coalesce(sum(l.debit), 0) from public.journal_lines l
+   join public.accounts a on a.id = l.account_id
+   where a.role = 'customer_deposit') = 50000,
+  'DONE-WHEN: and in the accounts, as money the shop is HOLDING — not as income');
+select pg_temp.check(
+  (public.trial_balance()->>'balanced')::boolean,
+  'and the books still balance');
+
+-- Half of it back, and never more than is held.
+select public.record_deposit(:'DEALER', -20000, 'cash', null, 'Partly returned');
+select pg_temp.check(
+  public.deposit_held(:'DEALER') = 30000,
+  'giving some back leaves the rest held');
+select pg_temp.expect_error(
+  $q$select public.record_deposit('00000000-0000-4000-8000-0000000000f2', -99000)$q$,
+  'MORE_THAN_HELD');
+
+-- ---- DONE-WHEN: a blocked customer cannot buy on due ----
+select pg_temp.expect_error(
+  $q$select public.convert_customer('00000000-0000-4000-8000-0000000000f2',
+       jsonb_build_object('blocked', true))$q$, 'REASON_REQUIRED');
+select public.convert_customer(:'DEALER', jsonb_build_object(
+  'blocked', true, 'block_reason', 'Two cheques bounced'));
+
+select pg_temp.expect_error(
+  $q$select public.complete_sale(
+       p_branch_id => '00000000-0000-4000-8000-0000000000b1',
+       p_items => jsonb_build_array(jsonb_build_object(
+         'product_id', (select id from public.products where code = 'LOG-K120'),
+         'qty', 1, 'unit_price', 1000)),
+       p_payment_method => 'due',
+       p_customer_phone => '01711444555',
+       p_due_amount => 1000)$q$,
+  'CUSTOMER_BLOCKED:Two cheques bounced');
+
+-- Blocked is about CREDIT, not about existing: they can still pay cash.
+do $$
+begin
+  perform public.complete_sale(
+    p_branch_id      => '00000000-0000-4000-8000-0000000000b1',
+    p_items          => jsonb_build_array(jsonb_build_object(
+                          'product_id', (select id from public.products where code = 'LOG-K120'),
+                          'qty', 1, 'unit_price', 1000)),
+    p_payment_method => 'cash',
+    p_customer_phone => '01711444555',
+    p_cash_received  => 1000);
+end $$;
+select pg_temp.check(true, 'DONE-WHEN: a blocked customer can still pay cash — the block is on credit');
+
+-- "Cash only" is the softer version of the same thing.
+select public.convert_customer(:'DEALER', jsonb_build_object(
+  'blocked', false, 'cash_only', true));
+select pg_temp.expect_error(
+  $q$select public.complete_sale(
+       p_branch_id => '00000000-0000-4000-8000-0000000000b1',
+       p_items => jsonb_build_array(jsonb_build_object(
+         'product_id', (select id from public.products where code = 'LOG-K120'),
+         'qty', 1, 'unit_price', 1000)),
+       p_payment_method => 'due',
+       p_customer_phone => '01711444555',
+       p_due_amount => 1000)$q$,
+  'CUSTOMER_IS_CASH_ONLY');
+select public.convert_customer(:'DEALER', jsonb_build_object('cash_only', false));
+
+-- ---- Delivery points ----
+do $$
+declare r jsonb;
+begin
+  r := public.save_delivery_point(null, '00000000-0000-4000-8000-0000000000f2',
+    jsonb_build_object('name', 'Warehouse', 'address', 'Tejgaon',
+                       'contact_name', 'Rahim', 'contact_phone', '01711000222'));
+  insert into p14c values ('point', r->>'id');
+  perform public.save_delivery_point(null, '00000000-0000-4000-8000-0000000000f2',
+    jsonb_build_object('name', 'Shop', 'address', 'New Market', 'is_default', true));
+end $$;
+
+select pg_temp.check(
+  jsonb_array_length(public.delivery_point_list(:'DEALER')) = 2,
+  'a dealer can have more than one place to deliver to');
+select pg_temp.check(
+  (select count(*) from public.delivery_points
+   where customer_id = :'DEALER' and is_default) = 1,
+  'and exactly one of them is the default, so nobody has to choose');
+
+-- An order can name one, which is what the column was waiting for.
+select pg_temp.check(
+  exists (select 1 from information_schema.table_constraints
+          where constraint_name = 'sales_orders_delivery_point_fk'),
+  'and an order can point at one');
+
+-- ---- Moving a customer between branches ----
+select public.move_customer_branch(:'DEALER', '00000000-0000-4000-8000-0000000000b2',
+                                   'Their area moved to Second branch');
+select pg_temp.check(
+  (select home_branch_id from public.customers where id = :'DEALER')
+  = '00000000-0000-4000-8000-0000000000b2',
+  'a customer can be moved to another branch');
+select pg_temp.check(
+  (select (details->>'owed')::numeric from public.audit_log
+   where action = 'customer_moved_branch' order by created_at desc limit 1) is not null,
+  'and what they owed at the time is written down with it');
+
+-- ---- The search ----
+select pg_temp.check(
+  jsonb_array_length(public.customer_search(null, 'dealer')) = 1,
+  'the search can find every dealer');
+select pg_temp.check(
+  jsonb_array_length(public.customer_search('Shanto')) = 1,
+  'or everybody belonging to one rep, by typing the rep''s name');
+select pg_temp.check(
+  jsonb_array_length(public.customer_search(null, null, null, null, 'has_deposit')) = 1,
+  'or everybody who has left money with the shop');
+
+-- ---- A rep sees their own numbers and nobody else's ----
+-- The cashier is not an employee at all, so there is nothing of theirs to show.
+select set_config('request.jwt.claim.sub', '22222222-2222-4222-8222-222222222222', false);
+select pg_temp.expect_error($q$select public.rep_achievement()$q$, 'NOT_AN_EMPLOYEE');
+select pg_temp.expect_error(format(
+  $q$select public.rep_achievement(null, '%s')$q$,
+  (select v from p14c where k = 'rep')), 'NOT_ALLOWED:manage_hr');
+select pg_temp.expect_error(
+  $q$select public.record_deposit('00000000-0000-4000-8000-0000000000f2', 100)$q$,
+  'NOT_ALLOWED:manage_customers');
+select pg_temp.check(
+  (select count(*) from public.customer_deposits) = 0
+  and (select count(*) from public.rep_targets) = 0,
+  'and a cashier reading the tables directly sees no deposits and no targets');
+
+select set_config('request.jwt.claim.sub', '11111111-1111-4111-8111-111111111111', false);
+
 reset role;
 \echo ALL DATABASE CHECKS PASSED

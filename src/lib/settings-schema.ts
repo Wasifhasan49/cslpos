@@ -262,6 +262,7 @@ export const FEATURE_SWITCHES: FeatureSpec[] = [
   { key: "accounts", label: "Accounts", what: "Double-entry books, vouchers and cheques." },
   { key: "sales_documents", label: "Sales documents", what: "Quotations, sales orders that hold stock, and delivery notes billed later. For shops that sell to companies." },
   { key: "hr", label: "Staff records", what: "Employees, attendance, leave and the monthly salary sheet." },
+  { key: "distribution", label: "Reps and dealers", what: "Sales reps with territories and targets, dealers and sub-dealers, delivery addresses, and security deposits. Needs Staff records on as well." },
   { key: "hr_extra_fields", label: "Religion and nationality on a staff record", what: "BMS records these. Off unless the shop actually needs them." },
   { key: "sms", label: "SMS", what: "Receipts and due reminders by text message." },
 ];

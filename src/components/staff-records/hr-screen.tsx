@@ -2,25 +2,27 @@
 
 import * as React from "react";
 import {
-  CalendarCheck, Check, Clock, Plus, Users, Wallet, X,
+  CalendarCheck, Check, Clock, Plus, Target, Users, Wallet, X,
 } from "lucide-react";
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatTaka } from "@/lib/sale";
 import type {
-  AttendanceDay, AttendanceStatus, Employee, LeaveRow, SalarySheet, SalarySheetRow,
-  SettingRow,
+  AttendanceDay, AttendanceStatus, Employee, LeaveRow, RepMonth, RepRow, SalarySheet,
+  SalarySheetRow, SettingRow,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type Tab = "people" | "attendance" | "leave" | "salary";
+type Tab = "people" | "attendance" | "leave" | "salary" | "reps";
 
 const TABS: { key: Tab; label: string; icon: React.ElementType }[] = [
   { key: "people", label: "People", icon: Users },
   { key: "attendance", label: "Attendance", icon: CalendarCheck },
   { key: "leave", label: "Leave", icon: Clock },
   { key: "salary", label: "Salary", icon: Wallet },
+  // Only for a shop that sells through reps (P14c).
+  { key: "reps", label: "Reps and targets", icon: Target },
 ];
 
 const STATUS_WORDS: Record<string, string> = {
@@ -36,7 +38,7 @@ const STATUS_WORDS: Record<string, string> = {
  * what anybody earns.
  */
 export function HrScreen() {
-  const { staff } = useStaff();
+  const { staff, features } = useStaff();
   const [tab, setTab] = React.useState<Tab>("people");
   const [error, setError] = React.useState("");
   const [note, setNote] = React.useState("");
@@ -61,7 +63,10 @@ export function HrScreen() {
       </div>
 
       <nav className="no-print -mx-1 flex gap-1 overflow-x-auto pb-1" aria-label="Sections">
-        {TABS.filter((t) => t.key !== "salary" || canSeePay).map(({ key, label, icon: Icon }) => (
+        {TABS
+          .filter((t) => (t.key !== "salary" || canSeePay)
+                         && (t.key !== "reps" || features.distribution))
+          .map(({ key, label, icon: Icon }) => (
           <button
             key={key}
             type="button"
@@ -89,6 +94,9 @@ export function HrScreen() {
       {tab === "attendance" && <Attendance key={nonce} onDone={done} onFail={say} />}
       {tab === "leave" && <Leave key={nonce} onDone={done} onFail={say} />}
       {tab === "salary" && canSeePay && <Salary key={nonce} onDone={done} onFail={say} />}
+      {tab === "reps" && features.distribution && (
+        <Reps key={nonce} onDone={done} onFail={say} />
+      )}
     </main>
   );
 }
@@ -772,6 +780,153 @@ function Salary({ onDone, onFail }: { onDone: (s: string) => void; onFail: (e: u
           </div>
         </section>
       )}
+    </>
+  );
+}
+
+/**
+ * Reps, their targets, and how they are doing.
+ *
+ * A rep is an employee here (P14b) with a territory, so making one is a switch on
+ * somebody who is already on the staff list rather than a second record of the same
+ * person. Every sale counts towards somebody: one with no rep on it belongs to whoever
+ * made it, so these figures add up to the shop's takings — BMS drops those invoices and
+ * its rep reports are short by about a third.
+ */
+function Reps({ onDone, onFail }: { onDone: (s: string) => void; onFail: (e: unknown) => void }) {
+  const { backend } = useStaff();
+  const [reps, setReps] = React.useState<RepRow[]>([]);
+  const [people, setPeople] = React.useState<Employee[]>([]);
+  const [month, setMonth] = React.useState<RepMonth | null>(null);
+  const [adding, setAdding] = React.useState("");
+  const [targets, setTargets] = React.useState<Record<string, string>>({});
+  const [busy, setBusy] = React.useState(false);
+
+  const load = React.useCallback(() => {
+    backend.listReps().then(setReps).catch(onFail);
+    backend.repAchievement().then(setMonth).catch(onFail);
+    backend.listEmployees().then(setPeople).catch(() => setPeople([]));
+  }, [backend, onFail]);
+  React.useEffect(load, [load]);
+
+  const notReps = people.filter((p) => !reps.some((r) => r.employeeId === p.id));
+
+  return (
+    <>
+      <section className="rounded-xl border border-line bg-white p-4">
+        <h2 className="font-semibold">Make somebody a rep</h2>
+        <p className="mt-1 text-[13px] text-muted">
+          A rep is one of your people with customers of their own. Their dealers&rsquo;
+          orders count towards them whoever rings them up.
+        </p>
+        <div className="mt-2 flex flex-wrap items-end gap-2">
+          <label className="flex min-w-[200px] flex-col gap-1 text-[13px] text-muted">
+            Who
+            <select value={adding} onChange={(e) => setAdding(e.target.value)}
+                    className="min-h-[44px] rounded-xl border border-line bg-white px-3 text-[15px]">
+              <option value="">Pick somebody</option>
+              {notReps.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </label>
+          <Button
+            disabled={busy || !adding}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                await backend.saveRep(adding, { is_rep: true });
+                setAdding("");
+                load();
+                onDone("They are a rep now. Give their customers to them on Customers → Dealers and reps.");
+              } catch (e) { onFail(e); } finally { setBusy(false); }
+            }}
+          >
+            Make them a rep
+          </Button>
+        </div>
+      </section>
+
+      {month && month.reps.length === 0 && (
+        <p className="rounded-xl border border-dashed border-line p-6 text-[15px] text-muted">
+          No reps yet.
+        </p>
+      )}
+
+      {month?.reps.map((r) => (
+        <section key={r.employeeId} className="rounded-xl border border-line bg-white p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="text-[15px] font-semibold">{r.name}</h3>
+              <p className="text-[13px] text-muted">
+                {r.customers} customers
+                {r.commissionPct > 0 && ` · ${r.commissionPct}% of ${r.commissionOn}`}
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="text-[17px] font-semibold num">
+                {formatTaka(r.sold)}
+                {r.target > 0 && (
+                  <span className="text-[14px] font-normal text-muted">
+                    {" "}of {formatTaka(r.target)}
+                  </span>
+                )}
+              </p>
+              {r.donePct !== null && (
+                <p className={cn("text-[14px]", r.donePct >= 100 ? "text-good-ink" : "text-muted")}>
+                  {r.donePct}% done
+                  {r.shortBy ? ` · ${formatTaka(r.shortBy)} to find` : ""}
+                </p>
+              )}
+              {/* Only true today, which is why it is worked out rather than stored. */}
+              {r.aDayNeeded !== null && r.aDayNeeded > 0 && (
+                <p className="text-[13px] text-muted">
+                  {formatTaka(r.aDayNeeded)} a day for the {month.daysLeft} days left
+                </p>
+              )}
+              {r.commission !== null && r.commission > 0 && (
+                <p className="text-[13px] text-muted">
+                  Earned <span className="num">{formatTaka(r.commission)}</span>
+                </p>
+              )}
+            </div>
+          </div>
+
+          {r.target > 0 && (
+            <div className="mt-2 h-2 overflow-hidden rounded-full bg-subtle">
+              <div
+                className={cn("h-full", (r.donePct ?? 0) >= 100 ? "bg-good-ink" : "bg-brand")}
+                style={{ width: `${Math.min(r.donePct ?? 0, 100)}%` }}
+              />
+            </div>
+          )}
+
+          <div className="mt-3 flex flex-wrap items-end gap-2">
+            <label className="flex w-[160px] flex-col gap-1 text-[13px] text-muted">
+              This month&rsquo;s target
+              <Input
+                inputMode="numeric" className="num"
+                value={targets[r.employeeId] ?? String(r.target || "")}
+                onChange={(e) => setTargets((t) => ({ ...t, [r.employeeId]: e.target.value }))}
+              />
+            </label>
+            <Button
+              variant="outline"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  await backend.saveRepTarget(r.employeeId, `${month.month.slice(0, 7)}-01`, {
+                    target_amount: Number(targets[r.employeeId] ?? r.target) || 0,
+                  });
+                  load();
+                  onDone(`${r.name}'s target is set.`);
+                } catch (e) { onFail(e); } finally { setBusy(false); }
+              }}
+            >
+              Set it
+            </Button>
+          </div>
+        </section>
+      ))}
     </>
   );
 }

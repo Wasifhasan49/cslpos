@@ -52,6 +52,7 @@ studying it: **`docs/notes/bms.md`**. The three that matter most —
 - The report engine, the period lock, export: **`docs/notes/reports.md`**.
 - Quotations, orders, delivery notes, advances: **`docs/notes/sales-documents.md`**.
 - Employees, attendance, leave, salary: **`docs/notes/hr.md`**.
+- Reps, dealers, delivery points, deposits: **`docs/notes/distribution.md`**.
 
 ## Where things live
 
@@ -118,8 +119,8 @@ hand is `docs/PROGRESS.md`, which wins on detail. P0–P14 are done and committe
 | P13–P14 | Double-entry books · 132 reports, the period lock, export |
 | P14a | Quotations, sales orders with advances, challans, reserved stock |
 | P14b | Employees, attendance, leave, salary sheets |
-| **next** | **P14c** sales reps, dealers and delivery points |
-| then | P15 SMS, P16 printing, P17 launch hardening, P18 multi-shop signup |
+| P14c | Sales reps and targets, dealers, delivery points, deposits, trader flags |
+| **next** | **P15** SMS → P16 printing → P17 launch hardening → P18 multi-shop signup |
 
 Loose ends worth knowing about, each noted in PROGRESS.md where it belongs: a few P3
 and P5 screens are missing though the rules exist (product attributes, gifts,
@@ -127,7 +128,7 @@ purchase-price fixing, the printable price view, supplier groups, the GRN print 
 P4 was built against reconstructed samples, so the real BMS export still has to be
 checked against `src/lib/import/schema.ts`; P10a leaves the print choices to P16; P11
 has no claim photos; P13 has no sub-ledger picker on a typed journal voucher and no
-screen for measuring a cheque leaf; P14 lists 23 reports that arrive with P14a and P14c.
+screen for measuring a cheque leaf; every report in docs/BMS_REPORTS.md now runs except BMS's bank interest calculator, which nobody at the store was seen using.
 
 **Before charging other shops:** paid Supabase and Vercel plans, backups, error
 monitoring (Sentry).

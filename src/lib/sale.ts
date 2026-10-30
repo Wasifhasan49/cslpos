@@ -304,6 +304,10 @@ export const SALE_ERROR_CODES = [
   "EMPLOYEE_NOT_FOUND", "NOT_AN_EMPLOYEE", "BAD_BRANCH_PIN", "BRANCH_TAKES_NO_CHECK_INS",
   "NO_CHECK_IN_TODAY", "BAD_ATTENDANCE_STATUS", "DATE_IN_FUTURE",
   "SHEET_NOT_FOUND", "SHEET_ALREADY_PAID", "NOTHING_TO_PAY",
+  // P14c: reps, dealers and delivery points.
+  "TARGET_NEEDS_A_FIGURE", "DELIVERY_POINT_NOT_FOUND", "MORE_THAN_HELD",
+  "CUSTOMER_BLOCKED", "CUSTOMER_IS_CASH_ONLY", "BAD_CUSTOMER_KIND",
+  "CUSTOMER_CANNOT_BE_ITS_OWN_DEALER",
 ] as const;
 
 /** Plain English for each permission, so "you can't do that" says which thing. */
@@ -643,6 +647,23 @@ export function friendlyError(raw: string): string {
       return "This month has been paid. Work out next month instead.";
     case "NOTHING_TO_PAY":
       return "Nothing to pay on this sheet. Set what people earn first, on Staff records.";
+    case "TARGET_NEEDS_A_FIGURE":
+      return "Give the target a figure: an amount for the month, or a quantity.";
+    case "DELIVERY_POINT_NOT_FOUND":
+      return "That delivery address no longer exists. Reload and try again.";
+    case "MORE_THAN_HELD":
+      return `You can only give back what is being held, which is ৳${detail ?? "0"}.`;
+    // The trader flags. Both say why, because whoever is at the till was not there
+    // when the decision was made.
+    case "CUSTOMER_BLOCKED":
+      return `This customer is blocked: ${detail ?? "no reason given"}. `
+        + "They can still pay cash. A manager can unblock them on Customers.";
+    case "CUSTOMER_IS_CASH_ONLY":
+      return `${detail ?? "This customer"} is marked cash only, so this can't go on due.`;
+    case "BAD_CUSTOMER_KIND":
+      return "That isn't a kind of customer. Use retail, dealer, retailer or corporate.";
+    case "CUSTOMER_CANNOT_BE_ITS_OWN_DEALER":
+      return "A customer can't be their own dealer.";
     case "PICK_AN_ACCOUNT": return "Pick which account's ledger you want.";
     case "PICK_A_PRODUCT": return "Pick which product you want the history of.";
     case "NO_SUCH_PRODUCT": return "That product isn't in this shop.";

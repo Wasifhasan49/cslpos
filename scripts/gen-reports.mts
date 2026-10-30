@@ -17,7 +17,7 @@ import { REPORTS, type ReportDef } from "../src/lib/reports.ts";
 
 // The NEWEST seed file: a later prompt that adds reports writes a new one and
 // changes this default, because an applied migration is never rewritten.
-const out = process.argv[2] ?? "supabase/migrations/20261026000023_report_defs.sql";
+const out = process.argv[2] ?? "supabase/migrations/20261026000025_report_defs.sql";
 
 const lit = (v: string | null | undefined): string =>
   v === null || v === undefined ? "null" : `'${v.replace(/'/g, "''")}'`;

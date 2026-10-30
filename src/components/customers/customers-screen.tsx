@@ -12,13 +12,16 @@ import type {
   CustomerGroup, CustomerRow, CustomerStatement, DueRow, PaymentReceipt, PriceList,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { Distribution } from "./distribution-tab";
 
-type Tab = "people" | "dues" | "groups";
+type Tab = "people" | "dues" | "groups" | "dealers";
 
-const TABS: { key: Tab; label: string }[] = [
+const TABS: { key: Tab; label: string; feature?: string }[] = [
   { key: "people", label: "Customers" },
   { key: "dues", label: "Who owes what" },
   { key: "groups", label: "Groups" },
+  // Only for a shop that sells through reps and dealers (P14c).
+  { key: "dealers", label: "Dealers and reps", feature: "distribution" },
 ];
 
 const COLLECT_METHODS = ["cash", "bkash", "nagad", "card", "bank", "cheque"];
@@ -30,7 +33,7 @@ const METHOD_WORDS: Record<string, string> = {
 };
 
 export function CustomersScreen() {
-  const { backend, staff } = useStaff();
+  const { backend, staff, features } = useStaff();
   const [tab, setTab] = React.useState<Tab>("people");
   const [groups, setGroups] = React.useState<CustomerGroup[]>([]);
   const [priceLists, setPriceLists] = React.useState<PriceList[]>([]);
@@ -79,7 +82,7 @@ export function CustomersScreen() {
 
       {isManager && (
         <nav aria-label="Customer sections" className="flex gap-1 overflow-x-auto border-b border-line">
-          {TABS.map((t) => (
+          {TABS.filter((t) => !t.feature || features[t.feature]).map((t) => (
             <button
               key={t.key}
               type="button"
@@ -106,6 +109,9 @@ export function CustomersScreen() {
       {tab === "dues" && isManager && <Dues key={nonce} busy={busy} run={run} />}
       {tab === "groups" && isManager && (
         <Groups groups={groups} priceLists={priceLists} busy={busy} run={run} />
+      )}
+      {tab === "dealers" && isManager && features.distribution && (
+        <Distribution key={nonce} busy={busy} run={run} />
       )}
     </Main>
   );
