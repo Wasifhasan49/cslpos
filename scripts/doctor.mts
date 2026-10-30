@@ -102,7 +102,7 @@ if (canReach && env.serviceKey && env.serviceKey !== env.anonKey) {
 
   const { data: shops, error: shopError } = await sb
     .from("shops")
-    .select("id, name, invoice_prefix, next_invoice")
+    .select("id, name, invoice_prefix")
     .order("name");
 
   if (shopError && unreachable(shopError.message)) {
@@ -114,7 +114,26 @@ if (canReach && env.serviceKey && env.serviceKey !== env.anonKey) {
     add("Shop", "fail", "this project has no shop",
       "Run: pnpm shop:init");
   } else {
-    add("Shop", "ok", shops.map((s) => `${s.name} (${s.invoice_prefix}, next ${s.next_invoice})`).join(", "));
+    add("Shop", "ok", shops.map((s) => `${s.name} (${s.invoice_prefix})`).join(", "));
+
+    // Since P1 everything that happens at a place belongs to a branch, and invoice
+    // numbers are handed out per branch — so a shop with no branch cannot sell at all.
+    for (const shop of shops) {
+      const { data: branchRows } = await sb
+        .from("branches")
+        .select("name, code, next_invoice")
+        .eq("shop_id", shop.id)
+        .eq("active", true)
+        .order("name");
+      const branches = branchRows ?? [];
+      if (branches.length === 0) {
+        add(`Branches · ${shop.name}`, "fail", "this shop has no branch",
+          "A sale, a shift and a stock count all belong to a branch. Add one in Settings → Branches.");
+      } else {
+        add(`Branches · ${shop.name}`, "ok",
+          branches.map((b) => `${b.name} (${b.code}, next invoice ${b.next_invoice})`).join(", "));
+      }
+    }
 
     for (const shop of shops) {
       const { data: staff } = await sb

@@ -104,13 +104,15 @@ export interface Shop {
   id: string;
   name: string;
   invoice_prefix: string;
-  next_invoice: number;
+  /** Invoice numbering moved to the branch in P1: a shop with two branches cannot have
+   *  one sequence. Null when a shop has no branch yet, which `pnpm check` reports. */
+  next_invoice: number | null;
 }
 
 export async function listShops(sb: SupabaseClient): Promise<Shop[]> {
   const { data, error } = await sb
     .from("shops")
-    .select("id, name, invoice_prefix, next_invoice")
+    .select("id, name, invoice_prefix")
     .order("name");
   if (error) {
     if (error.code === "42P01") {
@@ -122,7 +124,20 @@ export async function listShops(sb: SupabaseClient): Promise<Shop[]> {
     }
     fail("Couldn't read the shops.", error.message, "Check the keys in .env.local.");
   }
-  return data ?? [];
+  const shops = (data ?? []) as { id: string; name: string; invoice_prefix: string }[];
+  if (shops.length === 0) return [];
+
+  // A second query rather than an embedded one: several tables carry both shop_id and
+  // branch_id, so PostgREST cannot tell which path from shops to branches is meant.
+  const { data: branches } = await sb
+    .from("branches")
+    .select("shop_id, next_invoice")
+    .order("created_at");
+  const first = new Map<string, number>();
+  for (const b of (branches ?? []) as { shop_id: string; next_invoice: number }[]) {
+    if (!first.has(b.shop_id)) first.set(b.shop_id, b.next_invoice);
+  }
+  return shops.map((s) => ({ ...s, next_invoice: first.get(s.id) ?? null }));
 }
 
 /** Find the shop to work in: the only one, or the one named by `--shop`. */

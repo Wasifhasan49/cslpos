@@ -2,7 +2,7 @@
 // pnpm staff:add — give someone a login and link it to a shop.
 //
 //   pnpm staff:add                                        # asks for what it needs
-//   pnpm staff:add --email ovi@csl.com --name Ovi --role cashier --discount-limit 5
+//   pnpm staff:add --email ovi@csl.com --name Ovi --role cashier --branch Agargaon
 //   pnpm staff:add --list                                 # who is in the shop
 //   pnpm staff:add --email ovi@csl.com --deactivate       # they left
 //   pnpm staff:add --email ovi@csl.com --reset-password   # forgot it
@@ -196,6 +196,43 @@ const { data: saved } = await sb
   .select("id, name, role, discount_limit_pct")
   .eq("user_id", user.id)
   .single();
+
+// Owners get every branch in their shop; everyone else has to be given one, or they
+// sign in to an app with no till, no stock and no shift (see current_branch_ids()).
+if (role !== "owner" && saved) {
+  const { data: branches } = await sb
+    .from("branches")
+    .select("id, name, code")
+    .eq("shop_id", shop.id)
+    .eq("active", true)
+    .order("name");
+  const wanted = str(args, "branch");
+  const list = branches ?? [];
+  if (list.length === 0) {
+    fail(`"${shop.name}" has no branch yet.`,
+      "A manager or cashier works at a branch, so there has to be one.",
+      "Add one in Settings → Branches, then run this again.");
+  }
+  const needle = wanted?.trim().toLowerCase();
+  const picked = needle
+    ? list.filter((b) => b.id === wanted || b.name.toLowerCase() === needle || b.code.toLowerCase() === needle)
+    : list.length === 1 ? list : [];
+  if (picked.length !== 1) {
+    fail(
+      wanted ? `No branch called "${wanted}" at ${shop.name}.` : `${shop.name} has more than one branch, so --branch is needed.`,
+      `It has: ${list.map((b) => `${b.name} (${b.code})`).join(", ")}`,
+      'Run again with --branch "Branch name".',
+    );
+  }
+  const { error: linkError } = await sb
+    .from("staff_branches")
+    .upsert({ staff_id: saved.id, branch_id: picked[0].id }, { onConflict: "staff_id,branch_id" });
+  if (linkError) {
+    fail("The login was created but isn't attached to a branch.", linkError.message,
+      "Attach them in Settings → Staff, or run this command again.");
+  }
+  ok(`Works at ${picked[0].name} (${picked[0].code})`);
+}
 
 console.log("");
 ok(`${name} is ${role === "owner" ? "an owner" : role === "manager" ? "a manager" : "a cashier"} at ${shop.name}`);

@@ -7,8 +7,13 @@
 //
 //   pnpm shop:init
 //   pnpm shop:init --name "Computer Services" --prefix CSLINV --next-invoice 1790
+//   pnpm shop:init --branch "Agargaon" --branch-code AGR
 //   pnpm shop:init --with-samples      # also load the sample catalogue
 //   pnpm shop:init --list              # show the shops that already exist
+//
+// A shop also gets its FIRST BRANCH here. Since P1, everything that happens at a place
+// (stock, sales, shifts, cash) belongs to a branch, and invoices are numbered per branch
+// — so a shop with no branch cannot sell anything at all.
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -31,7 +36,7 @@ if (flag(args, "list", "list-shops")) {
       console.log(`  ${s.name}`);
       console.log(`    id              ${s.id}`);
       console.log(`    invoice prefix  ${s.invoice_prefix}`);
-      console.log(`    next invoice    ${s.next_invoice}\n`);
+        console.log(`    next invoice    ${s.next_invoice ?? "(no branch yet)"}\n`);
     }
   }
   process.exit(0);
@@ -70,6 +75,13 @@ if (!/^[A-Z0-9-]{2,12}$/.test(prefix)) {
 
 // A shop replacing another system usually wants its numbering to carry on from where
 // that system stopped, so the books do not appear to restart.
+const branchName = str(args, "branch", "branch-name") ?? (await ask("First branch name", "Main branch"));
+const branchCode = (str(args, "branch-code") ?? (await ask("Branch code (goes in every document number)", "MB"))).toUpperCase();
+if (!/^[A-Z0-9]{1,6}$/.test(branchCode)) {
+  fail(`"${branchCode}" won't work as a branch code.`, "Use 1 to 6 letters or digits.",
+       "For example: --branch-code MB");
+}
+
 const nextRaw = str(args, "next-invoice") ?? (await ask("Start invoice numbers at", "1"));
 const nextInvoice = Number(nextRaw);
 if (!Number.isInteger(nextInvoice) || nextInvoice < 1) {
@@ -83,6 +95,7 @@ info(`project         ${projectHost(env.url)}`);
 info(`name            ${name}`);
 info(`address         ${address || "(none)"}`);
 info(`phone           ${phone || "(none)"}`);
+info(`first branch    ${branchName} (${branchCode})`);
 info(`invoice prefix  ${prefix}`);
 info(`next invoice    ${nextInvoice}  → first invoice ${prefix}${new Date().getFullYear()}${String(nextInvoice).padStart(6, "0")}`);
 info(`sample products ${withSamples ? "yes" : "no"}`);
@@ -100,9 +113,8 @@ const { data: shop, error } = await sb
     address: address || null,
     phone: phone || null,
     invoice_prefix: prefix,
-    next_invoice: nextInvoice,
   })
-  .select("id, name, invoice_prefix, next_invoice")
+  .select("id, name, invoice_prefix")
   .single();
 
 if (error || !shop) {
@@ -111,6 +123,37 @@ if (error || !shop) {
 
 ok(`Created "${shop.name}"`);
 info(`id ${shop.id}`);
+
+// The first branch. Invoice numbers live here, not on the shop: two branches cannot
+// share one sequence without handing out the same invoice number twice.
+const { data: branch, error: branchError } = await sb
+  .from("branches")
+  .insert({
+    shop_id: shop.id,
+    name: branchName,
+    code: branchCode,
+    address: address || null,
+    phone: phone || null,
+    next_invoice: nextInvoice,
+  })
+  .select("id, name, code")
+  .single();
+
+if (branchError || !branch) {
+  fail("The shop was created but its first branch wasn't.", branchError?.message,
+       "Check every migration in supabase/migrations/ has been run, then run `pnpm check`.");
+}
+
+// A branch with no location cannot hold stock, so it gets one immediately — the same
+// thing save_branch() does for every branch added later.
+const { error: locError } = await sb
+  .from("stock_locations")
+  .insert({ shop_id: shop.id, branch_id: branch.id, name: "Main store", is_default: true });
+if (locError) {
+  fail("The branch was created but it has nowhere to keep stock.", locError.message,
+       "Check every migration has been run, then run `pnpm check`.");
+}
+ok(`Created the "${branch.name}" branch (${branch.code}) with a Main store`);
 
 // Units, payment methods, warranty terms, discount reasons, role permissions, document
 // sequences and a Retail price list. Without this a brand-new shop has no payment
@@ -164,7 +207,8 @@ async function loadSamples(shopId: string) {
   // whole file, copy the demo shop's rows if they are present, otherwise say so.
   const { data: demoProducts } = await sb
     .from("products")
-    .select("code, name, brand, price, warranty_months, is_serial, stock, reorder_level, category_id")
+    // `stock` is not on products any more (P1): stock belongs to a branch.
+    .select("code, name, brand, price, warranty_months, is_serial, reorder_level, category_id")
     .eq("shop_id", demoShopId);
 
   if (!demoProducts || demoProducts.length === 0) {

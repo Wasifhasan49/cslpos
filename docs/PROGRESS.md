@@ -37,16 +37,29 @@ One line per prompt from docs/BUILD_PROMPTS.md, newest at the bottom.
 
 ## Waiting on Wasif
 
-- Supabase: **the project is alive again** (27 Oct 2026 — it was paused, not deleted;
-  Supabase pauses an idle free project and brings it back on demand). `pnpm check` gets
-  as far as "no shop". But only the **P0-era migrations** are applied to it: `products`
-  exists, `branches`, `shop_features`, `journal_entries`, `report_defs`, `stock_layers`
-  and `quotations` do not. So it is fourteen prompts behind, and `pnpm dev` against it
-  shows a login screen nobody has credentials for.
-  To use it: apply `supabase/migrations/20261025000001_branches.sql` onward **in
-  filename order**, then `pnpm shop:init`, then `pnpm staff:add`, then `pnpm check`.
-  Until then, test with `pnpm dev:demo`. Everything is verified against a local Postgres;
+- Supabase: **the live project is set up and current** (31 Oct 2026). All 25 migrations
+  from `20261025000001_branches.sql` to `20261026000025_report_defs.sql` are applied, and
+  `pnpm shop:init` created **Computer Services** with its **Agargaon (AGR)** branch, a
+  Main store, and the usual defaults (units, payment methods, warranty terms, role
+  permissions, a Retail price list). Invoice prefix `CSLPOS`, starting at 1 — deliberately
+  not BMS's own prefix, so the two cannot hand out the same invoice number while they run
+  side by side. Change it in Settings → Shop.
+  What is left: **nobody can sign in yet.** Run
+  `pnpm staff:add --email you@example.com --name "Your name" --role owner`, then
+  `pnpm check`. The catalogue is empty too — import from BMS, or
+  `pnpm shop:init --with-samples`.
+  The migrations were applied through the **session pooler** connection string
+  (Supabase → Connect → Session pooler): the direct `db.<ref>.supabase.co` host only has
+  an IPv6 address, which this machine cannot reach.
+  `pnpm dev:demo` still needs nothing. Everything is verified against a local Postgres;
   only real sign-in and live RLS are unverified.
+- **The setup scripts were fourteen prompts stale and are fixed** (31 Oct 2026).
+  `shop:init` still wrote `shops.next_invoice`, which P1 dropped when numbering moved to
+  the branch — and it never created a branch at all, so the shop it made could not sell
+  anything. It now creates the first branch (`--branch`, `--branch-code`) with its default
+  stock location. `staff:add` now attaches a manager or cashier to a branch (`--branch`),
+  without which they sign in to an app with no till, no stock and no shift; owners still
+  get every branch. `pnpm check` reports the branches and says so when a shop has none.
 - **P4 was built against synthetic samples, not the real export.** The real BMS files
   were not available, so `bms-export/samples/` holds reconstructions with the same
   column names and quirks (title row above the header, "Convarter", blank rows, codes
