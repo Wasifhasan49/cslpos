@@ -6,6 +6,7 @@ import {
   Truck, Wrench,
 } from "lucide-react";
 import { useStaff } from "@/components/staff-provider";
+import { formatDate } from "@/lib/sale";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import type {
@@ -249,7 +250,7 @@ function Lookup({
                 <span className="font-semibold">{h.product ?? "Unknown item"}</span>
                 <span className="text-[13px] text-muted">
                   {h.serial && <span className="code">{h.serial}</span>}
-                  {h.soldOn && ` · sold ${h.soldOn}`}
+                  {h.soldOn && ` · sold ${formatDate(h.soldOn)}`}
                   {h.branch && ` · ${h.branch}`}
                   {h.soldBy && ` · by ${h.soldBy}`}
                   {h.invoiceNo && <> · <span className="code">{h.invoiceNo}</span></>}
@@ -277,13 +278,13 @@ function Lookup({
                 ) : (
                   <span className="rounded-full bg-subtle px-2.5 py-1 text-[13px] font-semibold text-muted">
                     {h.warrantyUntil
-                      ? `Out of warranty since ${h.warrantyUntil}`
+                      ? `Out of warranty since ${formatDate(h.warrantyUntil)}`
                       : "No warranty recorded"}
                   </span>
                 )}
                 {h.warrantyUntil && (
                   <span className="text-xs text-muted">
-                    {h.inWarranty ? "Covered to" : "Ended"} {h.warrantyUntil}
+                    {h.inWarranty ? "Covered to" : "Ended"} {formatDate(h.warrantyUntil)}
                   </span>
                 )}
               </div>
@@ -792,12 +793,12 @@ function ClaimDetail({
 
       <dl className="flex flex-wrap gap-x-6 gap-y-1 text-[15px]">
         <Pair label="Taken in by" value={claim.takenInBy} />
-        <Pair label="On" value={new Date(claim.createdAt).toLocaleDateString("en-GB")} />
+        <Pair label="On" value={formatDate(claim.createdAt)} />
         {claim.problemType && <Pair label="Fault" value={claim.problemType} />}
         {claim.warrantyUntil && (
           <Pair
             label={claim.inWarranty ? "Covered to" : "Cover ended"}
-            value={claim.warrantyUntil}
+            value={formatDate(claim.warrantyUntil)}
           />
         )}
         {claim.supplier && <Pair label="With" value={claim.supplier} />}
@@ -1024,10 +1025,10 @@ function ClaimSlip({ claim, onBack }: { claim: ClaimRow; onBack: () => void }) {
           {claim.customerPhone && <SlipRow label="Mobile" value={claim.customerPhone} mono />}
           <SlipRow
             label="Warranty"
-            value={claim.inWarranty
-              ? `In warranty to ${claim.warrantyUntil}`
+            value={claim.inWarranty && claim.warrantyUntil
+              ? `In warranty to ${formatDate(claim.warrantyUntil)}`
               : claim.warrantyUntil
-                ? `Ended ${claim.warrantyUntil} — chargeable`
+                ? `Ended ${formatDate(claim.warrantyUntil)} — chargeable`
                 : "None recorded — chargeable"}
           />
         </dl>

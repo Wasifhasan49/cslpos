@@ -1399,6 +1399,8 @@ export interface BackfillResult {
   customerPayments: number;
   supplierPayments: number;
   cashMovements: number;
+  /** Taka of stock brought onto the books at its counted value, if any was missing. */
+  stockBroughtIn: number;
 }
 
 // --- Reports, the period lock and export (P14) ---

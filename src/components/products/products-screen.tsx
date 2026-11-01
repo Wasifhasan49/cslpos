@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { formatTaka, warrantyLabel } from "@/lib/sale";
 import type { BulkPriceChange, CatalogueRow, Category, PriceList } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, plural } from "@/lib/utils";
 
 type QuickFilter = "all" | "low" | "out" | "serial" | "no_price" | "inactive";
 
@@ -107,7 +107,7 @@ export function ProductsScreen() {
         <div>
           <h1 className="text-xl font-semibold">Products</h1>
           <p className="text-[13px] text-muted">
-            {rows.length} products · stock shown for {branch.name}
+            {plural(rows.length, "product")} · stock shown for {branch.name}
           </p>
         </div>
         {canEdit && (

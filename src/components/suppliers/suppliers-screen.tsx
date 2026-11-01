@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { formatTaka } from "@/lib/sale";
 import type { Supplier, SupplierGroup } from "@/lib/types";
+import { plural } from "@/lib/utils";
 
 export function SuppliersScreen() {
   const { backend, staff } = useStaff();
@@ -55,7 +56,7 @@ export function SuppliersScreen() {
         <div>
           <h1 className="text-xl font-semibold">Suppliers</h1>
           <p className="text-[13px] text-muted">
-            {rows.length} suppliers · <span className="num">{formatTaka(owed)}</span> owed in total
+            {plural(rows.length, "supplier")} · <span className="num">{formatTaka(owed)}</span> owed in total
           </p>
         </div>
         {canEdit && (

@@ -4,7 +4,7 @@ import * as React from "react";
 import { Check, FileText, Package, Plus, Truck } from "lucide-react";
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
-import { formatTaka } from "@/lib/sale";
+import { formatDay, formatTaka } from "@/lib/sale";
 import type {
   AdvanceRow, ChallanRow, OrderRow, QuotationRow,
 } from "@/lib/types";
@@ -141,10 +141,10 @@ function Quotations({ onOpen, onFail }: { onOpen: (id: string) => void; onFail: 
       {rows.map((q) => (
         <Row key={q.id} onClick={() => onOpen(q.id)}>
           <td className="p-3"><span className="code">{q.quoteNo}</span></td>
-          <td className="p-3 num">{q.date}</td>
+          <td className="p-3 num">{formatDay(q.date)}</td>
           <td className="p-3">{q.customer}</td>
           <td className="p-3 num">
-            {q.validUntil ?? "—"}
+            {q.validUntil ? formatDay(q.validUntil) : "—"}
             {q.outOfDate && <span className="ml-2 text-bad-ink">out of date</span>}
           </td>
           <td className="p-3 text-right num">{formatTaka(q.total)}</td>
@@ -170,7 +170,7 @@ function Orders({ onOpen, onFail }: { onOpen: (id: string) => void; onFail: (e: 
         <Row key={o.id} onClick={() => onOpen(o.id)}>
           <td className="p-3"><span className="code">{o.soNo}</span></td>
           <td className={cn("p-3 num", o.late && "text-bad-ink")}>
-            {o.deliveryDate ?? "—"}
+            {o.deliveryDate ? formatDay(o.deliveryDate) : "—"}
             {o.late && <span className="ml-2">{o.daysLate} days late</span>}
           </td>
           <td className="p-3">{o.customer}</td>
@@ -207,7 +207,7 @@ function Challans({ onOpen, onFail }: { onOpen: (id: string) => void; onFail: (e
       {rows.map((c) => (
         <Row key={c.id} onClick={() => onOpen(c.id)}>
           <td className="p-3"><span className="code">{c.challanNo}</span></td>
-          <td className="p-3 num">{c.date}</td>
+          <td className="p-3 num">{formatDay(c.date)}</td>
           <td className="p-3">{c.customer}</td>
           <td className="p-3"><span className="code">{c.orderNo ?? "—"}</span></td>
           <td className="p-3 text-right num">{c.qty}</td>

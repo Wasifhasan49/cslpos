@@ -7,12 +7,12 @@ import {
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { formatTaka } from "@/lib/sale";
+import { formatDay, formatTaka } from "@/lib/sale";
 import type {
   AttendanceDay, AttendanceStatus, Employee, LeaveRow, RepMonth, RepRow, SalarySheet,
   SalarySheetRow, SettingRow,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, plural } from "@/lib/utils";
 
 type Tab = "people" | "attendance" | "leave" | "salary" | "reps";
 
@@ -221,7 +221,7 @@ function People({ onDone, onFail }: { onDone: (s: string) => void; onFail: (e: u
                   </td>
                   <td className="p-3">{e.designation ?? "—"}</td>
                   <td className="p-3">{e.branch ?? "—"}</td>
-                  <td className="p-3 num">{e.joinedOn}</td>
+                  <td className="p-3 num">{formatDay(e.joinedOn)}</td>
                   <td className="p-3">{e.today ? STATUS_WORDS[e.today] : "Not recorded"}</td>
                   {canSeePay && (
                     <td className="p-3 text-right num">
@@ -590,7 +590,7 @@ function Leave({ onDone, onFail }: { onDone: (s: string) => void; onFail: (e: un
                 {!r.isPaid && <span className="text-muted"> (unpaid)</span>}
               </p>
               <p className="text-[13px] text-muted">
-                <span className="num">{r.fromDate}</span> to <span className="num">{r.toDate}</span>
+                <span className="num">{formatDay(r.fromDate)}</span> to <span className="num">{formatDay(r.toDate)}</span>
                 {" · "}<span className="num">{r.days}</span> days
                 {r.daysAYear > 0 && ` · ${r.takenThisYear} of ${r.daysAYear} used this year`}
               </p>
@@ -693,7 +693,7 @@ function Salary({ onDone, onFail }: { onDone: (s: string) => void; onFail: (e: u
                   <td className="p-3 num">{s.people}</td>
                   <td className="p-3 text-right num">{formatTaka(s.total)}</td>
                   <td className="p-3">
-                    {s.status === "paid" ? `Paid ${s.paidOn}` : "Not paid yet"}
+                    {s.status === "paid" && s.paidOn ? `Paid ${formatDay(s.paidOn)}` : "Not paid yet"}
                   </td>
                 </tr>
               ))}
@@ -709,7 +709,7 @@ function Salary({ onDone, onFail }: { onDone: (s: string) => void; onFail: (e: u
               <h2 className="font-semibold">Salary for {open.month.slice(0, 7)}</h2>
               <p className="text-[13px] text-muted">
                 {open.lines.length} people · {open.status === "paid"
-                  ? `paid ${open.paidOn} by ${open.method}` : "not paid yet"}
+                  && open.paidOn ? `paid ${formatDay(open.paidOn)} by ${open.method}` : "not paid yet"}
               </p>
             </div>
             <Button variant="ghost" onClick={() => setOpen(null)} aria-label="Close">
@@ -857,7 +857,7 @@ function Reps({ onDone, onFail }: { onDone: (s: string) => void; onFail: (e: unk
             <div>
               <h3 className="text-[15px] font-semibold">{r.name}</h3>
               <p className="text-[13px] text-muted">
-                {r.customers} customers
+                {plural(r.customers, "customer")}
                 {r.commissionPct > 0 && ` · ${r.commissionPct}% of ${r.commissionOn}`}
               </p>
             </div>

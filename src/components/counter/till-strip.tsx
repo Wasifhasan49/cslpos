@@ -194,11 +194,16 @@ function OpenTill({
   onCancel: () => void;
 }) {
   const [cash, setCash] = React.useState(lastClose != null ? String(lastClose) : "");
+  // An empty box is not zero. The opening figure is what the whole day is checked
+  // against, so opening at nothing because nobody typed anything would hide a short
+  // drawer at closing time; a drawer that really is empty takes an explicit 0.
+  const counted = cash.trim() === "" ? null : Number(cash);
+  const ready = counted != null && Number.isFinite(counted) && counted >= 0;
 
   return (
     <form
       className="flex flex-wrap items-end gap-3"
-      onSubmit={(e) => { e.preventDefault(); onOpen(Number(cash) || 0); }}
+      onSubmit={(e) => { e.preventDefault(); if (ready) onOpen(counted); }}
     >
       <div className="w-40">
         <Field label="What is in the drawer now?">
@@ -216,8 +221,13 @@ function OpenTill({
           Same as last close: {formatTaka(lastClose)}
         </Button>
       )}
-      <Button type="submit" disabled={busy}>{busy ? "Opening…" : "Open the till"}</Button>
+      <Button type="submit" disabled={busy || !ready}>{busy ? "Opening…" : "Open the till"}</Button>
       <Button type="button" variant="ghost" onClick={onCancel} disabled={busy}>Cancel</Button>
+      {!ready && (
+        <p className="w-full text-[13px] text-muted">
+          Count the drawer and type what is in it. Type 0 if it is empty.
+        </p>
+      )}
       {error && <p role="alert" className="w-full text-sm text-bad-ink">{error}</p>}
     </form>
   );

@@ -8,7 +8,7 @@ import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { REGISTERS, notYetBecause } from "@/lib/reports";
-import { dhakaDate } from "@/lib/sale";
+import { dhakaDate, formatDay } from "@/lib/sale";
 import { download, journalToCsv, journalToTallyXml } from "@/lib/reports-export";
 import type {
   ChartAccount, PeriodLock, Product, ReportFilters, ReportListItem, ReportRegisterKey,
@@ -74,9 +74,19 @@ export function ReportsScreen() {
     }
   }, [backend, branchId, from, to, asOn, accountId, productId]);
 
+  // On a phone the report comes out UNDER a list of 130-odd names, so tapping one
+  // looks like it did nothing until you scroll. Bring the answer to the person: the
+  // date pickers as soon as a report is picked, then the report itself when it lands.
+  const panelRef = React.useRef<HTMLDivElement>(null);
+  const reportRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    if (report) reportRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [report]);
+
   // The pickers, loaded only when a report actually asks for one.
   const pick = async (item: ReportListItem) => {
     setPicked(item);
+    panelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     setReport(null);
     setError("");
     if (needsAccount(item.key) && accounts.length === 0) {
@@ -188,7 +198,7 @@ export function ReportsScreen() {
           {staff.role === "owner" && <AccountantCard onFail={say} />}
         </div>
 
-        <div className="flex flex-col gap-4">
+        <div ref={panelRef} className="flex flex-col gap-4">
           {picked && (
             <div className="no-print flex flex-wrap items-end gap-3 rounded-xl border border-line bg-white p-4">
               {picked.dateMode === "range" && (
@@ -271,9 +281,10 @@ export function ReportsScreen() {
           )}
 
           {report && (
-            <ReportView
-              report={report}
-              onDrill={(field, value) => {
+            <div ref={reportRef}>
+              <ReportView
+                report={report}
+                onDrill={(field, value) => {
                 // Tapping a line opens the thing behind it: an account's ledger, or one
                 // product's stock history. A number nobody can open is a number you have
                 // to take on trust, which is the whole complaint about BMS.
@@ -290,8 +301,9 @@ export function ReportsScreen() {
                   setPicked(ledger);
                   run(ledger, { productId: value });
                 }
-              }}
-            />
+                }}
+              />
+            </div>
           )}
         </div>
       </div>
@@ -417,7 +429,7 @@ function ClosingCard({ onDone, onFail }: {
             <li key={l.month} className="rounded-xl bg-subtle p-3 text-[14px]">
               <p className="font-medium">{monthWords(l.month)} is closed</p>
               <p className="text-[13px] text-muted">
-                {l.who}, {new Date(l.at).toLocaleDateString("en-GB")}
+                {l.who}, {formatDay(l.at)}
                 {l.note ? ` · ${l.note}` : ""}
               </p>
               {opening === l.month ? (

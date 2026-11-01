@@ -74,7 +74,7 @@ export function ProductPicker(props: Props) {
               aria-pressed={on}
               onClick={() => onCategory(c.id)}
               className={cn(
-                "h-9 rounded-full border px-3.5 text-sm font-medium focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus",
+                "h-11 rounded-full border px-3.5 text-sm font-medium focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus",
                 on ? "border-brand bg-brand text-white" : "border-line bg-surface text-ink hover:bg-subtle",
               )}
             >

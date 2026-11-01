@@ -7,7 +7,7 @@ import {
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
-import { formatTaka, searchProducts } from "@/lib/sale";
+import { formatDay, formatTaka, searchProducts } from "@/lib/sale";
 import type {
   InTransitRow, Product, TransferRequestRow, TransferRequestStatus, TransferRow,
   TransferStatus,
@@ -456,7 +456,7 @@ function TransferSlip({
           </div>
           <div className="text-right">
             <p className="code font-bold">{sent.no}</p>
-            <p className="text-[13px] text-muted">{new Date().toLocaleDateString("en-GB")}</p>
+            <p className="text-[13px] text-muted">{formatDay(new Date())}</p>
           </div>
         </header>
 
@@ -571,7 +571,7 @@ function Incoming({
             <span className="flex flex-col">
               <span className="code font-semibold">{t.transferNo}</span>
               <span className="text-[13px] text-muted">
-                From {t.fromBranchName} · sent {new Date(t.sentAt).toLocaleDateString("en-GB")}
+                From {t.fromBranchName} · sent {formatDay(t.sentAt)}
               </span>
             </span>
             <Pill status={t.status} words={TRANSFER_WORDS[t.status]} />
@@ -1139,7 +1139,7 @@ function History({
                 <span className="code font-semibold">{t.transferNo}</span>
                 <span className="text-[13px] text-muted">
                   {outgoing ? `To ${t.toBranchName}` : `From ${t.fromBranchName}`} ·{" "}
-                  {new Date(t.sentAt).toLocaleDateString("en-GB")}
+                  {formatDay(t.sentAt)}
                   {t.totalCost > 0 && <> · <span className="num">{formatTaka(t.totalCost)}</span> at cost</>}
                 </span>
               </span>

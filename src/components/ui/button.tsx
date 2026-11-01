@@ -4,7 +4,9 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg font-medium transition-colors focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:cursor-not-allowed [&_svg]:shrink-0",
+  // min-h-11 is the 44px touch target, on the base so a `sm` button or an h-10
+  // override in a dense row still cannot end up too small to hit on a phone.
+  "inline-flex min-h-11 items-center justify-center gap-2 whitespace-nowrap rounded-lg font-medium transition-colors focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus disabled:cursor-not-allowed [&_svg]:shrink-0",
   {
     variants: {
       variant: {
@@ -17,7 +19,7 @@ const buttonVariants = cva(
         default: "h-11 px-4 text-[15px]",
         sm: "h-9 px-3 text-sm",
         lg: "h-14 px-6 text-lg font-bold",
-        icon: "h-9 w-9",
+        icon: "h-11 w-11",
       },
     },
     defaultVariants: { variant: "default", size: "default" },

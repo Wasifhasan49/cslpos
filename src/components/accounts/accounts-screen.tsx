@@ -8,12 +8,12 @@ import {
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { formatTaka } from "@/lib/sale";
+import { formatDay, formatTaka } from "@/lib/sale";
 import type {
   Branch, ChartAccount, ChequeRow, MoneyBalance, SettingRow, Supplier, TrialBalance,
   VoucherKind, VoucherRow,
 } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, plural } from "@/lib/utils";
 import { ChequePrintView } from "./cheque-print";
 import { LedgerView } from "./ledger-view";
 
@@ -375,7 +375,7 @@ function VouchersTab({ branch, onDone, onFail }: {
                 <span className="code text-[13px] text-muted">{e.entryNo}</span>
                 <span className="block truncate">{e.narration}</span>
                 <span className="text-[13px] text-muted">
-                  {e.date} · {SOURCE_WORDS[e.sourceKind ?? ""] ?? e.sourceKind} · {e.who}
+                  {formatDay(e.date)} · {SOURCE_WORDS[e.sourceKind ?? ""] ?? e.sourceKind} · {e.who}
                   {e.status !== "posted" && ` · ${e.status === "awaiting_approval" ? "waiting for a manager" : "cancelled"}`}
                 </span>
               </span>
@@ -945,9 +945,16 @@ function BackfillRow({ onDone, onFail }: {
             const r = await backend.backfillAccounts();
             const total = r.sales + r.grns + r.saleReturns + r.supplierReturns
               + r.customerPayments + r.supplierPayments + r.cashMovements;
-            onDone(total === 0
+            // Stock brought onto the books counts as having caught something up, or the
+            // screen says "nothing to do" having just posted the whole opening shelf.
+            const stock = r.stockBroughtIn > 0
+              ? ` The stock on the shelves came on at ${formatTaka(r.stockBroughtIn)}.`
+              : "";
+            onDone(total === 0 && stock === ""
               ? "Nothing to catch up on: everything is already on the books."
-              : `Caught up on ${total} ${total === 1 ? "document" : "documents"}.`);
+              : total === 0
+                ? `Nothing to catch up on in the documents.${stock}`
+                : `Caught up on ${plural(total, "document")}.${stock}`);
           } catch (e) { onFail(e); } finally { setBusy(false); }
         }}
       >

@@ -193,7 +193,7 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
                           aria-pressed={on}
                           onClick={() => s.toggleSerial(p.id, sn.id)}
                           className={cn(
-                            "code h-9 rounded-lg border px-2.5 text-[13px] focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus",
+                            "code h-11 rounded-lg border px-2.5 text-[13px] focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-focus",
                             on ? "border-brand bg-brand text-white" : "border-line-strong bg-surface text-ink hover:bg-subtle",
                           )}
                         >
@@ -220,11 +220,11 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
                   <span className="text-sm text-ink-soft">Qty <span className="num">{line.qty}</span></span>
                 ) : (
                   <div className="flex items-center overflow-hidden rounded-lg border border-line">
-                    <button type="button" aria-label="One less" onClick={() => s.changeQty(p, -1)} className="flex h-10 w-11 items-center justify-center bg-ground hover:bg-subtle">
+                    <button type="button" aria-label="One less" onClick={() => s.changeQty(p, -1)} className="flex h-11 w-11 items-center justify-center bg-ground hover:bg-subtle">
                       <Minus className="size-4" />
                     </button>
                     <span className="num min-w-11 text-center" aria-live="polite">{line.qty}</span>
-                    <button type="button" aria-label="One more" disabled={line.qty >= p.stock} onClick={() => s.changeQty(p, 1)} className="flex h-10 w-11 items-center justify-center bg-ground hover:bg-subtle disabled:opacity-40">
+                    <button type="button" aria-label="One more" disabled={line.qty >= p.stock} onClick={() => s.changeQty(p, 1)} className="flex h-11 w-11 items-center justify-center bg-ground hover:bg-subtle disabled:opacity-40">
                       <Plus className="size-4" />
                     </button>
                   </div>

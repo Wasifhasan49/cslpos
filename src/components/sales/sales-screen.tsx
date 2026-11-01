@@ -7,7 +7,7 @@ import {
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
-import { formatTaka, refundFor } from "@/lib/sale";
+import { formatDay, formatTaka, refundFor } from "@/lib/sale";
 import type {
   Approver, RefundMethod, SaleDetail, SaleDetailLine, SaleRow,
 } from "@/lib/types";
@@ -15,8 +15,14 @@ import { cn } from "@/lib/utils";
 
 const METHOD_WORDS: Record<string, string> = {
   cash: "Cash", bkash: "bKash", nagad: "Nagad", card: "Card",
+  rocket: "Rocket", bank: "Bank transfer", cheque: "Cheque", due: "On due (baki)",
   store_credit: "Store credit", reduce_due: "Off their due",
 };
+
+// Every method a sale can be stored with, so "Paid by" can find a credit sale. The
+// till only offers the ones the shop has switched on, but the history has to be able
+// to look for all of them.
+const FILTER_METHODS = ["cash", "bkash", "nagad", "card", "rocket", "bank", "cheque", "due"];
 
 const REFUND_METHODS: { value: RefundMethod; label: string }[] = [
   { value: "cash", label: "Cash" },
@@ -110,7 +116,7 @@ export function SalesScreen() {
                   className="h-11 w-full rounded-lg border border-line-strong bg-surface px-3 text-base"
                 >
                   <option value="">Any</option>
-                  {["cash", "bkash", "nagad", "card"].map((m) => (
+                  {FILTER_METHODS.map((m) => (
                     <option key={m} value={m}>{METHOD_WORDS[m] ?? m}</option>
                   ))}
                 </select>
@@ -341,7 +347,7 @@ function SaleDetailPanel({
           {sale.returns.map((r) => (
             <li key={r.id}>
               <span className="code">{r.returnNo}</span> ·{" "}
-              {new Date(r.createdAt).toLocaleDateString("en-GB")} · {r.branch} ·{" "}
+              {formatDay(r.createdAt)} · {r.branch} ·{" "}
               <span className="num">{formatTaka(r.total)}</span> back by{" "}
               {METHOD_WORDS[r.refundMethod] ?? r.refundMethod}
               {r.reason && ` · ${r.reason}`}
@@ -565,7 +571,7 @@ function VoidForm({
               onChange={(e) => setRefundMethod(e.target.value)}
               className="h-11 w-full rounded-lg border border-line-strong bg-surface px-3 text-base"
             >
-              {["cash", "bkash", "nagad", "card"].map((m) => (
+              {FILTER_METHODS.map((m) => (
                 <option key={m} value={m}>{METHOD_WORDS[m] ?? m}</option>
               ))}
             </select>
@@ -674,18 +680,22 @@ function ReturnForm({
   const [courierName, setCourierName] = React.useState("");
   const [courierTracking, setCourierTracking] = React.useState("");
 
-  const lines = open
-    .map((i) => {
-      const d = draft[i.id];
-      const qty = i.isSerial ? d.serialIds.length : Number(d.qty) || 0;
-      // The same arithmetic the database will do, so the figure on screen is the
-      // figure that goes back.
-      const refund = refundFor(
-        { qty: i.qty, lineTotal: i.lineTotal, vatAmount: i.vatAmount, vatInclusive: i.vatInclusive },
-        qty, sale.discountPct);
-      return { item: i, qty, refund, isFaulty: d.isFaulty, serialIds: d.serialIds };
-    })
-    .filter((x) => x.qty > 0);
+  const asked = open.map((i) => {
+    const d = draft[i.id];
+    const left = i.qty - i.returnedQty;
+    const wanted = i.isSerial ? d.serialIds.length : Number(d.qty) || 0;
+    // More back than went out is the one mistake worth catching here rather than
+    // letting the counter read a refund the database is going to refuse.
+    const qty = Math.min(wanted, left);
+    // The same arithmetic the database will do, so the figure on screen is the
+    // figure that goes back.
+    const refund = refundFor(
+      { qty: i.qty, lineTotal: i.lineTotal, vatAmount: i.vatAmount, vatInclusive: i.vatInclusive },
+      qty, sale.discountPct);
+    return { item: i, qty, left, wanted, refund, isFaulty: d.isFaulty, serialIds: d.serialIds };
+  });
+  const overLine = asked.find((x) => x.wanted > x.left);
+  const lines = asked.filter((x) => x.qty > 0);
 
   const refundTotal = lines.reduce((n, x) => n + x.refund, 0);
   const wholeSale = sale.items.every((i) => {
@@ -845,11 +855,16 @@ function ReturnForm({
       )}
 
       <div className="flex flex-wrap gap-2">
-        <Button type="submit" disabled={busy || lines.length === 0}>
+        <Button type="submit" disabled={busy || lines.length === 0 || overLine != null}>
           <RotateCcw className="size-4" aria-hidden /> Take it back
         </Button>
         <Button type="button" variant="ghost" onClick={onCancel} disabled={busy}>Cancel</Button>
-        {lines.length === 0 && (
+        {overLine != null ? (
+          <span className="self-center text-[13px] text-bad-ink">
+            {overLine.item.name}: only {overLine.left} can come back
+            {overLine.item.returnedQty > 0 && ", the rest already has"}.
+          </span>
+        ) : lines.length === 0 && (
           <span className="self-center text-[13px] text-muted">
             Say how many of each is coming back.
           </span>

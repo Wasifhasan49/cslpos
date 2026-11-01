@@ -2173,12 +2173,22 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
       const { data, error } = await sb.rpc("backfill_accounts", { p_from: from ?? null });
       if (error) throw new Error(friendlyError(error.message));
       const r = (data ?? {}) as Record<string, unknown>;
+      // Catching up is two halves, and the second one is the point of the first: the
+      // sales and deliveries get posted, and THEN the stock already on the shelves is
+      // brought onto the books at its counted value. Without this second call the
+      // stock account stays short by the whole opening shelf and the trial balance
+      // never agrees with a stock valuation.
+      const { data: stockData, error: stockError } =
+        await sb.rpc("backfill_stock_entries");
+      if (stockError) throw new Error(friendlyError(stockError.message));
+      const st = (stockData ?? {}) as Record<string, unknown>;
       return {
         from: String(r.from), sales: num(r.sales), grns: num(r.grns),
         supplierReturns: num(r.supplier_returns), saleReturns: num(r.sale_returns),
         customerPayments: num(r.customer_payments),
         supplierPayments: num(r.supplier_payments),
         cashMovements: num(r.cash_movements),
+        stockBroughtIn: num(st.stock_brought_in),
       };
     },
 

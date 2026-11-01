@@ -81,10 +81,10 @@ export function SettingsScreen() {
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h1 className="text-xl font-semibold">Settings</h1>
         <span className="flex flex-wrap gap-4">
-          <Link href="/settings/branches" className="text-sm text-ink-soft underline">
+          <Link href="/settings/branches" className="inline-flex min-h-11 items-center text-sm text-ink-soft underline">
             Branches and staff →
           </Link>
-          <Link href="/settings/import" className="text-sm text-ink-soft underline">
+          <Link href="/settings/import" className="inline-flex min-h-11 items-center text-sm text-ink-soft underline">
             Import from BMS →
           </Link>
         </span>

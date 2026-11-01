@@ -201,6 +201,18 @@ export function formatDate(isoDate: string): string {
   return `${d} ${MONTHS[m - 1]} ${y}`;
 }
 
+/**
+ * A timestamp as the day it happened in Dhaka, written the way a shop writes it.
+ *
+ * `toLocaleDateString` would use the DEVICE's timezone, so a phone left on another
+ * zone would put a late-evening sale on the wrong day — the same trap dhakaDate()
+ * exists for.
+ */
+export function formatDay(at: string | Date): string {
+  const [y, m, d] = dhakaDate(at).split("-");
+  return `${d}/${m}/${y}`;
+}
+
 export function warrantyLabel(months: number): string {
   if (!months) return "No warranty";
   if (months % 12 === 0) return `${months / 12} ${months === 12 ? "year" : "years"} warranty`;
@@ -242,7 +254,7 @@ export const SALE_ERROR_CODES = [
   "BAD_SETTING_FIELD", "NOTHING_TO_SAVE", "SETTING_NOT_FOUND", "BAD_DOCUMENT_NUMBER",
   "NUMBER_GOES_BACKWARDS", "BAD_DISCOUNT_TYPE", "BAD_CATEGORY", "BAD_CHARGE",
   "BAD_PRICE", "BAD_PRICE_BAND", "BAD_PRICE_MODE", "PRODUCT_NAME_REQUIRED",
-  "PRODUCT_CODE_REQUIRED", "PRICE_LIST_NOT_FOUND", "PRICE_LIST_NAME_REQUIRED",
+  "PRODUCT_CODE_REQUIRED", "PRODUCT_CODE_TAKEN", "PRICE_LIST_NOT_FOUND", "PRICE_LIST_NAME_REQUIRED",
   "LAST_PRICE_LIST", "NO_PRODUCTS_PICKED", "CATEGORY_NOT_FOUND", "SAME_CATEGORY",
   "SERIAL_CHANGE_HAS_STOCK", "NOTHING_TO_IMPORT",
   "NOTHING_RECEIVED", "NOTHING_RETURNED", "NOTHING_TO_CORRECT", "NOT_A_STOCK_ITEM",
@@ -649,10 +661,13 @@ export function friendlyError(raw: string): string {
       return "Nothing to pay on this sheet. Set what people earn first, on Staff records.";
     case "TARGET_NEEDS_A_FIGURE":
       return "Give the target a figure: an amount for the month, or a quantity.";
+    case "PRODUCT_CODE_TAKEN":
+      return `That code is already ${detail ?? "another product"}'s. A code can only belong to one product, because that is what a scan looks for.`;
     case "DELIVERY_POINT_NOT_FOUND":
       return "That delivery address no longer exists. Reload and try again.";
     case "MORE_THAN_HELD":
-      return `You can only give back what is being held, which is ৳${detail ?? "0"}.`;
+      // The code carries a bare number; money is written the way it is everywhere else.
+      return `You can only give back what is being held, which is ${formatTaka(Number(detail) || 0)}.`;
     // The trader flags. Both say why, because whoever is at the till was not there
     // when the decision was made.
     case "CUSTOMER_BLOCKED":

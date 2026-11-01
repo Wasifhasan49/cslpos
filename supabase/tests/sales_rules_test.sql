@@ -813,6 +813,23 @@ select pg_temp.check(
 select pg_temp.expect_error($q$select public.upsert_product(null, '{"code":"X"}')$q$, 'PRODUCT_NAME_REQUIRED');
 select pg_temp.expect_error($q$select public.upsert_product(null, '{"name":"X"}')$q$, 'PRODUCT_CODE_REQUIRED');
 
+-- A code belongs to one product, because that is what a barcode scan matches on. The
+-- refusal names whoever already has it, and case does not get round it.
+select pg_temp.expect_error(
+  $q$select public.upsert_product(null, '{"name":"Another cable","code":"TST-1","price":10}')$q$,
+  'PRODUCT_CODE_TAKEN:Test cable');
+select pg_temp.expect_error(
+  $q$select public.upsert_product(null, '{"name":"Another cable","code":"tst-1","price":10}')$q$,
+  'PRODUCT_CODE_TAKEN:Test cable');
+select pg_temp.expect_error(format(
+  $q$select public.upsert_product('%s', '{"code":"LOG-K120"}')$q$,
+  (select id from public.products where code = 'TST-1')), 'PRODUCT_CODE_TAKEN');
+select pg_temp.check(
+  (public.upsert_product(
+     (select id from public.products where code = 'TST-1'),
+     '{"code":"TST-1","name":"Test cable, renamed"}')->>'name') = 'Test cable, renamed',
+  'but a product keeping its own code is not told the code is taken');
+
 -- A serial item with stock cannot quietly become a non-serial one.
 select pg_temp.expect_error($q$update public.products set is_serial = false where code = 'SAM-980-500'$q$, 'SERIAL_CHANGE_HAS_STOCK');
 
@@ -4113,7 +4130,12 @@ select pg_temp.check(
 -- This shop was trading before it switched the books on (sections 1 to 24), so the
 -- opening stock, the corrections and the vans have to be caught up first — the same
 -- press of the same button an owner does once.
-select public.backfill_stock_entries();
+-- It reports the taka it brought in, not only how many movements it replayed: the
+-- screen tells the owner what just happened, and "nothing to catch up on" after
+-- posting a whole opening shelf is how nobody notices that it worked.
+select pg_temp.check(
+  public.backfill_stock_entries() ? 'stock_brought_in',
+  'the stock back-fill says how much stock it brought onto the books');
 select pg_temp.check(
   (public.backfill_stock_entries()->>'movements')::integer = 0,
   'the stock back-fill posts nothing the second time it is pressed');
@@ -4793,8 +4815,15 @@ select pg_temp.check(
   'a day nobody marked reads "not recorded", not "absent" — guessing would dock somebody');
 
 -- ---- An absence, and an advance, for the salary sheet to find ----
+-- The sheet below is THIS month's, because an advance is always dated now and cannot
+-- be backdated. So the absent day has to be inside this month too: `today - 2` would
+-- fall in the previous month on the 1st and 2nd, and the day's pay would then be
+-- deducted from a sheet nobody is looking at. The 2nd of the month, or today if the
+-- month is younger than that — never the day the sick leave above is on.
 select public.mark_attendance((select v::uuid from p14b where k = 'emp_mina'),
-                              public.dhaka_today() - 2, 'absent', 'No word');
+                              least(public.dhaka_today(),
+                                    date_trunc('month', public.dhaka_today())::date + 1),
+                              'absent', 'No word');
 select public.record_salary_advance((select v::uuid from p14b where k = 'emp_ovi'),
                                     2000, 'cash', 'Asked for it mid-month');
 

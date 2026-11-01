@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/input";
 import { suggestCleanups, type Cleanup } from "@/lib/import/clean";
 import { guessMapping, readSheet, type Grid, type Mapping, type Sheet } from "@/lib/import/parse";
+import { readWorkbook, UnreadableFile, type Grids } from "@/lib/import/workbook";
 import { importableRows, reviewRows, type ReviewResult } from "@/lib/import/review";
 import { IMPORT_KINDS, kindSpec, type ImportKind } from "@/lib/import/schema";
 import type { PriceList } from "@/lib/types";
@@ -43,38 +44,43 @@ export function ImportScreen() {
     setBusy(true);
     setError("");
     try {
-      const ExcelJS = (await import("exceljs")).default;
-      const wb = new ExcelJS.Workbook();
       const buf = await file.arrayBuffer();
-      if (file.name.toLowerCase().endsWith(".csv")) {
-        // exceljs reads CSV too, so there is no hand-rolled CSV parser to get wrong.
-        const text = new TextDecoder().decode(buf);
-        const ws = wb.addWorksheet("csv");
-        for (const line of splitCsv(text)) ws.addRow(line);
-      } else {
-        await wb.xlsx.load(buf);
-      }
+
+      // Only a real .xlsx goes through the Excel library, and only then is it loaded —
+      // it is the biggest thing on the page, and most of these files are text.
+      const loadXlsx = async (bytes: ArrayBuffer): Promise<Grids> => {
+        const ExcelJS = (await import("exceljs")).default;
+        const wb = new ExcelJS.Workbook();
+        await wb.xlsx.load(bytes);
+        const out: Grids = {};
+        wb.eachSheet((ws) => {
+          const grid: Grid = [];
+          ws.eachRow({ includeEmpty: true }, (row) => {
+            const cells: (string | number | null)[] = [];
+            row.eachCell({ includeEmpty: true }, (cell) => {
+              const v = cell.value;
+              cells.push(
+                v === null || v === undefined ? null
+                : typeof v === "object" && "result" in v ? String((v as { result?: unknown }).result ?? "")
+                : typeof v === "object" && "text" in v ? String((v as { text?: unknown }).text ?? "")
+                : typeof v === "number" ? v
+                : String(v),
+              );
+            });
+            grid.push(cells);
+          });
+          out[ws.name] = grid;
+        });
+        return out;
+      };
+
+      const grids = await readWorkbook(buf, file.name, loadXlsx);
 
       const found: Record<string, Sheet> = {};
-      wb.eachSheet((ws) => {
-        const grid: Grid = [];
-        ws.eachRow({ includeEmpty: true }, (row) => {
-          const cells: (string | number | null)[] = [];
-          row.eachCell({ includeEmpty: true }, (cell) => {
-            const v = cell.value;
-            cells.push(
-              v === null || v === undefined ? null
-              : typeof v === "object" && "result" in v ? String((v as { result?: unknown }).result ?? "")
-              : typeof v === "object" && "text" in v ? String((v as { text?: unknown }).text ?? "")
-              : typeof v === "number" ? v
-              : String(v),
-            );
-          });
-          grid.push(cells);
-        });
-        const s = readSheet(grid);
-        if (s.rows.length > 0) found[ws.name] = s;
-      });
+      for (const [name, grid] of Object.entries(grids)) {
+        const sheetRead = readSheet(grid);
+        if (sheetRead.rows.length > 0) found[name] = sheetRead;
+      }
 
       if (Object.keys(found).length === 0) {
         setError("That file has no rows this can read. Check it has a header row with column names.");
@@ -91,7 +97,12 @@ export function ImportScreen() {
       setMapping(remembered ? { ...guessed, ...remembered } : guessed);
       setStep("map");
     } catch (e) {
-      setError(e instanceof Error ? `Couldn't read that file: ${e.message}` : "Couldn't read that file.");
+      // UnreadableFile already says what to do, so it is shown word for word.
+      setError(
+        e instanceof UnreadableFile ? e.message
+        : e instanceof Error ? `Couldn't read that file: ${e.message}`
+        : "Couldn't read that file.",
+      );
     } finally {
       setBusy(false);
     }
@@ -228,16 +239,17 @@ export function ImportScreen() {
         <div className="flex flex-col gap-3">
           <h2 className="font-semibold">Choose the {kindSpec(kind).label.toLowerCase()} file</h2>
           <p className="text-[13px] text-muted">
-            An Excel (.xlsx) or CSV file. It&rsquo;s read here on your own computer — only
-            the rows you confirm are sent anywhere.
+            An Excel or CSV file — including the .xls that BMS&rsquo;s report viewer saves.
+            It&rsquo;s read here on your own computer, and only the rows you confirm are sent
+            anywhere.
           </p>
           <label className="flex min-h-32 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-line-strong bg-subtle p-6 text-center">
             <Upload className="size-8 text-line-strong" aria-hidden />
             <span className="font-semibold">{busy ? "Reading…" : "Pick a file"}</span>
-            <span className="text-[13px] text-muted">.xlsx or .csv</span>
+            <span className="text-[13px] text-muted">.xlsx, .xls, .csv or .txt</span>
             <input
               type="file"
-              accept=".xlsx,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              accept=".xlsx,.xls,.csv,.txt,.tsv,text/csv,text/plain,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               className="sr-only"
               onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); }}
             />
@@ -540,26 +552,3 @@ function Tally({ label, n, tone }: { label: string; n: number; tone: "ok" | "bad
   );
 }
 
-/** Minimal CSV split for handing rows to exceljs: quoted fields with embedded commas,
- *  quotes and newlines. */
-function splitCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cur = "";
-  let quoted = false;
-  const src = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i];
-    if (quoted) {
-      if (c === '"' && src[i + 1] === '"') { cur += '"'; i++; }
-      else if (c === '"') quoted = false;
-      else cur += c;
-    } else if (c === '"') quoted = true;
-    else if (c === ",") { row.push(cur); cur = ""; }
-    else if (c === "\n") { row.push(cur); rows.push(row); row = []; cur = ""; }
-    else cur += c;
-  }
-  if (cur !== "" || row.length > 0) { row.push(cur); rows.push(row); }
-  return rows;
-}

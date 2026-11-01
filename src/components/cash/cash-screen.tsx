@@ -3,7 +3,7 @@
 import * as React from "react";
 import { Check, TriangleAlert, Wallet } from "lucide-react";
 import { useStaff } from "@/components/staff-provider";
-import { formatTaka } from "@/lib/sale";
+import { formatDay, formatTaka } from "@/lib/sale";
 import type { CashMovementRow, ShiftRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -105,7 +105,7 @@ export function CashScreen() {
                 <span className="flex min-w-[150px] flex-1 flex-col">
                   <span className="font-semibold">{r.staff}</span>
                   <span className="text-[13px] text-muted">
-                    {new Date(r.openedAt).toLocaleDateString("en-GB")}{" "}
+                    {formatDay(r.openedAt)}{" "}
                     {new Date(r.openedAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}
                     {r.closedAt
                       ? ` – ${new Date(r.closedAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`

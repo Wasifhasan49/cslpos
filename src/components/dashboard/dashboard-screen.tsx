@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { dhakaToday, formatTaka } from "@/lib/sale";
 import type { Dashboard, DashboardDetailKind, DashboardDetailRow } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, plural } from "@/lib/utils";
 
 const METHOD_WORDS: Record<string, string> = {
   cash: "Cash", bkash: "bKash", nagad: "Nagad", card: "Card", due: "On due",
@@ -192,13 +192,13 @@ export function DashboardScreen() {
                     <button
                       type="button"
                       onClick={() => setScope(b.branchId)}
-                      className="min-w-[140px] flex-1 text-left font-semibold underline-offset-2 hover:underline"
+                      className="flex min-h-11 min-w-[140px] flex-1 items-center text-left font-semibold underline-offset-2 hover:underline"
                     >
                       {b.branch}
                     </button>
                     <span className="flex flex-col text-right">
                       <span className="num font-semibold">{formatTaka(b.sales)}</span>
-                      <span className="text-xs text-muted">{b.saleCount} sales</span>
+                      <span className="text-xs text-muted">{plural(b.saleCount, "sale")}</span>
                     </span>
                     <span className="flex min-w-[100px] flex-col text-right">
                       <span className="num text-[13px] text-muted">{formatTaka(b.profit)}</span>
@@ -269,7 +269,7 @@ export function DashboardScreen() {
                     <span className="min-w-[120px] flex-1 font-semibold">{s.staff}</span>
                     <span className="flex flex-col text-right">
                       <span className="num font-semibold">{formatTaka(s.sales)}</span>
-                      <span className="text-xs text-muted">{s.saleCount} sales</span>
+                      <span className="text-xs text-muted">{plural(s.saleCount, "sale")}</span>
                     </span>
                     {s.discountGiven > 0 && (
                       <span className="flex min-w-[100px] flex-col text-right">
@@ -551,7 +551,7 @@ function BusyHours({ hours }: { hours: { hour: number; sales: number; count: num
               className="w-full rounded-t bg-brand"
               style={{ height: `${Math.max(Math.round((h.sales / peak) * 80), 3)}px` }}
               role="img"
-              aria-label={`${label(h.hour)}: ${formatTaka(h.sales)} from ${h.count} sales`}
+              aria-label={`${label(h.hour)}: ${formatTaka(h.sales)} from ${plural(h.count, "sale")}`}
             />
             <span className="text-[11px] text-muted">{label(h.hour)}</span>
           </li>

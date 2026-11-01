@@ -8,7 +8,7 @@ import { useStaff } from "@/components/staff-provider";
 import { SerialEntry } from "@/components/stock/serial-entry";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
-import { formatTaka, searchProducts } from "@/lib/sale";
+import { formatDay, formatTaka, searchProducts } from "@/lib/sale";
 import type {
   LedgerEntry, Product, PurchaseOrderRow, PurchaseOrderStatus, ReorderSuggestion,
   RequisitionRow, RequisitionStatus, Supplier, SupplierAging,
@@ -971,7 +971,7 @@ function PoPrint({ po, onBack }: { po: PurchaseOrderRow; onBack: () => void }) {
           </div>
           <div className="text-right">
             <p className="code font-bold">{po.poNo}</p>
-            <p className="text-[13px] text-muted">{new Date(po.createdAt).toLocaleDateString("en-GB")}</p>
+            <p className="text-[13px] text-muted">{formatDay(po.createdAt)}</p>
           </div>
         </header>
 
@@ -1235,7 +1235,7 @@ function SupplierDues({
                         <li key={`${e.at}-${i}`} className="flex flex-wrap justify-between gap-2">
                           <span>
                             <span className="text-[13px] text-muted">
-                              {new Date(e.at).toLocaleDateString("en-GB")}
+                              {formatDay(e.at)}
                             </span>{" "}
                             {LEDGER_WORDS[e.kind]} · <span className="code">{e.document}</span>
                             {e.note && <span className="text-[13px] text-muted"> · {e.note}</span>}

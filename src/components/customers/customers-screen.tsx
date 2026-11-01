@@ -7,7 +7,7 @@ import {
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
-import { formatTaka } from "@/lib/sale";
+import { formatDay, formatTaka } from "@/lib/sale";
 import type {
   CustomerGroup, CustomerRow, CustomerStatement, DueRow, PaymentReceipt, PriceList,
 } from "@/lib/types";
@@ -548,7 +548,7 @@ function Statement({
             <li key={`${e.at}-${i}`} className="flex flex-wrap justify-between gap-2">
               <span>
                 <span className="text-[13px] text-muted">
-                  {new Date(e.at).toLocaleDateString("en-GB")}
+                  {formatDay(e.at)}
                 </span>{" "}
                 {e.kind === "opening" ? "Already owed"
                   : e.kind === "sale" ? "Bought on due"
@@ -750,7 +750,7 @@ function StatementPrint({ st, onBack }: { st: CustomerStatement; onBack: () => v
               return (
                 <tr key={`${e.at}-${i}`} className="border-b border-subtle">
                   <td className="py-1.5 text-[13px]">
-                    {new Date(e.at).toLocaleDateString("en-GB")}
+                    {formatDay(e.at)}
                   </td>
                   <td className="py-1.5">
                     <span className="code text-[13px]">{e.document}</span>
@@ -849,7 +849,7 @@ function Dues({
                   {r.company && ` · ${r.company}`}
                   {r.group && ` · ${r.group}`}
                   {r.oldestDue && ` · oldest ${r.oldestDue}`}
-                  {r.lastPaid && ` · last paid ${new Date(r.lastPaid).toLocaleDateString("en-GB")}`}
+                  {r.lastPaid && ` · last paid ${formatDay(r.lastPaid)}`}
                 </span>
               </span>
               <span className="flex flex-col text-right">

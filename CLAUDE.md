@@ -59,7 +59,7 @@ studying it: **`docs/notes/bms.md`**. The three that matter most —
 - `supabase/migrations/` — timestamped, append-only. **Never edit an applied migration**;
   `create or replace` a function in a later one instead.
 - `supabase/tests/sales_rules_test.sql` — every database rule, run by `pnpm test:db`
-  against a local Postgres. 518 checks. Add to it whenever you add a rule.
+  against a local Postgres. 607 checks. Add to it whenever you add a rule.
 - `src/lib/backend/` — the `Backend` interface, with `supabase.ts` and `demo.ts`.
   **Anything added to the interface needs a demo implementation that mirrors the same
   rules**, or demo mode shows figures the real shop cannot produce.

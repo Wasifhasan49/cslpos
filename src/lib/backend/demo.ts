@@ -93,6 +93,23 @@ export function createDemoBackend(): Backend {
     managers_see_accounts: false, managers_see_settings: false,
     sales_documents: false, hr: false, hr_extra_fields: false, distribution: false,
   };
+  // The sample data is deliberately forgotten on reload, but the feature switches are
+  // not data — somebody trying the app turns Accounts on to look at it, reloads, and
+  // would otherwise find the menu back to its smallest shape.
+  const FEATURE_STORE = "csl-demo-features";
+  try {
+    const saved = globalThis.localStorage?.getItem(FEATURE_STORE);
+    if (saved) {
+      for (const [k, v] of Object.entries(JSON.parse(saved) as Record<string, boolean>)) {
+        if (k in features) features[k] = Boolean(v);
+      }
+    }
+  } catch { /* a private window, or storage turned off: the defaults are fine */ }
+  const rememberFeatures = () => {
+    try {
+      globalThis.localStorage?.setItem(FEATURE_STORE, JSON.stringify(features));
+    } catch { /* nothing to do about it, and nothing depends on it */ }
+  };
   const shopDetails = {
     name: DEMO_SHOP_NAME, address: "123 Example Road, Dhaka", phone: "01700-000000",
     email: null as string | null, logoUrl: null as string | null, binVat: null as string | null,
@@ -1390,7 +1407,10 @@ export function createDemoBackend(): Backend {
       });
     },
 
-    async setFeature(feature: FeatureKey, enabled: boolean) { features[feature] = enabled; },
+    async setFeature(feature: FeatureKey, enabled: boolean) {
+      features[feature] = enabled;
+      rememberFeatures();
+    },
 
     async saveShopDetails(values) {
       Object.assign(shopDetails, {
@@ -1491,6 +1511,13 @@ export function createDemoBackend(): Backend {
     async upsertProduct(id, values) {
       if (staff.role === "cashier") fail("NOT_ALLOWED:edit_settings");
       const v = values as Record<string, string | number | boolean | null>;
+      // One code, one product: it is what a barcode scan matches on.
+      const wantedCode = String(v.code ?? "").trim();
+      if (wantedCode) {
+        const taken = catalogue.find(
+          (x) => x.id !== id && x.code.toLowerCase() === wantedCode.toLowerCase());
+        if (taken) fail(`PRODUCT_CODE_TAKEN:${taken.name}`);
+      }
       if (id) {
         const p = catalogue.find((x) => x.id === id);
         if (!p) fail("PRODUCT_NOT_FOUND");
@@ -3364,7 +3391,12 @@ export function createDemoBackend(): Backend {
         .slice(0, limit)
         .map((s) => structuredClone({
           id: s.id, staff: s.staff, openedAt: s.openedAt, closedAt: s.closedAt,
-          openingCash: s.openingCash, expectedCash: s.expectedCash,
+          openingCash: s.openingCash,
+          // An open drawer has no counted figure yet, so show where it stands now —
+          // the same thing shift_list() does with expected_cash() in the database.
+          expectedCash: s.closedAt
+            ? s.expectedCash
+            : s.openingCash + (s.byMethod.cash ?? 0) + s.cashIn - s.cashOut,
           countedCash: s.countedCash, difference: s.difference, overLimit: s.overLimit,
           note: s.note, noteCounts: s.noteCounts, salesCount: s.salesCount,
           byMethod: s.byMethod, cashIn: s.cashIn, cashOut: s.cashOut,
@@ -4180,6 +4212,7 @@ export function createDemoBackend(): Backend {
       return {
         from: from ?? "2000-01-01", sales: posted, grns: 0, supplierReturns: 0,
         saleReturns: 0, customerPayments: 0, supplierPayments: 0, cashMovements: 0,
+        stockBroughtIn: Math.abs(gap),
       };
     },
 

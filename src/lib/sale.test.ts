@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDemoBackend } from "./backend/demo";
 import {
-  addMonths, computeTotals, dhakaDate, dhakaToday, friendlyError, isSessionExpired, pinScreenError, quickCashAmounts, refundFor, SALE_ERROR_CODES, saleBlocker, searchProducts, type CheckoutState,
+  addMonths, computeTotals, dhakaDate, dhakaToday, formatDay, friendlyError, isSessionExpired, pinScreenError, quickCashAmounts, refundFor, SALE_ERROR_CODES, saleBlocker, searchProducts, type CheckoutState,
 } from "./sale";
 
 // Stock is per branch now, so the product map comes from a branch.
@@ -48,6 +48,12 @@ describe("helpers", () => {
     expect(addMonths("2026-01-31", 1)).toBe("2026-02-28");
   });
   it("Dhaka date is UTC+6", () => expect(dhakaToday(new Date("2026-10-16T19:30:00Z"))).toBe("2026-10-17"));
+  it("a shown day is the Dhaka day, not the device's", () => {
+    // 19:30 UTC is already the next morning in Dhaka: a sale made then belongs to
+    // the 17th on every screen, whatever timezone the phone is set to.
+    expect(formatDay("2026-10-16T19:30:00Z")).toBe("17/10/2026");
+    expect(formatDay("2026-10-16T17:00:00Z")).toBe("16/10/2026");
+  });
   it("search: exact code first, words in any order", () => {
     expect(searchProducts(products, "VEN-HDMI-15", null)[0].id).toBe("a2");
     expect(searchProducts(products, "audio vention", null).map((p) => p.id)).toEqual(["a1"]);
@@ -60,6 +66,8 @@ describe("helpers", () => {
     expect(friendlyError("WEAK_PIN")).toMatch(/harder to guess/);
     expect(friendlyError("NOT_MANAGER")).toMatch(/owners and managers/);
     expect(friendlyError("APPROVAL_NOT_VALID")).toMatch(/expired or was already used/);
+    // A refusal that quotes money writes it the way every other screen does.
+    expect(friendlyError("MORE_THAN_HELD:50000")).toContain("৳ 50,000");
   });
 
   it("keeps an unknown code visible instead of blaming the internet", () => {

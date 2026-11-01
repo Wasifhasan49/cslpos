@@ -4,7 +4,7 @@ import * as React from "react";
 import { X } from "lucide-react";
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
-import { formatTaka } from "@/lib/sale";
+import { formatDay, formatTaka } from "@/lib/sale";
 import type { AccountLedger } from "@/lib/types";
 
 /**
@@ -71,7 +71,7 @@ export function LedgerView({ accountId, branchId, onClose, onFail }: {
                     <td className="p-3">
                       {l.narration}
                       <span className="block text-[13px] text-muted">
-                        {l.date} · <span className="code">{l.entryNo}</span>
+                        {formatDay(l.date)} · <span className="code">{l.entryNo}</span>
                         {l.party && ` · ${l.party}`}
                         {l.note && ` · ${l.note}`}
                       </span>

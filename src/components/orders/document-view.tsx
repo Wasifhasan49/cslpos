@@ -5,7 +5,7 @@ import { Check, Printer, Truck, X } from "lucide-react";
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { formatTaka } from "@/lib/sale";
+import { formatDay, formatTaka } from "@/lib/sale";
 import type { SalesDocument } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { statusWords } from "./orders-screen";
@@ -64,7 +64,7 @@ export function DocumentView({ kind, id, onClose, onDone, onFail }: {
           <p className="text-[13px] text-muted">
             {doc.customer}
             {doc.attention && ` · for the attention of ${doc.attention}`}
-            {" · "}{doc.date} · {statusWords(doc.status)}
+            {" · "}{formatDay(doc.date)} · {statusWords(doc.status)}
           </p>
           {doc.orderNo && (
             <p className="text-[13px] text-muted">
@@ -78,12 +78,12 @@ export function DocumentView({ kind, id, onClose, onDone, onFail }: {
           )}
           {doc.validUntil && (
             <p className="text-[13px] text-muted">
-              Prices good until <span className="num">{doc.validUntil}</span>
+              Prices good until <span className="num">{formatDay(doc.validUntil)}</span>
             </p>
           )}
           {doc.deliveryDate && (
             <p className="text-[13px] text-muted">
-              Wanted by <span className="num">{doc.deliveryDate}</span>
+              Wanted by <span className="num">{formatDay(doc.deliveryDate)}</span>
             </p>
           )}
         </div>
@@ -189,7 +189,7 @@ export function DocumentView({ kind, id, onClose, onDone, onFail }: {
                   onClick={() => onDone("", { kind: "challans", id: c.id })}
                 >
                   <span className="code">{c.challanNo}</span>
-                  <span className="text-muted"> · {c.date} · {statusWords(c.status)}</span>
+                  <span className="text-muted"> · {formatDay(c.date)} · {statusWords(c.status)}</span>
                 </button>
               </li>
             ))}
