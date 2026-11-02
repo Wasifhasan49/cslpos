@@ -727,7 +727,8 @@ the recorded shortfall, and every entry balances.
 Task: the reports an accountant and owner need, and closing periods.
 
 docs/BMS_REPORTS.md is the checklist: every report there with an ID (P-, S-, ST-, A-, T-)
-is in scope, with the columns, grouping and totals it lists. Match content, not look; its
+is in scope, with the columns, grouping and totals it lists. Match content and look
+(its section 2); its
 section 3 lists BMS errors to test against, section 4 what the reports need underneath
 (including FIFO quantity layers; cost stays weighted average). Reports marked "needs
 P14a" or "needs P14c" are built in those prompts: make each report one config entry so

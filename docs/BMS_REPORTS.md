@@ -4,9 +4,9 @@ This is the reference for P14 (reports) and P16 (printing). Use this file, not t
 `reports_samples/`. It was written from all 100 PDFs, printed from BMS at the store on
 22 Oct 2026, and from the 5 photos of the report menus.
 
-**What to copy:** what each report contains: the columns, the grouping, the subtotals and the
-filters. **What not to copy:** the look and the bugs. BMS's quirks and errors are listed in
-section 3 so we don't repeat them.
+**What to copy:** what each report contains (the columns, the grouping, the subtotals and the
+filters) **and how it looks** (section 2), using the shop's own name, logo and address.
+**What not to copy:** anything that names BMS, and BMS's bugs (section 3).
 
 IDs used below: **P** = Purchase Register, **S** = Sales Register, **ST** = Stock Register,
 **A** = Accounts Register, **T** = Transfer Register. The number is the report's position in
@@ -44,6 +44,15 @@ day (22 Oct), so many are empty and show only headings. Their columns are still 
   items were not captured. The Accounts list has at least one more (A-24).
 
 ## 2. Common layout of every printout
+
+**Our printouts copy this look** for every report and every A4 document (invoice, quotation,
+sales order, challan, GRN, PO, transfer slip, statements, vouchers): shop logo top left, shop
+name bold beside it, branch address under it, phone/email only if filled in; title bold,
+underlined and centred, date range under it; bordered tables with grid lines, bold group
+headings, bold subtotal rows, a double rule under grand totals; "Print Date & Time" bottom
+left and "Page X of Y" bottom right; column headings repeated on every page. The logo, name
+and address come from the shop's own settings (each shop's own, never CSL's hard-coded), and
+nothing names BMS or Billing Master. Fix the presentation bugs in section 3, item 9.
 
 - **Header:** logo on the left, shop name in bold, branch address on one line, then
   Phone / Email / Fax / Web (printed even when blank). Below that, the report title (bold,
