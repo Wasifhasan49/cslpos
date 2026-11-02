@@ -8,7 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/input";
 import { suggestCleanups, type Cleanup } from "@/lib/import/clean";
 import { guessMapping, readSheet, type Grid, type Mapping, type Sheet } from "@/lib/import/parse";
-import { readWorkbook, UnreadableFile, type Grids } from "@/lib/import/workbook";
+import { linesFrom, type PdfPage, type PdfWord } from "@/lib/import/pdf-text";
+import { readImportFile, UnreadableFile, type Grids } from "@/lib/import/workbook";
 import { importableRows, reviewRows, type ReviewResult } from "@/lib/import/review";
 import { IMPORT_KINDS, kindSpec, type ImportKind } from "@/lib/import/schema";
 import type { PriceList } from "@/lib/types";
@@ -27,6 +28,10 @@ export function ImportScreen() {
   const [cleanups, setCleanups] = React.useState<Cleanup[]>([]);
   const [accepted, setAccepted] = React.useState<Set<string>>(new Set());
   const [review, setReview] = React.useState<ReviewResult | null>(null);
+  /** What the file itself had to say: duplicate traders, totals that did not add up. */
+  const [notes, setNotes] = React.useState<string[]>([]);
+  /** Warranty in months per product group, for the BMS files that carry none. */
+  const [warranty, setWarranty] = React.useState<Record<string, string>>({});
   const [lists, setLists] = React.useState<PriceList[]>([]);
   const [priceListId, setPriceListId] = React.useState("");
   const [result, setResult] = React.useState<Record<string, number> | null>(null);
@@ -74,7 +79,34 @@ export function ImportScreen() {
         return out;
       };
 
-      const grids = await readWorkbook(buf, file.name, loadXlsx);
+      // pdf.js, likewise only when the bytes are a PDF. It is read page by page into
+      // positioned words; `bms-pdf.ts` works out which report it is from there.
+      const loadPdf = async (bytes: ArrayBuffer): Promise<PdfPage[]> => {
+        const pdfjs = await import("pdfjs-dist");
+        // The worker is a separate file, so the bundler is told where it is rather than
+        // being left to guess: pdf.js would otherwise try to fetch it from the page's
+        // own URL and fail on /settings/import.
+        pdfjs.GlobalWorkerOptions.workerSrc =
+          new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+        const doc = await pdfjs.getDocument({ data: new Uint8Array(bytes) }).promise;
+        const pages: PdfPage[] = [];
+        for (let n = 1; n <= doc.numPages; n++) {
+          const page = await doc.getPage(n);
+          const view = page.getViewport({ scale: 1 });
+          const content = await page.getTextContent();
+          const words: PdfWord[] = [];
+          for (const item of content.items) {
+            if (!("str" in item)) continue;
+            const t = item.transform as number[];
+            words.push({ text: item.str, x: t[4], y: t[5], size: Math.abs(t[0]) || 0 });
+          }
+          pages.push({ lines: linesFrom(words), width: view.width, height: view.height });
+        }
+        return pages;
+      };
+
+      const { grids, warnings } = await readImportFile(buf, file.name, { xlsx: loadXlsx, pdf: loadPdf });
+      setNotes(warnings);
 
       const found: Record<string, Sheet> = {};
       for (const [name, grid] of Object.entries(grids)) {
@@ -132,6 +164,7 @@ export function ImportScreen() {
       setReview(reviewRows({
         kind, rows: sheet.rows, mapping, existingKeys, knownProductCodes,
         renames: Object.fromEntries(fixes.map((f) => [f.from, f.to])),
+        warrantyByGroup: monthsByGroup(warranty),
       }));
       setStep("review");
     } catch (e) {
@@ -142,7 +175,9 @@ export function ImportScreen() {
   };
 
   /** Re-review whenever the owner unticks a suggested clean-up. */
-  const reReview = React.useCallback(async (nextAccepted: Set<string>) => {
+  const reReview = React.useCallback(async (
+    nextAccepted: Set<string>, nextWarranty: Record<string, string>,
+  ) => {
     if (!kind || !sheet) return;
     const existingKeys = await backend.existingKeys(kind);
     const knownProductCodes = kind === "stock" || kind === "serials"
@@ -150,6 +185,7 @@ export function ImportScreen() {
     setReview(reviewRows({
       kind, rows: sheet.rows, mapping, existingKeys, knownProductCodes,
       renames: Object.fromEntries(cleanups.filter((f) => nextAccepted.has(f.from)).map((f) => [f.from, f.to])),
+      warrantyByGroup: monthsByGroup(nextWarranty),
     }));
   }, [backend, kind, sheet, mapping, cleanups]);
 
@@ -180,7 +216,7 @@ export function ImportScreen() {
   const restart = () => {
     setKind(null); setStep("pick"); setSheets({}); setSheetName(""); setFileName("");
     setMapping({}); setCleanups([]); setAccepted(new Set()); setReview(null);
-    setResult(null); setDryRun(true); setError("");
+    setResult(null); setDryRun(true); setError(""); setNotes([]); setWarranty({});
   };
 
   // Checked after every hook has run, so the hook order never changes between renders.
@@ -211,8 +247,8 @@ export function ImportScreen() {
       {step === "pick" && (
         <>
           <p className="text-ink-soft">
-            Move a shop in from BMS, or from any spreadsheet. Do products first: stock and
-            serial numbers are matched to them by code.
+            Move a shop in from BMS&rsquo;s report PDFs, or from any spreadsheet. Do
+            products first: stock and serial numbers are matched to them by code.
           </p>
           <ul className="flex flex-col gap-2">
             {IMPORT_KINDS.map((k) => (
@@ -239,17 +275,18 @@ export function ImportScreen() {
         <div className="flex flex-col gap-3">
           <h2 className="font-semibold">Choose the {kindSpec(kind).label.toLowerCase()} file</h2>
           <p className="text-[13px] text-muted">
-            An Excel or CSV file — including the .xls that BMS&rsquo;s report viewer saves.
-            It&rsquo;s read here on your own computer, and only the rows you confirm are sent
-            anywhere.
+            An Excel or CSV file, the .xls that BMS&rsquo;s report viewer saves, or one of
+            BMS&rsquo;s report PDFs — Current Stock with cost, the same report with serials,
+            All Traders Due List, Supplier Information or Customer Information. It&rsquo;s
+            read here on your own computer, and only the rows you confirm are sent anywhere.
           </p>
           <label className="flex min-h-32 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-line-strong bg-subtle p-6 text-center">
             <Upload className="size-8 text-line-strong" aria-hidden />
             <span className="font-semibold">{busy ? "Reading…" : "Pick a file"}</span>
-            <span className="text-[13px] text-muted">.xlsx, .xls, .csv or .txt</span>
+            <span className="text-[13px] text-muted">.pdf, .xlsx, .xls, .csv or .txt</span>
             <input
               type="file"
-              accept=".xlsx,.xls,.csv,.txt,.tsv,text/csv,text/plain,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              accept=".pdf,.xlsx,.xls,.csv,.txt,.tsv,application/pdf,text/csv,text/plain,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               className="sr-only"
               onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); }}
             />
@@ -368,6 +405,49 @@ export function ImportScreen() {
             <Tally label="with a problem" n={review.counts.problem} tone="bad" />
           </div>
 
+          {notes.length > 0 && (
+            <section className="flex flex-col gap-2 rounded-xl border border-warn-line bg-warn-bg p-4">
+              <h3 className="flex items-center gap-2 font-semibold text-warn-ink">
+                <TriangleAlert className="size-4" aria-hidden /> Worth a look first
+              </h3>
+              <ul className="flex flex-col gap-1 text-[13px] text-warn-ink">
+                {notes.map((n) => <li key={n}>{n}</li>)}
+              </ul>
+            </section>
+          )}
+
+          {kind === "products" && groupsIn(sheet, mapping).length > 0 && (
+            <section className="flex flex-col gap-2 rounded-xl border border-line bg-surface p-4">
+              <h3 className="font-semibold">Warranty, group by group</h3>
+              <p className="text-[13px] text-muted">
+                No BMS report carries a warranty, so it has to be said here. Fill in the
+                months for the groups that have one and leave the rest empty — a product
+                that already says its own is left alone.
+              </p>
+              {/* A BMS catalogue has well over a hundred groups, so the list scrolls
+                  rather than burying the import button under it. */}
+              <ul className="flex max-h-80 flex-col gap-2 overflow-y-auto">
+                {groupsIn(sheet, mapping).map((g) => (
+                  <li key={g} className="flex flex-wrap items-center gap-3">
+                    <span className="min-w-[180px] flex-1">{g}</span>
+                    <input
+                      inputMode="numeric"
+                      aria-label={`Warranty in months for ${g}`}
+                      value={warranty[g] ?? ""}
+                      placeholder="months"
+                      onChange={(e) => {
+                        const next = { ...warranty, [g]: e.target.value.replace(/\D/g, "") };
+                        setWarranty(next);
+                        void reReview(accepted, next);
+                      }}
+                      className="num h-11 w-24 rounded-lg border border-line-strong bg-surface px-3 text-base"
+                    />
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
           {cleanups.length > 0 && (
             <section className="flex flex-col gap-2 rounded-xl border border-line bg-surface p-4">
               <h3 className="font-semibold">Spelling to tidy up</h3>
@@ -384,7 +464,7 @@ export function ImportScreen() {
                       const next = new Set(accepted);
                       if (e.target.checked) next.add(c.from); else next.delete(c.from);
                       setAccepted(next);
-                      void reReview(next);
+                      void reReview(next, warranty);
                     }}
                     className="size-5 accent-[var(--color-brand)]"
                   />
@@ -491,6 +571,27 @@ export function ImportScreen() {
       <Back />
     </Main>
   );
+}
+
+/** The product groups in the file, in the order they first appear. */
+function groupsIn(sheet: Sheet | undefined, mapping: Mapping): string[] {
+  const header = mapping.category;
+  if (!sheet || !header) return [];
+  const seen: string[] = [];
+  for (const row of sheet.rows) {
+    const v = (row[header] ?? "").trim();
+    if (v !== "" && !seen.includes(v)) seen.push(v);
+  }
+  return seen;
+}
+
+/** Only the groups somebody actually typed a figure for. */
+function monthsByGroup(typed: Record<string, string>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [group, months] of Object.entries(typed)) {
+    if (months.trim() !== "") out[group] = Number(months);
+  }
+  return out;
 }
 
 function Main({ children }: { children: React.ReactNode }) {

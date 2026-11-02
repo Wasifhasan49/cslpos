@@ -857,6 +857,79 @@ select pg_temp.check((public.resolve_price(:'MOUSE', :'BRANCH_A')->>'price')::nu
 select pg_temp.expect_error(format($q$select public.bulk_update_prices(array['%s']::uuid[], '%s', 'sideways', 10)$q$, :'MOUSE', :LIST_RETAIL), 'BAD_PRICE_MODE');
 select pg_temp.expect_error(format($q$select public.bulk_update_prices(array[]::uuid[], '%s', 'set', 10)$q$, :LIST_RETAIL), 'NO_PRODUCTS_PICKED');
 
+-- DONE-WHEN: a catalogue that arrived with no prices can be priced from cost.
+-- BMS keeps no selling price, so an import brings in a product worth nothing until
+-- somebody says what it sells for. A percentage of nothing is nothing, which is why
+-- there is a mode that starts from cost instead.
+select pg_temp.check(public.round_price(95.914) = 100, 'a price goes up to the next five taka, not down to 95.91');
+select pg_temp.check(public.round_price(1234) = 1240, 'a four-figure price steps in tens');
+select pg_temp.check(public.round_price(66001) = 66050, 'and a laptop steps in fifties');
+select pg_temp.check(public.round_price(0) = 0 and public.round_price(null) = 0, 'and nothing stays nothing');
+
+do $$
+declare r jsonb;
+begin
+  -- The mouse cost 320. 40% on top is 448, which a shop writes as 450.
+  r := public.bulk_update_prices(array['00000000-0000-4000-8000-0000000000a4']::uuid[],
+        (select id from public.price_lists where shop_id = '00000000-0000-4000-8000-000000000001' and is_default),
+        'cost_plus', 40, null, true);
+  if (r->'changes'->0->>'to')::numeric <> 450 then raise exception 'WRONG COST-PLUS PRICE: %', r; end if;
+  raise notice 'ok: cost plus a markup prices a product that has no price of its own';
+end $$;
+
+-- A product nothing has ever been received for has no cost, so there is nothing to mark
+-- up. It is left where it is and told why, rather than being put on the shelf at zero.
+do $$
+declare r jsonb; v_id uuid;
+begin
+  v_id := (public.upsert_product(null, '{"name":"Never delivered","code":"ND-1","price":99}')->>'id')::uuid;
+  r := public.bulk_update_prices(array[v_id],
+        (select id from public.price_lists where shop_id = '00000000-0000-4000-8000-000000000001' and is_default),
+        'cost_plus', 40, null, false);
+  if (r->'changes'->0->>'to')::numeric <> 99 then raise exception 'PRICED WITHOUT A COST: %', r; end if;
+  if (r->'changes'->0->>'note') not like '%no cost recorded%' then raise exception 'NO REASON GIVEN: %', r; end if;
+  raise notice 'ok: a product with no cost on record keeps its price, and is told why';
+end $$;
+
+-- A price change can go DOWN. resolve_price() calls the list price the floor when the
+-- owner set no minimum, which is the right answer for the counter and the wrong one
+-- here: taking it for a floor would mean no bulk change could ever lower a price.
+do $$
+declare r jsonb;
+begin
+  r := public.bulk_update_prices(array['00000000-0000-4000-8000-0000000000a4']::uuid[],
+        (select id from public.price_lists where shop_id = '00000000-0000-4000-8000-000000000001' and is_default),
+        'percent', -10, null, true);
+  if (r->'changes'->0->>'to')::numeric >= (r->'changes'->0->>'from')::numeric then
+    raise exception 'A PRICE CUT WENT NOWHERE: %', r;
+  end if;
+  raise notice 'ok: a bulk price cut really cuts the price';
+end $$;
+
+-- And a bulk change does not quietly give a product a floor it never had.
+select pg_temp.check(
+  (select min_price from public.product_prices
+    where product_id = :'MOUSE' and price_list_id = :LIST_RETAIL and branch_id is null) is null,
+  'and a bulk change leaves a product without a floor still without one');
+
+-- The owner's own floor is the last word: a markup landing under it is held up to it,
+-- because the counter is not allowed to sell below it anyway.
+do $$
+declare r jsonb; v_id uuid;
+begin
+  v_id := (public.upsert_product(null, '{"name":"Floored cable","code":"FL-1","price":100}')->>'id')::uuid;
+  insert into public.product_costs (shop_id, product_id, cost)
+  values ('00000000-0000-4000-8000-000000000001', v_id, 100);
+  perform public.set_prices(v_id, (select id from public.price_lists where shop_id = '00000000-0000-4000-8000-000000000001' and is_default),
+                            100, null, 500, null);
+  r := public.bulk_update_prices(array[v_id],
+        (select id from public.price_lists where shop_id = '00000000-0000-4000-8000-000000000001' and is_default),
+        'cost_plus', 10, null, true);
+  if (r->'changes'->0->>'to')::numeric <> 500 then raise exception 'FLOOR IGNORED: %', r; end if;
+  if (r->'changes'->0->>'note') not like '%lowest price%' then raise exception 'NO REASON GIVEN: %', r; end if;
+  raise notice 'ok: a markup that lands under the lowest allowed price is held up to it';
+end $$;
+
 -- Price history is in the audit log, which is how an owner sees who changed what.
 -- One direct set_prices and one through the bulk change: both logged, and the bulk
 -- dry run logged nothing because it wrote nothing.

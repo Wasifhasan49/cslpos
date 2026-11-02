@@ -45,6 +45,14 @@ export interface ReviewInput {
   /** For stock and serials: product codes that exist, so a row for something the
    *  catalogue has never heard of is flagged instead of silently dropped. */
   knownProductCodes?: Set<string>;
+  /**
+   * Warranty in months, per product group, for files that carry no warranty column.
+   *
+   * No BMS report has one — the shop keeps it in its head ("adapters, six months") —
+   * and setting it 1,600 times by hand afterwards is not something anybody would do.
+   * It only fills a gap: a row that states its own warranty keeps it.
+   */
+  warrantyByGroup?: Record<string, number>;
 }
 
 /**
@@ -125,6 +133,13 @@ export function reviewRows(input: ReviewInput): ReviewResult {
           values[field.key] = renames[t] ?? t;
         }
       }
+    }
+
+    // The group's warranty, where the file had none of its own.
+    const group = String(values.category ?? "");
+    if (input.warrantyByGroup && values.warranty == null && group !== ""
+        && input.warrantyByGroup[group] != null) {
+      values.warranty = input.warrantyByGroup[group];
     }
 
     const id = String(values[key] ?? "");

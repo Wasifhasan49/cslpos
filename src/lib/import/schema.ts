@@ -42,7 +42,7 @@ export const IMPORT_KINDS: KindSpec[] = [
     kind: "products",
     label: "Products",
     what: "The catalogue: codes, names, categories, brands, prices and warranty.",
-    from: "BMS → Product List",
+    from: "BMS → Current Stock (Combined) with cost",
     fields: [
       CODE,
       {
@@ -94,7 +94,7 @@ export const IMPORT_KINDS: KindSpec[] = [
     kind: "stock",
     label: "Opening stock",
     what: "What is on the shelf right now. It comes in as an opening-stock adjustment, so the history says where it came from.",
-    from: "BMS → Stock Report",
+    from: "BMS → Current Stock (Combined) with cost",
     fields: [
       CODE,
       {
@@ -108,7 +108,7 @@ export const IMPORT_KINDS: KindSpec[] = [
     kind: "serials",
     label: "Serial numbers",
     what: "Serial and IMEI numbers for the items that have them. Anything already sold is skipped.",
-    from: "BMS → Serial/IMEI Report",
+    from: "BMS → Current Stock (Combined) with Serial And Cost",
     fields: [
       CODE,
       {
@@ -127,7 +127,7 @@ export const IMPORT_KINDS: KindSpec[] = [
     kind: "customers",
     label: "Customers",
     what: "Customers and what they owe. The dues become opening balances, ready for the accounts.",
-    from: "BMS → Customer List",
+    from: "BMS → Customer Information, or All Traders Due List",
     fields: [
       {
         key: "phone", label: "Mobile", required: true, type: "phone",
@@ -146,7 +146,7 @@ export const IMPORT_KINDS: KindSpec[] = [
     kind: "suppliers",
     label: "Suppliers",
     what: "Suppliers and what the shop owes them, as opening balances.",
-    from: "BMS → Supplier List",
+    from: "BMS → Supplier Information, or All Traders Due List",
     fields: [
       { key: "name", label: "Name", required: true, type: "text", aliases: ["supplier name", "name", "party name", "vendor name"] },
       { key: "phone", label: "Mobile", type: "phone", aliases: ["mobile no", "mobile", "phone", "phone no", "contact no"] },

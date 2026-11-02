@@ -5,7 +5,8 @@
 // the branch switcher, the whole menu, the approval PIN screen — is reachable. Demo
 // mode is also the sales demo. Nothing here names a real shop.
 import {
-  addMonths, dhakaDate, dhakaToday, friendlyError, isValidPhone, refundFor, roundTaka,
+  addMonths, dhakaDate, dhakaToday, friendlyError, isValidPhone, refundFor, roundPrice,
+  roundTaka,
 } from "../sale";
 import type {
   ApprovalResult, Approver, BranchAdmin, BulkPriceChange, CatalogueRow, CustomerLookup,
@@ -1575,20 +1576,44 @@ export function createDemoBackend(): Backend {
 
     async bulkUpdatePrices({ productIds, priceListId, mode, value, dryRun }): Promise<BulkPriceChange[]> {
       if (staff.role === "cashier") fail("NOT_ALLOWED:edit_settings");
-      if (!["set", "percent", "amount"].includes(mode)) fail(`BAD_PRICE_MODE:${mode}`);
+      if (!["set", "percent", "amount", "cost_plus"].includes(mode)) fail(`BAD_PRICE_MODE:${mode}`);
       if (productIds.length === 0) fail("NO_PRODUCTS_PICKED");
       const out: BulkPriceChange[] = [];
       for (const id of productIds) {
         const cur = priceFor(id, priceListId);
-        const next = Math.max(
-          mode === "set" ? value
+        // The band as it is STORED, not as priceFor() reports it: priceFor mirrors
+        // resolve_price(), which calls the list price the floor when the owner set no
+        // minimum. That is the counter's answer, and taking it for a floor here would
+        // mean no bulk change could ever lower a price.
+        const stored = prices[priceListId]?.[id] ?? prices["pl-retail"][id];
+        const floor = stored?.min ?? null;
+        const ceiling = stored?.max ?? null;
+        const cost = costs[id] ?? 0;
+        let note: string | null = null;
+        let next: number;
+        if (mode === "cost_plus") {
+          if (cost <= 0) { next = cur.price; note = "no cost recorded yet, so this one is left alone"; }
+          else next = roundPrice(cost * (100 + value) / 100);
+        } else {
+          next = mode === "set" ? value
             : mode === "percent" ? Math.round(cur.price * (100 + value)) / 100
-            : cur.price + value,
-          0,
-        );
-        out.push({ productId: id, name: catalogue.find((p) => p.id === id)?.name ?? "", from: cur.price, to: next });
-        if (!dryRun) {
-          prices[priceListId][id] = { ...cur, price: next };
+            : cur.price + value;
+        }
+        next = Math.max(next, 0);
+        // The owner's own floor and ceiling have the last word, as in bulk_update_prices().
+        if (floor != null && next < floor) {
+          next = floor;
+          note = note ?? "held up to the lowest price allowed";
+        }
+        if (ceiling != null && next > ceiling) {
+          next = ceiling;
+          note = note ?? "held down to the highest price allowed";
+        }
+        out.push({ productId: id, name: catalogue.find((p) => p.id === id)?.name ?? "", from: cur.price, to: next, note });
+        if (!dryRun && next !== cur.price) {
+          // The stored band goes back as it was, floor and all — writing priceFor()'s
+          // answer would give the product a floor equal to its old price.
+          prices[priceListId][id] = { ...cur, price: next, min: floor, max: ceiling };
           if (priceLists.find((l) => l.id === priceListId)?.isDefault) {
             const p = catalogue.find((x) => x.id === id);
             if (p) p.price = next;

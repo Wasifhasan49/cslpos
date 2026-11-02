@@ -15,7 +15,8 @@
     "shop:init": "tsx scripts/shop-init.mts",
     "staff:add": "tsx scripts/create-staff.mts",
     "reports:gen": "tsx scripts/gen-reports.mts",
-    "check": "tsx scripts/doctor.mts"
+    "check": "tsx scripts/doctor.mts",
+    "check:pdf": "tsx scripts/check-bms-pdf.mts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.7",
@@ -25,6 +26,7 @@
     "exceljs": "^4.4.0",
     "lucide-react": "^1.57.0",
     "next": "15.5.28",
+    "pdfjs-dist": "^6.4.299",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "tailwind-merge": "^3.7.0",

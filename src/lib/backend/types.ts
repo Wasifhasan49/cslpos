@@ -94,7 +94,7 @@ export interface Backend {
   /** `dryRun` returns what WOULD change without changing it, for the preview. */
   bulkUpdatePrices(input: {
     productIds: string[]; priceListId: string;
-    mode: "set" | "percent" | "amount"; value: number;
+    mode: "set" | "percent" | "amount" | "cost_plus"; value: number;
     branchId?: string | null; dryRun: boolean;
   }): Promise<BulkPriceChange[]>;
   mergeCategories(fromId: string, intoId: string): Promise<{ productsMoved: number }>;

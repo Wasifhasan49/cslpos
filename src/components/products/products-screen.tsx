@@ -209,6 +209,8 @@ export function ProductsScreen() {
       {picking && (
         <BulkPrices
           picked={[...picked]}
+          shown={shown.map((r) => r.id)}
+          onPickShown={() => setPicked(new Set(shown.map((r) => r.id)))}
           lists={lists}
           listId={listId}
           busy={busy}
@@ -547,16 +549,22 @@ function ProductForm({
 // ---------------------------------------------------------------------------
 
 function BulkPrices({
-  picked, lists, listId, busy, onPreview, onApply,
+  picked, shown, onPickShown, lists, listId, busy, onPreview, onApply,
 }: {
   picked: string[];
+  /** The ids the filters have narrowed to, so a whole group can be taken in one tap. */
+  shown: string[];
+  onPickShown: () => void;
   lists: PriceList[];
   listId: string | null;
   busy: boolean;
-  onPreview: (input: { productIds: string[]; priceListId: string; mode: "set" | "percent" | "amount"; value: number }) => Promise<BulkPriceChange[]>;
-  onApply: (input: { productIds: string[]; priceListId: string; mode: "set" | "percent" | "amount"; value: number }) => Promise<void>;
+  onPreview: (input: { productIds: string[]; priceListId: string; mode: "set" | "percent" | "amount" | "cost_plus"; value: number }) => Promise<BulkPriceChange[]>;
+  onApply: (input: { productIds: string[]; priceListId: string; mode: "set" | "percent" | "amount" | "cost_plus"; value: number }) => Promise<void>;
 }) {
-  const [mode, setMode] = React.useState<"set" | "percent" | "amount">("percent");
+  // Cost plus a markup is first because it is the one a newly imported catalogue needs:
+  // BMS keeps no selling price, so a percentage of what is there would be a percentage
+  // of nothing.
+  const [mode, setMode] = React.useState<"set" | "percent" | "amount" | "cost_plus">("cost_plus");
   const [value, setValue] = React.useState("");
   const [preview, setPreview] = React.useState<BulkPriceChange[] | null>(null);
   const [error, setError] = React.useState("");
@@ -571,9 +579,20 @@ function BulkPrices({
   return (
     <div className="flex flex-col gap-3 rounded-xl border-2 border-brand bg-surface p-4">
       <h2 className="font-semibold">Change {picked.length} price{picked.length === 1 ? "" : "s"}</h2>
-      {picked.length === 0 && (
-        <p className="text-[13px] text-muted">Tick the products you want to change.</p>
-      )}
+      {/* A catalogue imported from BMS arrives with no prices at all, and pricing 1,600
+          products one tick at a time is not something anybody would do. Filter to a
+          group or a brand first, then take the lot. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" variant="outline" size="sm" onClick={onPickShown}>
+          Pick all {plural(shown.length, "product")} shown
+        </Button>
+        {picked.length === 0 && (
+          <span className="text-[13px] text-muted">
+            Or tick the ones you want. Narrow the list first with the search box and the
+            category — the search box matches a brand too.
+          </span>
+        )}
+      </div>
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex-[1_1_200px]">
           <Field label="What to do">
@@ -582,6 +601,7 @@ function BulkPrices({
               onChange={(e) => { setMode(e.target.value as typeof mode); setPreview(null); }}
               className="h-11 w-full rounded-lg border border-line-strong bg-surface px-3 text-base"
             >
+              <option value="cost_plus">Work it out from cost, plus a markup</option>
               <option value="percent">Change by a percentage</option>
               <option value="amount">Change by an amount</option>
               <option value="set">Set them all to one price</option>
@@ -590,8 +610,13 @@ function BulkPrices({
         </div>
         <div className="flex-[1_1_140px]">
           <Field
-            label={mode === "percent" ? "Percent" : "Taka"}
-            hint={mode === "percent" ? "10 puts prices up 10%. −10 takes them down." : undefined}
+            label={mode === "percent" || mode === "cost_plus" ? "Percent" : "Taka"}
+            hint={
+              mode === "cost_plus"
+                ? "25 prices everything at cost plus 25%, rounded up to a figure a shop would write."
+                : mode === "percent" ? "10 puts prices up 10%. −10 takes them down."
+                : undefined
+            }
           >
             <Input
               inputMode="decimal"
@@ -624,8 +649,11 @@ function BulkPrices({
             {preview.map((c) => (
               <li key={c.productId} className="flex items-center justify-between gap-3 text-[15px]">
                 <span className="truncate">{c.name}</span>
-                <span className="num shrink-0">
-                  {formatTaka(c.from)} → <span className="font-semibold">{formatTaka(c.to)}</span>
+                <span className="shrink-0 text-right">
+                  <span className="num">
+                    {formatTaka(c.from)} → <span className="font-semibold">{formatTaka(c.to)}</span>
+                  </span>
+                  {c.note && <span className="block text-[12px] text-muted">{c.note}</span>}
                 </span>
               </li>
             ))}

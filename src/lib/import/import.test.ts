@@ -368,3 +368,29 @@ describe("re-running the same file", () => {
     expect(importableRows(second)).toHaveLength(importableRows(first).length);
   });
 });
+
+describe("warranty, group by group", () => {
+  // No BMS report carries a warranty — the shop keeps it in its head, "adapters, six
+  // months" — and 1,600 products is not a thing anybody will set one at a time.
+  const rows = [
+    { Code: "AD-1", Name: "Laptop adapter", Group: "Adapter", Warranty: "" },
+    { Code: "AD-2", Name: "Car charger", Group: "Adapter", Warranty: "1 Year" },
+    { Code: "ST-1", Name: "Sticker", Group: "3D Sticker", Warranty: "" },
+  ];
+  const mapping = { code: "Code", name: "Name", category: "Group", warranty: "Warranty" };
+
+  it("fills the gap a BMS file leaves", () => {
+    const r = reviewRows({ kind: "products", rows, mapping, warrantyByGroup: { Adapter: 6 } });
+    expect(r.rows[0].values.warranty).toBe(6);
+  });
+
+  it("leaves a product that states its own warranty alone", () => {
+    const r = reviewRows({ kind: "products", rows, mapping, warrantyByGroup: { Adapter: 6 } });
+    expect(r.rows[1].values.warranty).toBe(12);
+  });
+
+  it("says nothing about a group nobody typed a figure for", () => {
+    const r = reviewRows({ kind: "products", rows, mapping, warrantyByGroup: { Adapter: 6 } });
+    expect(r.rows[2].values.warranty).toBeNull();
+  });
+});

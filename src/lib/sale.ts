@@ -748,3 +748,16 @@ export function pinScreenError(raw: string): string {
     default: return "Couldn't save the PIN. Check the internet and try again.";
   }
 }
+
+/**
+ * A price the way a shop writes one, mirroring round_price() in the database.
+ *
+ * 68.51 plus 40% is 95.914, and nobody prices anything at 95.91. It goes UP to the next
+ * step so a markup is never quietly eroded, and the step grows with the price: five taka
+ * matters on a cable and nothing at all on a laptop.
+ */
+export function roundPrice(amount: number): number {
+  if (!Number.isFinite(amount) || amount <= 0) return 0;
+  const step = amount < 1000 ? 5 : amount < 10000 ? 10 : 50;
+  return Math.ceil(amount / step) * step;
+}

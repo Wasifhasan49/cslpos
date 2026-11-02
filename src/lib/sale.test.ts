@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDemoBackend } from "./backend/demo";
 import {
-  addMonths, computeTotals, dhakaDate, dhakaToday, formatDay, friendlyError, isSessionExpired, pinScreenError, quickCashAmounts, refundFor, SALE_ERROR_CODES, saleBlocker, searchProducts, type CheckoutState,
+  addMonths, computeTotals, dhakaDate, dhakaToday, formatDay, friendlyError, isSessionExpired, pinScreenError, quickCashAmounts, refundFor, roundPrice, SALE_ERROR_CODES, saleBlocker, searchProducts, type CheckoutState,
 } from "./sale";
 
 // Stock is per branch now, so the product map comes from a branch.
@@ -249,5 +249,24 @@ describe("the Dhaka date of a moment", () => {
 
   it("takes a Date or an ISO string", () => {
     expect(dhakaDate(new Date("2026-03-01T20:00:00.000Z"))).toBe("2026-03-02");
+  });
+});
+
+describe("a price the way a shop writes one", () => {
+  it("goes up to the next step, never down", () => {
+    // 68.51 at 40% is 95.914. Rounding down would quietly give the markup away.
+    expect(roundPrice(95.914)).toBe(100);
+    expect(roundPrice(320 * 1.4)).toBe(450);
+  });
+
+  it("steps in fives, tens and fifties as the price grows", () => {
+    expect(roundPrice(96)).toBe(100);
+    expect(roundPrice(1234)).toBe(1240);
+    expect(roundPrice(66001)).toBe(66050);
+  });
+
+  it("leaves nothing as nothing, rather than inventing five taka", () => {
+    expect(roundPrice(0)).toBe(0);
+    expect(roundPrice(-5)).toBe(0);
   });
 });

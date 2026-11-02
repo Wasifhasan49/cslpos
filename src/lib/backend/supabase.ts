@@ -629,9 +629,13 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         p_mode: mode, p_value: value, p_branch_id: branchId ?? null, p_dry_run: dryRun,
       });
       if (error) throw new Error(friendlyError(error.message));
-      const r = data as { changes?: { product_id: string; name: string; from: number | string; to: number | string }[] };
+      const r = data as { changes?: {
+        product_id: string; name: string; from: number | string; to: number | string;
+        note: string | null;
+      }[] };
       return (r.changes ?? []).map((c) => ({
         productId: c.product_id, name: c.name, from: num(c.from), to: num(c.to),
+        note: c.note ?? null,
       }));
     },
 

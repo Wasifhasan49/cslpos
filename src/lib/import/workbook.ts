@@ -9,6 +9,8 @@
 // The one thing that cannot be read here is a REAL .xls — the old binary workbook Excel
 // itself writes, which starts with the OLE2 signature. Reading that needs a BIFF parser;
 // `looksBinaryXls()` spots it so the screen can say what to do instead.
+import { readBmsPdf, type BmsReport } from "./bms-pdf";
+import type { PdfPage } from "./pdf-text";
 import type { Grid } from "./parse";
 
 export type Grids = Record<string, Grid>;
@@ -19,6 +21,12 @@ const OLE2 = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
 export function looksBinaryXls(buf: ArrayBuffer): boolean {
   const head = new Uint8Array(buf.slice(0, 8));
   return OLE2.every((b, i) => head[i] === b);
+}
+
+/** A PDF, which is what BMS's report viewer can actually produce. */
+export function looksPdf(buf: ArrayBuffer): boolean {
+  const head = new Uint8Array(buf.slice(0, 5));
+  return head[0] === 0x25 && head[1] === 0x50 && head[2] === 0x44 && head[3] === 0x46;
 }
 
 /** A zip, so an .xlsx — whatever it is called. */
@@ -182,4 +190,42 @@ export async function readWorkbook(
     );
   }
   return { Sheet1: grid };
+}
+
+/**
+ * Everything a picked file turns into: its sheets, plus whatever has to be said about
+ * it before anybody maps a column.
+ *
+ * A spreadsheet says nothing — its rows are its rows. A BMS report PDF has plenty to
+ * say: which report it is, what its own totals came to, and which rows look like the
+ * same trader entered twice.
+ */
+export interface FileRead {
+  grids: Grids;
+  /** Which BMS report this was, when it was one. */
+  report: BmsReport | null;
+  /** Things a person has to decide. Shown in the review step, word for word. */
+  warnings: string[];
+}
+
+/**
+ * Read whatever was picked: a spreadsheet, a text file, or one of BMS's report PDFs.
+ *
+ * Both readers run here in the browser, so the shop's whole customer list never leaves
+ * the machine. Both libraries are loaded only when the bytes turn out to need them —
+ * between them they are much the biggest thing this screen could pull in.
+ */
+export async function readImportFile(
+  buf: ArrayBuffer,
+  name: string,
+  loaders: {
+    xlsx: (bytes: ArrayBuffer) => Promise<Grids>;
+    pdf: (bytes: ArrayBuffer) => Promise<PdfPage[]>;
+  },
+): Promise<FileRead> {
+  if (looksPdf(buf)) {
+    const read = readBmsPdf(await loaders.pdf(buf));
+    return { grids: read.grids, report: read.report, warnings: read.warnings };
+  }
+  return { grids: await readWorkbook(buf, name, loaders.xlsx), report: null, warnings: [] };
 }

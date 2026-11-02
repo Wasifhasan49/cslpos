@@ -204,6 +204,9 @@ export interface BulkPriceChange {
   name: string;
   from: number;
   to: number;
+  /** Why this one did not land where the sum said it would: no cost on record, or the
+   *  owner's own floor or ceiling got in the way. Null when nothing got in the way. */
+  note: string | null;
 }
 
 export interface CartLine {
