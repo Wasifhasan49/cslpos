@@ -199,6 +199,15 @@ export interface CustomerLookup {
   creditLeft?: number | null;
 }
 
+/** Enough of a customer for the till to show a short list and let somebody pick. */
+export interface CustomerBrief {
+  id: string;
+  phone: string | null;
+  name: string | null;
+  company: string | null;
+  address: string | null;
+}
+
 export interface BulkPriceChange {
   productId: string;
   name: string;
@@ -239,6 +248,9 @@ export interface SaleInput {
    *  shop default for a walk-in. */
   priceListId?: string | null;
   customerPhone: string | null;
+  /** The customer the till picked by name, for the many traders BMS left with no
+   *  number to dial. The database checks they belong to this shop. */
+  customerId?: string | null;
   cashReceived: number | null;
   paymentRef: string | null;
   /** How much of the total is going on the customer's slate instead of being paid now
@@ -840,6 +852,15 @@ export interface SaleDetail {
   customerId?: string | null;
   customerPhone: string | null;
   customerName: string | null;
+  /** What the A4 bill prints and the till roll has no room for. */
+  attention?: string | null;
+  customerAddress?: string | null;
+  customerBin?: string | null;
+  narration?: string | null;
+  /** Who made the sale, which in a shop with floor staff is not always who rang it up. */
+  soldBy?: string | null;
+  /** The shop's own fields, as { "Ref No": "4471" }. */
+  extraFields?: Record<string, string> | null;
   /** What was paid at the time, and what went on the slate (P10). */
   paidAmount?: number;
   dueAmount?: number;

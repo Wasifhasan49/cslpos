@@ -320,13 +320,37 @@ describe("reviewing stock and serials", () => {
 });
 
 describe("reviewing customers and suppliers", () => {
-  it("skips the walk-ins BMS gave a fake mobile number", () => {
+  it("drops a made-up mobile number but keeps the customer, under their name", () => {
+    // BMS will not store a trader without a number, so most of the store's are made up.
+    // Throwing the row away would throw away a trader who owes the shop money.
     const sheet = readSheet(sampleGrid("customers"));
     const mapping = guessMapping(sheet.headers, "customers");
     const r = reviewRows({ kind: "customers", rows: sheet.rows, mapping });
     const cash = r.rows.find((x) => x.line === 1);
-    expect(cash?.verdict).toBe("problem");
-    expect(cash?.reason).toMatch(/isn't a mobile number/i);
+    expect(cash?.verdict).toBe("add");
+    expect(cash?.values.phone).toBeFalsy();
+    expect(cash?.values.name).toBeTruthy();
+  });
+
+  it("refuses only the row with neither a number nor a name", () => {
+    const r = reviewRows({
+      kind: "customers",
+      rows: [{ Mobile: "01000000000", Name: "" }, { Mobile: "", Name: "Agargaon Shop" }],
+      mapping: { phone: "Mobile", name: "Name", address: "", due: "" },
+    });
+    expect(r.rows[0].verdict).toBe("problem");
+    expect(r.rows[0].reason).toMatch(/nothing to call them by/i);
+    expect(r.rows[1].verdict).toBe("add");
+  });
+
+  it("takes a customer who is in credit, rather than calling it an error", () => {
+    const r = reviewRows({
+      kind: "customers",
+      rows: [{ Mobile: "01711000000", Name: "South Bangla", Due: "-9500" }],
+      mapping: { phone: "Mobile", name: "Name", address: "", due: "Due" },
+    });
+    expect(r.rows[0].verdict).toBe("add");
+    expect(r.rows[0].values.due).toBe(-9500);
   });
 
   it("reads a due of 12,500 as a number", () => {

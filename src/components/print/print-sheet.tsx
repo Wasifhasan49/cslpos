@@ -23,10 +23,13 @@ import { cn } from "@/lib/utils";
  * reports: they already name themselves in the panel above.
  */
 export function PrintSheet({
-  title, subtitle, aside, landscape, onScreen = true, footNote, by, children, className,
+  title, subtitle, aside, landscape, onScreen = true, align = "left", footNote, by,
+  children, className,
 }: {
-  /** Bold, underlined, centred — what this piece of paper is. */
-  title: string;
+  /** Bold, underlined, centred — what this piece of paper is. Left out when the
+   *  document draws its own, as the invoice does: its title sits beside a box of
+   *  details rather than across the top. */
+  title?: string;
   /** Under the title: the date range, the "as on" date, the branch. */
   subtitle?: React.ReactNode;
   /** Top right: the document number and its date, where there is one. */
@@ -36,6 +39,9 @@ export function PrintSheet({
   /** Whether the letterhead shows on screen as well as on paper. A report panel and a
    *  document panel name themselves already, so theirs is print-only. */
   onScreen?: boolean;
+  /** A register is headed from the left, the way BMS prints one. A bill handed to a
+   *  customer is headed from the middle, the way the store's own is. */
+  align?: "left" | "centre";
   /** Anything that belongs under the content: terms, a signature line. */
   footNote?: React.ReactNode;
   /** Who this is printed by, when that is not simply whoever is at the screen — a
@@ -49,23 +55,37 @@ export function PrintSheet({
   // The branch being worked in is the one whose address goes on the paper; the shop's
   // own address is the fallback for a shop that has not filled the branch in.
   const address = branch.address || head.address;
-  const contact = [head.phone, head.email].filter(Boolean).join("  ·  ");
+  const contact = [
+    head.phone && `Mobile: ${head.phone}`,
+    head.email && `Email: ${head.email}`,
+  ].filter(Boolean).join(", ");
+  const centred = align === "centre";
 
   return (
     <div className={cn("print-root text-ink", className)}>
       {landscape && <style>{"@page { size: A4 landscape; }"}</style>}
 
       <div className={cn("print-head", !onScreen && "hidden print:block")}>
-        <div className="flex items-start justify-between gap-4 border-b-2 border-ink pb-2">
-          <div className="flex items-start gap-3">
+        <div className={cn(
+          "gap-4 pb-2",
+          centred ? "flex flex-col items-center text-center"
+                  : "flex items-start justify-between border-b-2 border-ink")}
+        >
+          <div className={cn("flex gap-3", centred ? "flex-col items-center" : "items-start")}>
             {/* A data URL out of the shop's own settings, of a size nobody knows ahead
                 of time: next/image would want a loader and a width. */}
             {head.logoUrl && (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={head.logoUrl} alt="" className="print-logo h-12 w-auto object-contain" />
+              <img
+                src={head.logoUrl}
+                alt=""
+                className={cn("print-logo w-auto object-contain", centred ? "h-14" : "h-12")}
+              />
             )}
             <div>
-              <p className="text-[17px] font-bold leading-tight">{head.shopName}</p>
+              <p className={cn("font-bold leading-tight", centred ? "text-[20px]" : "text-[17px]")}>
+                {head.shopName}
+              </p>
               {address && <p className="text-[13px] leading-tight">{address}</p>}
               {contact && <p className="num text-[13px] leading-tight">{contact}</p>}
               {head.binVat && <p className="code text-[12px] leading-tight">BIN {head.binVat}</p>}
@@ -73,10 +93,12 @@ export function PrintSheet({
           </div>
           {aside && <div className="shrink-0 text-right text-[13px]">{aside}</div>}
         </div>
-        <div className="py-2 text-center">
-          <h2 className="text-[15px] font-bold underline">{title}</h2>
-          {subtitle && <p className="text-[13px]">{subtitle}</p>}
-        </div>
+        {title && (
+          <div className="py-2 text-center">
+            <h2 className="text-[15px] font-bold underline">{title}</h2>
+            {subtitle && <p className="text-[13px]">{subtitle}</p>}
+          </div>
+        )}
       </div>
 
       {children}

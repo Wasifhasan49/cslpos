@@ -59,7 +59,7 @@ studying it: **`docs/notes/bms.md`**. The three that matter most —
 - `supabase/migrations/` — timestamped, append-only. **Never edit an applied migration**;
   `create or replace` a function in a later one instead.
 - `supabase/tests/sales_rules_test.sql` — every database rule, run by `pnpm test:db`
-  against a local Postgres. 617 checks. Add to it whenever you add a rule.
+  against a local Postgres. 621 checks. Add to it whenever you add a rule.
 - `src/lib/backend/` — the `Backend` interface, with `supabase.ts` and `demo.ts`.
   **Anything added to the interface needs a demo implementation that mirrors the same
   rules**, or demo mode shows figures the real shop cannot produce.
@@ -82,7 +82,11 @@ studying it: **`docs/notes/bms.md`**. The three that matter most —
   for …"). Advanced options stay hidden until a shop turns them on.
 - Anything printed goes through `<PrintSheet>` (`src/components/print/print-sheet.tsx`):
   the shop's own logo, name and branch address from its settings, A4, bordered tables,
-  Dhaka dd/mm/yyyy. Never hard-code a shop's details, and never name BMS on a printout.
+  Dhaka dd/mm/yyyy, and "Page X of Y" in the page's bottom margin box. Never hard-code a
+  shop's details, and never name BMS on a printout.
+- A customer may have no mobile number — most of the store's traders came over from BMS
+  without a usable one — so they are found by name as well, and a sale can carry a
+  customer id instead of a phone.
 - Money: whole taka on screen (`formatTaka`), `numeric(12,2)` in the database.
 - Touch targets ≥ 44 px; works at phone width (390px), no sideways scrolling; light theme.
 - Product codes and serials use the `.code` class; amounts use `.num` (tabular digits).
@@ -129,8 +133,8 @@ Loose ends worth knowing about, each noted in PROGRESS.md where it belongs: a fe
 and P5 screens are missing though the rules exist (product attributes, gifts,
 purchase-price fixing, the printable price view, supplier groups, the GRN print view);
 P4 now reads BMS's five report PDFs (`src/lib/import/bms-pdf.ts`), checked against the
-store's real exports with `pnpm check:pdf`, but BMS's customer list has no usable phone
-numbers and the import keys a customer on theirs; P10a leaves the print choices to P16; P11
+store's real exports with `pnpm check:pdf`; P10a leaves the 80mm receipt's print choices
+to P16, though the A4 bill is done; P11
 has no claim photos; P13 has no sub-ledger picker on a typed journal voucher and no
 screen for measuring a cheque leaf; every report in docs/BMS_REPORTS.md now runs except BMS's bank interest calculator, which nobody at the store was seen using.
 

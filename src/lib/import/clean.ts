@@ -1,3 +1,5 @@
+import { isPlaceholderPhone } from "../sale";
+
 /**
  * Turning what a spreadsheet says into what the database can store.
  *
@@ -48,13 +50,17 @@ export function cleanCode(raw: string): string {
   return raw.trim().replace(/\s+/g, " ").toUpperCase();
 }
 
-/** 11 digits starting 01, which is every Bangladeshi mobile. Anything else is not a
- *  phone number, including BMS's famous "2026-01-01" placeholder. */
+/**
+ * 11 digits starting 01, which is every Bangladeshi mobile. Anything else is not a phone
+ * number, including BMS's famous "2026-01-01" placeholder — and including the ones that
+ * are the right shape but made up, like "01000000000", which `isPlaceholderPhone` knows.
+ */
 export function cleanPhone(raw: string): string | null {
   const digits = raw.replace(/\D/g, "");
   const local = digits.startsWith("880") ? digits.slice(3) : digits;
   const padded = local.length === 10 && local.startsWith("1") ? `0${local}` : local;
-  return /^01\d{9}$/.test(padded) ? padded : null;
+  if (!/^01\d{9}$/.test(padded)) return null;
+  return isPlaceholderPhone(padded) ? null : padded;
 }
 
 export function parseBool(raw: string): boolean {

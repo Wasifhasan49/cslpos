@@ -1,5 +1,6 @@
 import type {
   ApprovalResult, Approver, BranchAdmin, BulkPriceChange, CatalogueRow, Category,
+  CustomerBrief,
   CountDifference, CustomerLookup, FeatureKey, GoodsReceivedRow, PriceList, Product,
   Receipt, ReceiveLine, ReceiveResult, Role, SaleInput, SettingRow, SettingTable,
   SettingsBundle, StaffLookup, StaffMember, StockMovementRow, StockReason, Supplier,
@@ -39,6 +40,11 @@ export interface Backend {
   listProducts(branchId: string, priceListId?: string | null): Promise<Product[]>;
   /** A customer's price list and standing discount, by phone. Null if not a customer. */
   findCustomer(phone: string): Promise<CustomerLookup | null>;
+  /** The same, for a customer the till found by name. */
+  customerById(id: string): Promise<CustomerLookup | null>;
+  /** The till's own customer search: name, company, address or number. Open to a
+   *  cashier, unlike the owner's customer list. */
+  customerFind(query: string): Promise<CustomerBrief[]>;
   /** Throws an Error whose message is already in plain words. */
   completeSale(input: SaleInput): Promise<Receipt>;
   /** Owners and managers with a PIN, so the counter can name who is approving. */

@@ -62,6 +62,8 @@ export interface ReviewInput {
  * keying on the code would throw away every serial after the first.
  */
 export function keyField(kind: ImportKind): string {
+  // A customer is known by their number when they have one. Most of the traders that
+  // came over from BMS do not, so theirs is their name.
   if (kind === "customers") return "phone";
   if (kind === "suppliers") return "name";
   if (kind === "serials") return "serial";
@@ -103,7 +105,7 @@ export function reviewRows(input: ReviewInput): ReviewResult {
         case "money": {
           const n = parseMoney(cell);
           if (n === null) problems.push(`"${cell}" isn't a ${field.label.toLowerCase()}`);
-          else if (n < 0) problems.push(`${field.label.toLowerCase()} can't be negative`);
+          else if (n < 0 && !field.allowNegative) problems.push(`${field.label.toLowerCase()} can't be negative`);
           values[field.key] = n;
           break;
         }
@@ -142,7 +144,16 @@ export function reviewRows(input: ReviewInput): ReviewResult {
       values.warranty = input.warrantyByGroup[group];
     }
 
-    const id = String(values[key] ?? "");
+    // A customer with no number is known by name, so that is what makes two rows the
+    // same row — and a row with neither is nobody.
+    const id = input.kind === "customers" && !values.phone
+      ? String(values.name ?? "").trim().toLowerCase()
+      : String(values[key] ?? "");
+    if (input.kind === "customers" && id === "") {
+      rows.push({ line, verdict: "problem", values,
+        reason: "No mobile number and no name, so there would be nothing to call them by" });
+      continue;
+    }
 
     if (problems.length > 0) {
       rows.push({ line, verdict: "problem", reason: capitalise(problems.join("; ")), values });

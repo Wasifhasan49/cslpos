@@ -26,6 +26,7 @@
  * Everything here works on positions, never on a fixed character layout: the x of a
  * word says which column it is in, and the type size says whether it is a heading.
  */
+import { isPlaceholderPhone } from "../sale";
 import { isNumber, money, type PdfLine, type PdfPage } from "./pdf-text";
 import type { Grid } from "./parse";
 
@@ -422,10 +423,11 @@ export function cleanPhone(raw: string): string {
   const digits = raw.replace(/[^\d]/g, "");
   if (digits === "") return "";
   if (/^0+$/.test(digits)) return "";
-  // A Bangladeshi mobile is 11 digits starting 01, or 13 with the 88 country code.
-  if (/^01\d{9}$/.test(digits)) return digits;
-  if (/^8801\d{9}$/.test(digits)) return digits.slice(2);
-  return "";
+  // A Bangladeshi mobile is 11 digits starting 01, or 13 with the 88 country code —
+  // and not one of the right-shaped but made-up ones like 01000000000.
+  const local = /^8801\d{9}$/.test(digits) ? digits.slice(2) : digits;
+  if (!/^01\d{9}$/.test(local)) return "";
+  return isPlaceholderPhone(local) ? "" : local;
 }
 
 /**
@@ -462,10 +464,10 @@ export function duplicateWarnings(names: string[]): string[] {
 /**
  * How many customers came through with no number anybody can ring.
  *
- * The till finds a customer by their mobile, so a customer without one cannot be
- * imported — and most of the IDB shops in this list never had one, because whoever
- * typed them in put "-1192" to get past BMS's required field. Better said plainly here
- * than discovered as a hundred refused rows two screens later.
+ * Not a problem, but worth saying before somebody wonders where the numbers went: most
+ * of the IDB shops never had one, and whoever typed them in put "-1192" to get past
+ * BMS's required field. Those are dropped and the customers come in under their names,
+ * which is also how the till finds them afterwards.
  */
 export function phoneWarning(phones: string[]): string[] {
   const missing = phones.filter((p) => p.trim() === "").length;
@@ -473,8 +475,8 @@ export function phoneWarning(phones: string[]): string[] {
   return [
     `${missing} of these ${phones.length} have no real mobile number — BMS was given `
     + `things like "-1192" to get past its own required field, and those are not numbers `
-    + "anybody can ring. The till finds a customer by their number, so those rows cannot "
-    + "be imported until somebody adds one.",
+    + "anybody can ring. They are dropped, and those customers come in under their names; "
+    + "the till finds them by name too.",
   ];
 }
 

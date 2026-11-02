@@ -13,6 +13,9 @@ export interface FieldSpec {
   label: string;
   /** Without this the row cannot be imported at all. */
   required?: boolean;
+  /** A balance can be either way round: a customer in credit, a supplier the shop has
+   *  overpaid. A price cannot. */
+  allowNegative?: boolean;
   type: "text" | "number" | "money" | "warranty" | "phone" | "bool";
   /** Header names that mean this field, lower-cased. BMS's own names first. */
   aliases: string[];
@@ -130,14 +133,14 @@ export const IMPORT_KINDS: KindSpec[] = [
     from: "BMS → Customer Information, or All Traders Due List",
     fields: [
       {
-        key: "phone", label: "Mobile", required: true, type: "phone",
+        key: "phone", label: "Mobile", type: "phone",
         aliases: ["mobile no", "mobile", "phone", "phone no", "contact no", "cell"],
-        hint: "11 digits starting 01. Rows without a real number are skipped.",
+        hint: "11 digits starting 01. A made-up one is dropped, and the customer comes in under their name.",
       },
       { key: "name", label: "Name", type: "text", aliases: ["customer name", "name", "party name", "client name"] },
       { key: "address", label: "Address", type: "text", aliases: ["address", "location", "area"] },
       {
-        key: "due", label: "Amount owed", type: "money",
+        key: "due", label: "Amount owed", type: "money", allowNegative: true,
         aliases: ["due amount", "due", "balance", "outstanding", "receivable", "closing balance"],
       },
     ],
@@ -152,7 +155,7 @@ export const IMPORT_KINDS: KindSpec[] = [
       { key: "phone", label: "Mobile", type: "phone", aliases: ["mobile no", "mobile", "phone", "phone no", "contact no"] },
       { key: "address", label: "Address", type: "text", aliases: ["address", "location", "area"] },
       {
-        key: "due", label: "Amount owed to them", type: "money",
+        key: "due", label: "Amount owed to them", type: "money", allowNegative: true,
         aliases: ["due amount", "due", "balance", "outstanding", "payable", "closing balance"],
       },
     ],

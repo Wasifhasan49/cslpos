@@ -55,13 +55,22 @@ html, body {
    inside the one allow-listed id.
    --------------------------------------------------------------------------- */
 @media print {
+  /* "Page 2 of 6" is the one thing a printed page cannot say for itself: only the
+     browser knows how many pages there turned out to be, and the only place CSS can
+     ask is a margin box. Chrome and Edge have had them since Chrome 131 (late 2024),
+     Firefox and Safari for longer, so this is simply where it goes. The bottom margin
+     is 14mm to leave room for it. */
   @page {
     size: A4 portrait;
     margin: 12mm 10mm 14mm;
-    /* Firefox and Safari put the page number in the bottom margin. Chrome ignores
-       margin boxes (crbug.com/320514); its own print dialog has the same thing under
-       "Headers and footers". */
-    @bottom-right { content: "Page " counter(page) " of " counter(pages); font-size: 8pt; }
+    @bottom-right {
+      content: "Page " counter(page) " of " counter(pages);
+      /* A literal stack: a margin box is outside the document tree, so a custom
+         property defined on :root may not reach it. */
+      font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+      font-size: 8pt;
+      color: #333;
+    }
   }
 
   html, body { background: #fff; }

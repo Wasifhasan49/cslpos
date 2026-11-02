@@ -761,3 +761,25 @@ export function roundPrice(amount: number): number {
   const step = amount < 1000 ? 5 : amount < 10000 ? 10 : 50;
   return Math.ceil(amount / step) * step;
 }
+
+/**
+ * A number that is not a number: what somebody typed to get past a required field.
+ *
+ * BMS will not store a trader without a mobile, so the store's list is full of
+ * "01000000000", "01111111111" and the like. They pass every shape test — eleven
+ * digits, starting 01 — and ringing one gets nobody. Worse, they are shared: two shops
+ * with the same made-up number would answer to each other's name at the till.
+ */
+export function isPlaceholderPhone(phone: string | null | undefined): boolean {
+  if (!phone) return false;
+  const digits = phone.replace(/\D/g, "");
+  if (digits.length < 11) return true;
+  // The nine digits after the "01" all the same: 01000000000, 01111111111. A real
+  // number has an operator digit and then eight that vary.
+  return /^01(\d)\1{8}$/.test(digits) || /^0(\d)\1{9}$/.test(digits);
+}
+
+/** The number to show, or nothing — a made-up one is worse than a blank. */
+export function phoneShown(phone: string | null | undefined): string {
+  return !phone || isPlaceholderPhone(phone) ? "" : phone;
+}

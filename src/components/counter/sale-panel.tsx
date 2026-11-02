@@ -5,12 +5,15 @@ import Link from "next/link";
 import { Minus, Plus, ScanBarcode, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
-import { PAYMENT_METHODS, formatTaka, quickCashAmounts, warrantyLabel, type Totals } from "@/lib/sale";
+import {
+  PAYMENT_METHODS, formatTaka, phoneShown, quickCashAmounts, warrantyLabel, type Totals,
+} from "@/lib/sale";
 import { MoreOptions } from "./more-options";
 import { expandSerialRange, parseSerialList } from "@/lib/serials";
 import { useSale } from "@/lib/store/sale-store";
 import type {
-  Approver, CustomerLookup, EmiPlan, Product, SaleField, SettingRow, Staff, StaffMember,
+  Approver, CustomerBrief, CustomerLookup, EmiPlan, Product, SaleField, SettingRow,
+  Staff, StaffMember,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -42,6 +45,8 @@ interface Props {
   emiAllowed: boolean;
   cardChargeMode: "absorb" | "add";
   allProducts: Product[];
+  /** The till's own customer search, for the traders who have no number to dial. */
+  onFindCustomer: (query: string) => Promise<CustomerBrief[]>;
   onCheckPin: () => void;
   onComplete: () => void;
 }
@@ -116,7 +121,7 @@ function LinePrice({ product, line }: { product: Product; line: { productId: str
   );
 }
 
-export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, submitting, error, customer, approvers, checkingPin, pinMessage, approvedBy, creditOn, cardTypes, posAccounts, saleFields, team, emiPlans, emiAllowed, cardChargeMode, allProducts, onCheckPin, onComplete }: Props) {
+export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, submitting, error, customer, approvers, checkingPin, pinMessage, approvedBy, creditOn, cardTypes, posAccounts, saleFields, team, emiPlans, emiAllowed, cardChargeMode, allProducts, onFindCustomer, onCheckPin, onComplete }: Props) {
   const s = useSale();
   const overLimit = totals.discountPct > staff.discountLimitPct;
   // The card company's cut, the bank's EMI charge and anything taken in exchange all
@@ -239,14 +244,25 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
       {s.lines.length > 0 && (
         <div className="flex flex-col gap-4 px-[18px] py-4">
           {customer && (
-            <div className="flex flex-col gap-0.5 rounded-[10px] bg-ok-bg p-3 text-[13px] text-ok-ink">
-              <span className="font-semibold">{customer.name ?? customer.phone}</span>
-              <span>
-                {customer.priceListName
-                  ? `${customer.priceListName} prices are being used`
-                  : "Retail prices"}
-                {customer.discountPct > 0 && ` · ${customer.discountPct}% standing discount`}
+            <div className="flex items-start justify-between gap-2 rounded-[10px] bg-ok-bg p-3 text-[13px] text-ok-ink">
+              <span className="flex flex-col gap-0.5">
+                <span className="font-semibold">{customer.name || phoneShown(customer.phone) || "Customer"}</span>
+                <span>
+                  {customer.priceListName
+                    ? `${customer.priceListName} prices are being used`
+                    : "Retail prices"}
+                  {customer.discountPct > 0 && ` · ${customer.discountPct}% standing discount`}
+                </span>
               </span>
+              {s.customerId && (
+                <button
+                  type="button"
+                  className="min-h-11 shrink-0 px-2 font-semibold underline"
+                  onClick={() => s.setCustomerId(null)}
+                >
+                  Change
+                </button>
+              )}
             </div>
           )}
           <div className="flex flex-wrap gap-3">
@@ -256,9 +272,7 @@ export function SalePanel({ staff, products, totals, blocker, nextInvoiceHint, s
               <span className="text-xs text-muted">Your limit: {staff.discountLimitPct}% without approval</span>
             </div>
             <div className="flex flex-[2_1_200px] flex-col gap-1.5">
-              <Label htmlFor="phone">Customer mobile <span className="font-normal text-muted">(optional)</span></Label>
-              <Input id="phone" type="tel" inputMode="numeric" placeholder="01XXXXXXXXX" value={s.phone} onChange={(e) => s.setPhone(e.target.value)} className="num" />
-              <span className="text-xs text-muted">For warranty lookup and an SMS receipt</span>
+              <CustomerBox onFind={onFindCustomer} />
             </div>
           </div>
 
@@ -610,5 +624,74 @@ function BulkSerials({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Who is buying: a mobile number, or a name.
+ *
+ * One box, because at the counter there is one question. Eleven digits is a number and
+ * is looked up as one; anything else is a search, because most of the traders that came
+ * over from BMS have no number anybody can ring and are known by their shop's name.
+ */
+function CustomerBox({ onFind }: { onFind: (query: string) => Promise<CustomerBrief[]> }) {
+  const s = useSale();
+  const [typed, setTyped] = React.useState("");
+  const [hits, setHits] = React.useState<CustomerBrief[]>([]);
+
+  const digits = typed.replace(/\D/g, "");
+  const looksLikeNumber = digits.length > 0 && digits.length === typed.trim().length;
+
+  React.useEffect(() => {
+    // A number goes to the phone lookup the counter already does.
+    if (looksLikeNumber) { s.setPhone(digits); setHits([]); return; }
+    s.setPhone("");
+    const q = typed.trim();
+    if (q.length < 2) { setHits([]); return; }
+    let off = false;
+    // Typing settles before the database is asked: a search per keystroke across a
+    // thousand traders is how a counter starts feeling slow.
+    const timer = setTimeout(() => {
+      onFind(q).then((r) => { if (!off) setHits(r); }).catch(() => { if (!off) setHits([]); });
+    }, 250);
+    return () => { off = true; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [typed]);
+
+  return (
+    <>
+      <Label htmlFor="customer">
+        Customer <span className="font-normal text-muted">(optional)</span>
+      </Label>
+      <Input
+        id="customer"
+        placeholder="Mobile, or a name"
+        value={typed}
+        onChange={(e) => setTyped(e.target.value)}
+        className={looksLikeNumber ? "num" : undefined}
+      />
+      {hits.length > 0 && (
+        <ul className="flex flex-col gap-1 rounded-[10px] border border-line bg-surface p-1">
+          {hits.map((c) => (
+            <li key={c.id}>
+              <button
+                type="button"
+                className="flex min-h-11 w-full flex-col px-2 py-1 text-left text-[15px] hover:bg-subtle"
+                onClick={() => { s.setCustomerId(c.id); setTyped(""); setHits([]); }}
+              >
+                <span className="font-semibold">{c.name || phoneShown(c.phone) || "Customer"}</span>
+                <span className="text-[13px] text-muted">
+                  {[phoneShown(c.phone), c.company, c.address].filter(Boolean).join(" · ")}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <span className="text-xs text-muted">
+        A number finds them for warranty and an SMS receipt. A name finds a shop that
+        never had one.
+      </span>
+    </>
   );
 }

@@ -3,6 +3,7 @@ import { friendlyError } from "../sale";
 import { supabaseBrowser } from "../supabase/client";
 import type {
   ApprovalResult, Approver, BranchAdmin, BulkPriceChange, CatalogueRow, Category,
+  CustomerBrief,
   CountDifference, CustomerLookup, FeatureKey, GoodsReceivedRow, PaymentMethod, PriceList,
   Product, Receipt, ReceiveResult, Role, SaleInput, SettingRow, SettingTable,
   SettingsBundle, StaffLookup, StaffMember, StockMovementRow, Supplier, SupplierGroup,
@@ -264,23 +265,30 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
       }));
     },
 
+    async customerById(id: string): Promise<CustomerLookup | null> {
+      const { data, error } = await sb.rpc("customer_by_id", { p_id: id });
+      if (error || !data) return null;
+      return customerFrom(data as Record<string, unknown>);
+    },
+
+    async customerFind(query: string): Promise<CustomerBrief[]> {
+      const { data, error } = await sb.rpc("customer_find", { p_query: query });
+      // A failed search must not stop a sale: the customer is a nicety, the sale is not.
+      if (error || !data) return [];
+      return (data as Record<string, unknown>[]).map((r) => ({
+        id: String(r.id),
+        phone: (r.phone as string | null) ?? null,
+        name: (r.name as string | null) ?? null,
+        company: (r.company as string | null) ?? null,
+        address: (r.address as string | null) ?? null,
+      }));
+    },
+
     async findCustomer(phone: string): Promise<CustomerLookup | null> {
       const { data, error } = await sb.rpc("customer_by_phone", { p_phone: phone });
       // A lookup failing must not stop a sale: the customer is a nicety, the sale is not.
       if (error || !data) return null;
-      const r = data as Record<string, unknown>;
-      return {
-        id: String(r.id), phone: String(r.phone), name: (r.name as string | null) ?? null,
-        priceListId: (r.price_list_id as string | null) ?? null,
-        priceListName: (r.price_list_name as string | null) ?? null,
-        discountPct: num(r.discount_pct),
-        group: (r.group as string | null) ?? null,
-        creditAllowed: Boolean(r.credit_allowed),
-        creditLimit: num(r.credit_limit),
-        paymentDays: num(r.payment_days),
-        owed: num(r.owed),
-        creditLeft: numOrNull(r.credit_left),
-      };
+      return customerFrom(data as Record<string, unknown>);
     },
 
     async listApprovers(): Promise<Approver[]> {
@@ -334,8 +342,11 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         p_discount_type_id: input.discountTypeId ?? null,
         p_category_id: input.categoryId ?? null,
         p_due_amount: input.dueAmount ?? 0,
-        // Everything the advanced counter adds (P10a), snake_cased for the function.
-        p_extras: input.extras ? {
+        // Everything the advanced counter adds (P10a), snake_cased for the function —
+        // plus the customer, when the till found them by name rather than by number.
+        p_extras: input.extras || input.customerId ? {
+          ...(input.customerId ? { customer_id: input.customerId } : {}),
+          ...(!input.extras ? {} : {
           attention: input.extras.attention ?? null,
           customer_address: input.extras.customerAddress ?? null,
           customer_bin: input.extras.customerBin ?? null,
@@ -369,6 +380,7 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
               reference: x.reference ?? null, account_id: x.accountId ?? null,
             })),
           } : {}),
+          }),
         } : null,
       });
       if (error) throw new Error(friendlyError(error.message));
@@ -1501,6 +1513,12 @@ export function createSupabaseBackend(client?: SupabaseClient): Backend {
         paidAmount: num(d.paid_amount), dueAmount: num(d.due_amount),
         customerPhone: (d.customer_phone as string | null) ?? null,
         customerName: (d.customer_name as string | null) ?? null,
+        attention: (d.attention as string | null) ?? null,
+        customerAddress: (d.customer_address as string | null) ?? null,
+        customerBin: (d.customer_bin as string | null) ?? null,
+        narration: (d.narration as string | null) ?? null,
+        soldBy: (d.sold_by as string | null) ?? null,
+        extraFields: (d.extra_fields as Record<string, string> | null) ?? null,
         sameDay: Boolean(d.same_day), daysOld: num(d.days_old),
         returnDays: num(d.return_days),
         items: ((d.items as Record<string, unknown>[] | null) ?? []).map((i) => ({
@@ -3049,5 +3067,25 @@ function readEmployee(e: Record<string, unknown>): Employee {
     dailyRate: numOrNull(e.daily_rate),
     advanceOutstanding: numOrNull(e.advance_outstanding),
     today: (e.today as Employee["today"]) ?? null,
+  };
+}
+
+/** customer_by_phone() and customer_by_id() answer in the same shape, so one reader. */
+function customerFrom(r: Record<string, unknown>): CustomerLookup {
+  return {
+    id: String(r.id),
+    // A customer with no number to dial is now ordinary: most of the traders that came
+    // over from BMS have none.
+    phone: (r.phone as string | null) ?? "",
+    name: (r.name as string | null) ?? null,
+    priceListId: (r.price_list_id as string | null) ?? null,
+    priceListName: (r.price_list_name as string | null) ?? null,
+    discountPct: num(r.discount_pct),
+    group: (r.group as string | null) ?? null,
+    creditAllowed: Boolean(r.credit_allowed),
+    creditLimit: num(r.credit_limit),
+    paymentDays: num(r.payment_days),
+    owed: num(r.owed),
+    creditLeft: numOrNull(r.credit_left),
   };
 }

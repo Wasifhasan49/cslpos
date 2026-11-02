@@ -13,6 +13,9 @@ interface SaleState {
    *  not "typed, we'll find out when the customer has already waited." */
   approvalId: string | null;
   phone: string;
+  /** A customer picked by name, for the many traders who have no number to dial.
+   *  Either this or the phone identifies the customer, never both. */
+  customerId: string | null;
   method: PaymentMethod;
   cashReceived: string;
   /** How much of the total goes on the customer's slate (P10). Empty means none. */
@@ -42,6 +45,7 @@ interface SaleState {
   setDueAmount: (v: string) => void;
   setExtras: (x: SaleExtras) => void;
   setPaymentRef: (v: string) => void;
+  setCustomerId: (id: string | null) => void;
   reset: () => void;
 }
 
@@ -52,6 +56,7 @@ const empty = {
   approverId: null as string | null,
   approvalId: null as string | null,
   phone: "",
+  customerId: null as string | null,
   method: "cash" as PaymentMethod,
   cashReceived: "",
   dueAmount: "",
@@ -112,7 +117,15 @@ export const useSale = create<SaleState>((set, get) => ({
   setPin: (v) => set({ pin: v.replace(/\D/g, "").slice(0, 6) }),
   setApprover: (id) => set({ approverId: id, pin: "", approvalId: null }),
   setApproval: (id) => set({ approvalId: id }),
-  setPhone: (v) => set({ phone: v.replace(/\D/g, "").slice(0, 11) }),
+  // Typing a number means looking somebody up by it, so a customer picked by name is
+  // let go: two ways of saying who is buying would be one too many. CLEARING the box is
+  // not typing a number, though — the search box empties itself the moment somebody
+  // picks a name, and wiping the pick there would undo it immediately.
+  setPhone: (v) => {
+    const phone = v.replace(/\D/g, "").slice(0, 11);
+    set(phone === "" ? { phone } : { phone, customerId: null });
+  },
+  setCustomerId: (id) => set({ customerId: id, phone: "" }),
   setMethod: (m) => set({ method: m, paymentRef: "" }),
   setCashReceived: (v) => set({ cashReceived: v.replace(/\D/g, "").slice(0, 9) }),
   // Changing what goes on the slate drops any approval: it was approved for a

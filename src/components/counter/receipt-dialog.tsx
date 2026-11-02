@@ -42,7 +42,7 @@ export function ReceiptDialog({ receipt, onNewSale }: { receipt: Receipt; onNewS
         <div id="print-receipt" className="print-root flex flex-col gap-3 px-5 py-4 text-sm">
           {/* An 80 mm roll, not A4: the till printer feeds continuous paper. P16 owns
               what else this slip needs. */}
-          <style>{"@page { size: 80mm auto; margin: 4mm; }"}</style>
+          <style>{"@page { size: 80mm auto; margin: 4mm; @bottom-right { content: \"\" } }"}</style>
           <div className="flex flex-col items-center gap-0.5 text-center">
             <span className="text-base font-bold">{receipt.shopName}</span>
             {receipt.shopAddress && <span className="text-xs text-muted">{receipt.shopAddress}</span>}

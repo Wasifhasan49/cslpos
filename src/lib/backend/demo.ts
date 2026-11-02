@@ -9,7 +9,8 @@ import {
   roundTaka,
 } from "../sale";
 import type {
-  ApprovalResult, Approver, BranchAdmin, BulkPriceChange, CatalogueRow, CustomerLookup,
+  ApprovalResult, Approver, BranchAdmin, BulkPriceChange, CatalogueRow, CustomerBrief,
+  CustomerLookup,
   CountDifference, FeatureKey, GoodsReceivedRow, PriceList, Product, Receipt, ReceiptLine,
   ReceiveResult, Role, SaleInput, SerialUnit, SettingRow, SettingTable, SettingsBundle,
   Staff, StaffLookup, StaffMember, StockMovementRow, Supplier, SupplierGroup,
@@ -610,6 +611,27 @@ export function createDemoBackend(): Backend {
     }
   };
 
+  /** One customer, as the till reads them — the same answer for a lookup by number and
+   *  a lookup by id, as customer_by_phone() and customer_by_id() give. */
+  const lookupOf = (c: (typeof customers)[number]): CustomerLookup => {
+    const group = customerGroups.find((g) => g.id === c.groupId);
+    // The customer's own list wins; failing that the group's.
+    const listId = c.priceListId ?? group?.priceListId ?? null;
+    const owed = dueFor(c.id);
+    return {
+      id: c.id, phone: c.phone, name: c.name,
+      priceListId: listId,
+      priceListName: priceLists.find((l) => l.id === listId)?.name ?? null,
+      discountPct: Math.max(c.discountPct, group?.discountPct ?? 0),
+      group: group?.name ?? null,
+      creditAllowed: c.creditAllowed,
+      creditLimit: c.creditLimit,
+      paymentDays: c.paymentDays,
+      owed,
+      creditLeft: c.creditLimit > 0 ? Math.max(c.creditLimit - owed, 0) : null,
+    };
+  };
+
   const noteMovement = (m: StockMovementRow) => movements.unshift(m);
 
   let pin = DEMO_PIN;
@@ -951,25 +973,27 @@ export function createDemoBackend(): Backend {
       branchOr404(branchId);
       return productsAt(branchId, priceListId ?? "pl-retail");
     },
+    async customerById(id: string): Promise<CustomerLookup | null> {
+      const c = customers.find((x) => x.id === id);
+      return c ? lookupOf(c) : null;
+    },
+
+    async customerFind(query: string): Promise<CustomerBrief[]> {
+      const q = query.trim().toLowerCase();
+      if (q === "") return [];
+      return customers
+        .filter((c) => [c.name, c.company, c.address, c.phone]
+          .some((v) => (v ?? "").toLowerCase().includes(q)))
+        .slice(0, 8)
+        .map((c) => ({
+          id: c.id, phone: c.phone || null, name: c.name ?? null,
+          company: c.company ?? null, address: c.address ?? null,
+        }));
+    },
+
     async findCustomer(phone: string): Promise<CustomerLookup | null> {
       const c = customers.find((x) => x.phone === phone);
-      if (!c) return null;
-      const group = customerGroups.find((g) => g.id === c.groupId);
-      // The customer's own list wins; failing that the group's, as in customer_by_phone().
-      const listId = c.priceListId ?? group?.priceListId ?? null;
-      const owed = dueFor(c.id);
-      return {
-        id: c.id, phone: c.phone, name: c.name,
-        priceListId: listId,
-        priceListName: priceLists.find((l) => l.id === listId)?.name ?? null,
-        discountPct: Math.max(c.discountPct, group?.discountPct ?? 0),
-        group: group?.name ?? null,
-        creditAllowed: c.creditAllowed,
-        creditLimit: c.creditLimit,
-        paymentDays: c.paymentDays,
-        owed,
-        creditLeft: c.creditLimit > 0 ? Math.max(c.creditLimit - owed, 0) : null,
-      };
+      return c ? lookupOf(c) : null;
     },
     async listApprovers(): Promise<Approver[]> {
       return team.filter((m) => m.hasPin && m.active && m.role !== "cashier")
@@ -1011,10 +1035,13 @@ export function createDemoBackend(): Backend {
       const today = dhakaToday();
       const items: ReceiptLine[] = [];
 
-      // The customer's list decides the prices, exactly as complete_sale() does it.
+      // The customer's list decides the prices, exactly as complete_sale() does it —
+      // whether the till dialled them or found them by name.
       const customer = input.customerPhone
         ? customers.find((c) => c.phone === input.customerPhone) ?? null
-        : null;
+        : input.customerId
+          ? customers.find((c) => c.id === input.customerId) ?? fail("CUSTOMER_NOT_FOUND")
+          : null;
       const listId = input.priceListId ?? customer?.priceListId ?? "pl-retail";
       const atBranch = new Map(productsAt(input.branchId, listId).map((p) => [p.id, p]));
 
@@ -1270,8 +1297,18 @@ export function createDemoBackend(): Backend {
         status: "completed",
         approvalStatus: overLimit ? "awaiting_approval" : "approved",
         voidReason: null, refundMethod: null,
-        customerPhone: input.customerPhone ?? null, customerName: customer?.name ?? null,
+        // The customer's own number when they were picked by name, as sale_detail()
+        // reads it off the customer rather than off what was typed.
+        customerPhone: input.customerPhone ?? customer?.phone ?? null,
+        customerName: customer?.name ?? null,
         customerId: customer?.id ?? null,
+        // What the A4 bill prints: kept on the sale, as the database keeps it.
+        attention: x.attention ?? null,
+        customerAddress: x.customerAddress ?? customer?.address ?? null,
+        customerBin: x.customerBin ?? null,
+        narration: x.narration ?? null,
+        soldBy: team.find((t) => t.id === x.soldBy)?.name ?? staff.name,
+        extraFields: x.extraFields ?? null,
         paidAmount: paidNow, dueAmount: onDue,
         sameDay: true, daysOld: 0, returnDays: shopDetails.returnDays,
         items: detailLines, returns: [],
@@ -3172,6 +3209,9 @@ export function createDemoBackend(): Backend {
         status: sale!.status, approvalStatus: sale!.approvalStatus,
         voidReason: sale!.voidReason, refundMethod: sale!.refundMethod,
         customerPhone: sale!.customerPhone, customerName: sale!.customerName,
+        attention: sale!.attention, customerAddress: sale!.customerAddress,
+        customerBin: sale!.customerBin, narration: sale!.narration,
+        soldBy: sale!.soldBy, extraFields: sale!.extraFields,
         items: sale!.items, returns: sale!.returns,
         sameDay: dhakaDate(sale!.createdAt) === today,
         daysOld,

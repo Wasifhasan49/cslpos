@@ -70,7 +70,8 @@ export function ChequePrintView({ chequeId, onClose, onFail }: {
         className="print-root relative mt-3 overflow-hidden border border-dashed border-line-strong bg-white print:border-0"
         style={{ width: `${l.leafWidthMm}mm`, height: `${l.leafHeightMm}mm` }}
       >
-        <style>{`@page { size: ${l.leafWidthMm}mm ${l.leafHeightMm}mm; margin: 0; }`}</style>
+        {/* No page number on a cheque leaf, and no margin to put one in. */}
+        <style>{`@page { size: ${l.leafWidthMm}mm ${l.leafHeightMm}mm; margin: 0; @bottom-right { content: "" } }`}</style>
         <span style={at(l.dateX, l.dateY)} className="num">{c.date}</span>
         <span style={at(l.payeeX, l.payeeY)}>{c.payee ?? ""}</span>
         <span style={at(l.words1X, l.words1Y)}>{words1}</span>

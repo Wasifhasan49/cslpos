@@ -1139,17 +1139,35 @@ begin
 end $$;
 
 -- ---- Customers and suppliers, with their dues as opening balances ----
+-- DONE-WHEN: a customer with no mobile number still comes in, under their name.
+-- Most of the traders in the store's BMS have a made-up number — "-1192", "2026-01-01",
+-- "01000000000" — because BMS would not store them without one. The number is dropped
+-- and the name is what they are known by; only a row with neither is no use to anybody.
 do $$
 declare r jsonb;
 begin
-  r := public.import_customers('[{"phone":"01555000001","name":"Imported Customer","due":12500},{"phone":"2026-01-01","name":"Cash Customer","due":0},{"phone":"01555000002","name":"No Due","due":0}]'::jsonb,
+  r := public.import_customers('[{"phone":"01555000001","name":"Imported Customer","due":12500},{"phone":"2026-01-01","name":"IDB Shop","due":-400},{"phone":"01555000002","name":"No Due","due":0},{"phone":"","name":"","due":99}]'::jsonb,
         false, 'bms-customers.csv');
-  if (r->>'added')::int <> 2 then raise exception 'WRONG CUSTOMER ADD COUNT: %', r; end if;
-  -- BMS gives every walk-in the same placeholder mobile; importing those would create a
-  -- fictional customer per sale.
-  if (r->>'skipped')::int <> 1 then raise exception 'PLACEHOLDER PHONE NOT SKIPPED: %', r; end if;
-  if (r->>'opening_dues')::int <> 1 then raise exception 'DUE NOT RECORDED: %', r; end if;
-  raise notice 'ok: 2 customers in, the fake mobile skipped, 1 opening due recorded';
+  if (r->>'added')::int <> 3 then raise exception 'WRONG CUSTOMER ADD COUNT: %', r; end if;
+  if (r->>'skipped')::int <> 1 then raise exception 'NAMELESS, NUMBERLESS ROW NOT SKIPPED: %', r; end if;
+  -- Two dues: 12,500 owed to the shop and 400 the shop is holding for somebody.
+  if (r->>'opening_dues')::int <> 2 then raise exception 'DUE NOT RECORDED: %', r; end if;
+  raise notice 'ok: 3 customers in including one with no number, and a credit balance kept';
+end $$;
+select pg_temp.check(
+  (select phone from public.customers where name_text = 'IDB Shop') is null,
+  'and the made-up mobile number was not stored as if it were one');
+select pg_temp.check(
+  (select amount from public.opening_balances ob join public.customers c on c.id = ob.customer_id
+   where c.name_text = 'IDB Shop') = -400,
+  'a customer the shop is holding money for keeps that balance, rather than being dropped');
+-- Running the same file again finds them by name, so nobody is duplicated.
+do $$
+declare r jsonb;
+begin
+  r := public.import_customers('[{"phone":"2026-01-01","name":"IDB Shop","due":-400}]'::jsonb, false, 'again.csv');
+  if (r->>'updated')::int <> 1 then raise exception 'NAME-KEYED CUSTOMER DUPLICATED: %', r; end if;
+  raise notice 'ok: importing the same list again matches on the name, not a new row';
 end $$;
 select pg_temp.check(
   (select amount from public.opening_balances ob join public.customers c on c.id = ob.customer_id
@@ -5183,6 +5201,49 @@ begin
     p_cash_received  => 1000);
 end $$;
 select pg_temp.check(true, 'DONE-WHEN: a blocked customer can still pay cash — the block is on credit');
+
+-- DONE-WHEN: a customer with no mobile number can still be billed.
+-- The till finds them by name and sends who it found, because there is no number to
+-- dial. The shop they belong to is checked in the database, not taken on trust.
+do $$
+declare v_id uuid; r jsonb;
+begin
+  insert into public.customers (shop_id, phone, name_text)
+  values ('00000000-0000-4000-8000-000000000001', null, 'Agargaon Shop With No Phone')
+  returning id into v_id;
+
+  if jsonb_array_length(public.customer_find('agargaon shop')) <> 1 then
+    raise exception 'THE TILL CANNOT FIND A CUSTOMER BY NAME';
+  end if;
+  if public.customer_find('agargaon shop')->0->>'phone' is not null then
+    raise exception 'A CUSTOMER WITH NO NUMBER CAME BACK WITH ONE';
+  end if;
+
+  r := public.complete_sale(
+    p_branch_id      => '00000000-0000-4000-8000-0000000000b1',
+    p_items          => jsonb_build_array(jsonb_build_object(
+                          'product_id', (select id from public.products where code = 'LOG-K120'),
+                          'qty', 1, 'unit_price', 1000)),
+    p_payment_method => 'cash',
+    p_cash_received  => 1000,
+    p_extras         => jsonb_build_object('customer_id', v_id));
+  if (select customer_id from public.sales where id = (r->>'sale_id')::uuid) <> v_id then
+    raise exception 'THE SALE WENT TO NOBODY: %', r;
+  end if;
+  raise notice 'ok: a customer with no mobile number is found by name and billed by id';
+end $$;
+
+-- And a customer id from another shop is not somebody this shop may bill.
+select pg_temp.expect_error(
+  $q$select public.complete_sale(
+       p_branch_id => '00000000-0000-4000-8000-0000000000b1',
+       p_items => jsonb_build_array(jsonb_build_object(
+         'product_id', (select id from public.products where code = 'LOG-K120'),
+         'qty', 1, 'unit_price', 1000)),
+       p_payment_method => 'cash',
+       p_cash_received => 1000,
+       p_extras => jsonb_build_object('customer_id', '00000000-0000-4000-8000-00000000dead'))$q$,
+  'CUSTOMER_NOT_FOUND');
 
 -- "Cash only" is the softer version of the same thing.
 select public.convert_customer(:'DEALER', jsonb_build_object(

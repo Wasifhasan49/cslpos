@@ -205,14 +205,17 @@ export function CounterScreen() {
   // sale is completed, not be surprised by the total.
   React.useEffect(() => {
     const phone = sale.phone;
-    if (phone.length !== 11) {
+    const id = sale.customerId;
+    if (phone.length !== 11 && !id) {
       if (customer) { setCustomer(null); void loadProducts(); }
       return;
     }
     let cancelled = false;
     (async () => {
       try {
-        const found = await backend.findCustomer(phone);
+        // Dialled, or picked by name — most of the traders that came over from BMS have
+        // no number to dial, so the second way has to work as well as the first.
+        const found = id ? await backend.customerById(id) : await backend.findCustomer(phone);
         if (cancelled || found?.id === customer?.id) return;
         setCustomer(found);
         setProducts(await backend.listProducts(branch.id, found?.priceListId ?? null));
@@ -222,7 +225,7 @@ export function CounterScreen() {
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sale.phone, backend, branch.id]);
+  }, [sale.phone, sale.customerId, backend, branch.id]);
 
   const add = (p: Product) => { setSaleError(""); say(sale.addProduct(p)); };
 
@@ -278,6 +281,7 @@ export function CounterScreen() {
         // One approval covers whichever of the two needed it; the database checks both.
         approvalId: sale.approvalId,
         customerPhone: sale.phone || null,
+        customerId: sale.customerId,
         cashReceived: sale.method === "cash" && payingNow > 0 ? Number(sale.cashReceived) : null,
         // For a card sale the last four digits ARE the reference, wherever they were typed.
         paymentRef: sale.method === "cash" || payingNow === 0
@@ -390,6 +394,7 @@ export function CounterScreen() {
           submitting={submitting}
           error={saleError}
           customer={customer}
+          onFindCustomer={(q) => backend.customerFind(q)}
           approvers={approvers}
           checkingPin={checkingPin}
           pinMessage={pinMessage}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDemoBackend } from "./backend/demo";
 import {
-  addMonths, computeTotals, dhakaDate, dhakaToday, formatDay, friendlyError, isSessionExpired, pinScreenError, quickCashAmounts, refundFor, roundPrice, SALE_ERROR_CODES, saleBlocker, searchProducts, type CheckoutState,
+  addMonths, computeTotals, dhakaDate, dhakaToday, formatDay, friendlyError, isSessionExpired, pinScreenError, isPlaceholderPhone, phoneShown, quickCashAmounts, refundFor, roundPrice, SALE_ERROR_CODES, saleBlocker, searchProducts, type CheckoutState,
 } from "./sale";
 
 // Stock is per branch now, so the product map comes from a branch.
@@ -268,5 +268,27 @@ describe("a price the way a shop writes one", () => {
   it("leaves nothing as nothing, rather than inventing five taka", () => {
     expect(roundPrice(0)).toBe(0);
     expect(roundPrice(-5)).toBe(0);
+  });
+});
+
+describe("a mobile number somebody made up", () => {
+  it("spots the ones BMS was fed to get past its required field", () => {
+    expect(isPlaceholderPhone("01000000000")).toBe(true);
+    expect(isPlaceholderPhone("01111111111")).toBe(true);
+    expect(isPlaceholderPhone("00000000000")).toBe(true);
+    expect(isPlaceholderPhone("025")).toBe(true);
+  });
+
+  it("leaves a real one alone", () => {
+    expect(isPlaceholderPhone("01723666638")).toBe(false);
+    expect(isPlaceholderPhone("01678090035")).toBe(false);
+    // A real number can repeat a digit; it is nine identical ones that gives it away.
+    expect(isPlaceholderPhone("01711111112")).toBe(false);
+  });
+
+  it("shows nothing rather than a number nobody can ring", () => {
+    expect(phoneShown("01000000000")).toBe("");
+    expect(phoneShown(null)).toBe("");
+    expect(phoneShown("01723666638")).toBe("01723666638");
   });
 });

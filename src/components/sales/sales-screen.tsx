@@ -4,8 +4,8 @@ import * as React from "react";
 import {
   Ban, Check, Printer, Receipt as ReceiptIcon, RotateCcw, Search, TriangleAlert,
 } from "lucide-react";
-import { PrintSheet } from "@/components/print/print-sheet";
 import { useStaff } from "@/components/staff-provider";
+import { A4Invoice } from "./a4-invoice";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
 import { formatDay, formatTaka, refundFor } from "@/lib/sale";
@@ -435,13 +435,7 @@ function Tag({ kind, children }: { kind: "warn" | "bad"; children: React.ReactNo
 // Reprint
 // ---------------------------------------------------------------------------
 
-/**
- * The invoice again, on A4 and marked COPY so nobody mistakes it for the original.
- *
- * The 80 mm roll at the counter is the receipt the customer walks away with; this is
- * the bill a dealer files or a company wants for its books, so it is a full-width
- * document on the shared print layout rather than a wider copy of the till roll.
- */
+/** The invoice again, on A4 and marked COPY so nobody mistakes it for the original. */
 function ReprintView({ sale, onBack }: { sale: SaleDetail; onBack: () => void }) {
   return (
     <div className="flex flex-col gap-3 border-t border-subtle px-3 py-3">
@@ -451,85 +445,7 @@ function ReprintView({ sale, onBack }: { sale: SaleDetail; onBack: () => void })
         </Button>
         <Button variant="ghost" onClick={onBack}>Back</Button>
       </div>
-
-      <PrintSheet
-        title="Invoice"
-        subtitle="COPY — not the original"
-        aside={<>
-          <p className="code font-bold">{sale.invoiceNo}</p>
-          <p className="num">
-            {new Date(sale.createdAt).toLocaleString("en-GB", {
-              timeZone: "Asia/Dhaka",
-              day: "2-digit", month: "2-digit", year: "numeric",
-              hour: "2-digit", minute: "2-digit",
-            })}
-          </p>
-          <p>{sale.branch}</p>
-        </>}
-        className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-6 print:border-0 print:p-0"
-        footNote={<>
-          <p>
-            {METHOD_WORDS[sale.paymentMethod] ?? sale.paymentMethod}
-            {sale.cashReceived != null && ` · given ${formatTaka(sale.cashReceived)}`}
-            {sale.changeGiven != null && sale.changeGiven > 0 && ` · change ${formatTaka(sale.changeGiven)}`}
-            {sale.paymentRef && ` · ref ${sale.paymentRef}`}
-          </p>
-          <p>Served by {sale.staff}</p>
-          {sale.receiptFooter && <p className="pt-2">{sale.receiptFooter}</p>}
-        </>}
-      >
-        <div className="flex flex-wrap justify-between gap-4">
-          <div>
-            <p className="text-[13px] text-muted">Billed to</p>
-            <p className="font-semibold">{sale.customerName ?? "Walk-in customer"}</p>
-            {sale.customerPhone && <p className="num text-[13px] text-muted">{sale.customerPhone}</p>}
-          </div>
-          {sale.status === "void" && (
-            <p className="self-center font-bold text-bad-ink">THIS SALE WAS VOIDED</p>
-          )}
-        </div>
-
-        <table className="w-full text-[14px]">
-          <thead>
-            <tr className="border-b border-line text-left text-[13px] text-muted">
-              <th className="p-2 font-medium">Item</th>
-              <th className="p-2 text-right font-medium">Qty</th>
-              <th className="p-2 text-right font-medium">Price each</th>
-              <th className="p-2 text-right font-medium">Amount</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sale.items.map((i) => (
-              <tr key={i.id} className="border-b border-subtle">
-                <td className="p-2">
-                  {i.name}
-                  <span className="block text-[12px] text-muted">
-                    {i.serials.length > 0 && (
-                      <span className="code">{i.serials.map((x) => x.serial).join(", ")}</span>
-                    )}
-                    {i.warrantyUntil && `${i.serials.length > 0 ? " · " : ""}warranty to ${formatDay(i.warrantyUntil)}`}
-                  </span>
-                </td>
-                <td className="num p-2 text-right">{i.qty}</td>
-                <td className="num p-2 text-right">{formatTaka(i.unitPrice)}</td>
-                <td className="num p-2 text-right">{formatTaka(i.lineTotal)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-
-        <dl className="ml-auto flex w-full max-w-[300px] flex-col gap-0.5 text-[15px]">
-          <Row label="Subtotal" value={sale.subtotal} />
-          {sale.discountAmount > 0 && (
-            <Row label={`Discount ${sale.discountPct}%`} value={-sale.discountAmount} />
-          )}
-          {sale.vatAmount > 0 && <Row label="VAT" value={sale.vatAmount} />}
-          {sale.chargesAmount > 0 && <Row label="Charges" value={sale.chargesAmount} />}
-          <div className="flex justify-between border-t border-line pt-1 text-lg font-bold">
-            <dt>Total</dt><dd className="num">{formatTaka(sale.total)}</dd>
-          </div>
-        </dl>
-      </PrintSheet>
+      <A4Invoice sale={sale} copy />
     </div>
   );
 }
