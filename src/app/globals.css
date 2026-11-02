@@ -41,29 +41,73 @@ html, body {
   letter-spacing: 0.01em;
 }
 
-/* Printing: only the receipt, sized for an 80 mm roll (also fine on A4). */
-@media print {
-  @page { margin: 4mm; }
-  body * { visibility: hidden; }
-  #print-receipt, #print-receipt * { visibility: visible; }
-  #print-receipt { position: absolute; left: 0; top: 0; width: 72mm; font-size: 11px; color: #000; }
+/* ---------------------------------------------------------------------------
+   Printing.
 
-  /* A report is a page of paper, so the browser makes the paper: no PDF library, and
-     the headings repeat on every page because a six-page register without them is
-     unreadable. */
-  #print-report, #print-report * { visibility: visible; }
-  #print-report {
-    position: absolute; left: 0; top: 0; width: 100%;
-    font-size: 10px; color: #000;
+   One print root for everything that goes on paper: a report, an A4 document, a slip.
+   The component that draws the header and footer is src/components/print/print-sheet.tsx;
+   this is the paper it lands on.
+
+   Everything that is not the print root, and not on the path down to it, is DISPLAY:NONE
+   rather than invisible. An invisible element still takes up its space, which is how a
+   two-line transfer slip used to be followed by four blank sheets of paper — and why
+   five of the print buttons printed nothing at all, their article having never been
+   inside the one allow-listed id.
+   --------------------------------------------------------------------------- */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 12mm 10mm 14mm;
+    /* Firefox and Safari put the page number in the bottom margin. Chrome ignores
+       margin boxes (crbug.com/320514); its own print dialog has the same thing under
+       "Headers and footers". */
+    @bottom-right { content: "Page " counter(page) " of " counter(pages); font-size: 8pt; }
   }
-  #print-report table { width: 100%; border-collapse: collapse; }
-  #print-report thead { display: table-header-group; }
-  #print-report tr { page-break-inside: avoid; }
-  #print-report th, #print-report td {
-    border-bottom: 1px solid #ccc; padding: 2px 4px; text-align: left;
+
+  html, body { background: #fff; }
+
+  body *:not(:has(.print-root)):not(.print-root):not(.print-root *) { display: none !important; }
+  /* The wrappers above the print root are left as plain blocks: their padding, width
+     cap and shadow are screen furniture, and on paper they only waste margin. */
+  body :has(.print-root) {
+    display: block !important;
+    margin: 0 !important; padding: 0 !important; border: 0 !important;
+    max-width: none !important; width: auto !important;
+    background: none !important; box-shadow: none !important;
   }
-  #print-report th.right, #print-report td.right { text-align: right; }
-  #print-report .sheet { page-break-after: always; }
-  #print-report .sheet:last-child { page-break-after: auto; }
-  #print-report .no-print { display: none; }
+  .no-print, .print-root .no-print { display: none !important; }
+
+  .print-root {
+    color: #000;
+    font-size: 10pt;
+  }
+  .print-root .print-head { break-after: avoid; }
+  .print-root .print-logo { max-height: 18mm; max-width: 45mm; }
+
+  /* Bordered tables with grid lines, as every report in this market is printed. */
+  .print-root table { width: 100%; border-collapse: collapse; font-size: 9pt; }
+  .print-root thead { display: table-header-group; }
+  /* NOT table-footer-group, which would repeat the grand total at the foot of every
+     page as though each page had earned it. The headings repeat; the total happens
+     once, at the end. */
+  .print-root tfoot { display: table-row-group; }
+  .print-root tr { break-inside: avoid; background: none !important; }
+  .print-root th, .print-root td {
+    border: 1px solid #888; padding: 2px 4px; text-align: left;
+    background: none !important; color: #000;
+  }
+  .print-root th { font-weight: 700; }
+  .print-root th.right, .print-root td.right, .print-root .text-right { text-align: right; }
+  /* Group headings and subtotals in bold, and a double rule under a grand total: the
+     three things that let somebody read a six-page register without counting columns. */
+  .print-root tbody tr.is-subtotal td { font-weight: 700; }
+  .print-root tfoot td { font-weight: 700; border-top: 3px double #000; }
+  .print-root .sheet { break-after: page; }
+  .print-root .sheet:last-child { break-after: auto; }
+  .print-root .print-foot { break-before: avoid; }
+
+  /* The 80 mm receipt keeps its own width and its own type size (P16 owns it). */
+  #print-receipt {
+    width: 72mm; font-size: 11px;
+  }
 }

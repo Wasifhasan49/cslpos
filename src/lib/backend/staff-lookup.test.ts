@@ -40,9 +40,37 @@ describe("classifyStaffLookup", () => {
     expect(got.staff).toEqual({
       id: "s1", name: "Ovi", role: "cashier",
       discountLimitPct: 5, shopName: "Demo Shop", hasPin: false,
+      letterhead: {
+        shopName: "Demo Shop", logoUrl: null, address: null, phone: null,
+        email: null, binVat: null,
+      },
       branches: [
-        { id: "b1", name: "Main branch", code: "MB", locations: [{ id: "e1", name: "Main store", isDefault: true }] },
+        { id: "b1", name: "Main branch", code: "MB", address: null, phone: null,
+          locations: [{ id: "e1", name: "Main store", isDefault: true }] },
       ],
+    });
+  });
+
+  // A login held open across the migration that added the letterhead gets a row without
+  // one. The printout still has to say whose shop it is, so the shop name stands in.
+  it("falls back to the shop name when the row carries no letterhead", () => {
+    const got = classifyStaffLookup({ user: {}, row });
+    if (got.kind !== "ok") throw new Error("unreachable");
+    expect(got.staff.letterhead.shopName).toBe("Demo Shop");
+    expect(got.staff.letterhead.logoUrl).toBeNull();
+  });
+
+  it("carries the shop's own letterhead, which is what a printout prints", () => {
+    const got = classifyStaffLookup({ user: {}, row: { ...row, letterhead: {
+      shop_name: "Computer Services", logo_url: "data:image/png;base64,AAA",
+      address: "Shop 9, BCS Computer City", phone: "01700-000000",
+      email: null, bin_vat: "0001234567",
+    } } });
+    if (got.kind !== "ok") throw new Error("unreachable");
+    expect(got.staff.letterhead).toEqual({
+      shopName: "Computer Services", logoUrl: "data:image/png;base64,AAA",
+      address: "Shop 9, BCS Computer City", phone: "01700-000000",
+      email: null, binVat: "0001234567",
     });
   });
 

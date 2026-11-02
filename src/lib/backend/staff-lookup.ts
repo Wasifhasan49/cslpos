@@ -1,4 +1,4 @@
-import type { Branch, Role, Staff, StaffLookup } from "../types";
+import type { Branch, Letterhead, Role, Staff, StaffLookup } from "../types";
 
 /** The shape current_staff() returns, or null when the login has no staff row. */
 export interface CurrentStaffRow {
@@ -9,10 +9,22 @@ export interface CurrentStaffRow {
   discount_limit_pct: number | string;
   shop_name: string;
   has_pin: boolean;
+  /** Added with the shared print layout. Absent on a login from before that
+   *  migration ran, so the shop name alone has to be enough. */
+  letterhead?: {
+    shop_name?: string | null;
+    logo_url?: string | null;
+    address?: string | null;
+    phone?: string | null;
+    email?: string | null;
+    bin_vat?: string | null;
+  } | null;
   branches: {
     id: string;
     name: string;
     code: string;
+    address?: string | null;
+    phone?: string | null;
     locations: { id: string; name: string; is_default: boolean }[];
   }[];
 }
@@ -43,8 +55,20 @@ export function classifyStaffLookup({ user, row }: LookupInput): StaffLookup {
     id: b.id,
     name: b.name,
     code: b.code,
+    address: b.address ?? null,
+    phone: b.phone ?? null,
     locations: (b.locations ?? []).map((l) => ({ id: l.id, name: l.name, isDefault: l.is_default })),
   }));
+
+  const head = row.letterhead ?? {};
+  const letterhead: Letterhead = {
+    shopName: head.shop_name ?? row.shop_name,
+    logoUrl: head.logo_url ?? null,
+    address: head.address ?? null,
+    phone: head.phone ?? null,
+    email: head.email ?? null,
+    binVat: head.bin_vat ?? null,
+  };
 
   const staff: Staff = {
     id: row.staff_id,
@@ -52,6 +76,7 @@ export function classifyStaffLookup({ user, row }: LookupInput): StaffLookup {
     role: row.role as Role,
     discountLimitPct: Number(row.discount_limit_pct),
     shopName: row.shop_name,
+    letterhead,
     hasPin: Boolean(row.has_pin),
     branches,
   };

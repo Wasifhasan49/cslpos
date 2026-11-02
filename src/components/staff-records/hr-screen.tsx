@@ -4,6 +4,7 @@ import * as React from "react";
 import {
   CalendarCheck, Check, Clock, Plus, Target, Users, Wallet, X,
 } from "lucide-react";
+import { PrintSheet } from "@/components/print/print-sheet";
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -704,7 +705,7 @@ function Salary({ onDone, onFail }: { onDone: (s: string) => void; onFail: (e: u
 
       {open && (
         <section className="rounded-xl border border-line bg-white">
-          <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line p-4">
+          <div className="no-print flex flex-wrap items-start justify-between gap-3 border-b border-line p-4">
             <div>
               <h2 className="font-semibold">Salary for {open.month.slice(0, 7)}</h2>
               <p className="text-[13px] text-muted">
@@ -716,7 +717,13 @@ function Salary({ onDone, onFail }: { onDone: (s: string) => void; onFail: (e: u
               <X className="size-4" aria-hidden />
             </Button>
           </div>
-          <div id="print-report" className="overflow-x-auto">
+          <PrintSheet
+            title="Salary Sheet"
+            subtitle={monthWords(open.month)}
+            onScreen={false}
+            landscape
+            className="overflow-x-auto"
+          >
             <table className="w-full text-[14px]">
               <thead>
                 <tr className="border-b border-line text-left text-[13px] text-muted">
@@ -758,9 +765,9 @@ function Salary({ onDone, onFail }: { onDone: (s: string) => void; onFail: (e: u
                 </tr>
               </tfoot>
             </table>
-          </div>
+          </PrintSheet>
           <div className="no-print flex flex-wrap gap-2 border-t border-line p-4">
-            <Button variant="outline" onClick={() => window.print()}>Print the slips</Button>
+            <Button variant="outline" onClick={() => window.print()}>Print the sheet</Button>
             {open.status === "draft" && (
               <Button
                 disabled={busy}
@@ -930,6 +937,15 @@ function Reps({ onDone, onFail }: { onDone: (s: string) => void; onFail: (e: unk
     </>
   );
 }
+
+/** "October 2026" — a salary sheet is for a month, and nobody says "2026-10". */
+function monthWords(month: string): string {
+  const [y, m] = month.slice(0, 7).split("-");
+  return `${MONTHS[Number(m) - 1] ?? m} ${y}`;
+}
+
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July",
+                "August", "September", "October", "November", "December"];
 
 function lastMonth(): string {
   const d = new Date();

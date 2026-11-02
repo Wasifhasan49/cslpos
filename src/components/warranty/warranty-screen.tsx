@@ -5,6 +5,7 @@ import {
   Check, ClipboardList, Package, Plus, Printer, Search, ShieldCheck, TriangleAlert,
   Truck, Wrench,
 } from "lucide-react";
+import { PrintSheet } from "@/components/print/print-sheet";
 import { useStaff } from "@/components/staff-provider";
 import { formatDate } from "@/lib/sale";
 import { Button } from "@/components/ui/button";
@@ -995,23 +996,27 @@ function ClaimDetail({
 
 /** What the customer walks out with: proof the shop has their thing. */
 function ClaimSlip({ claim, onBack }: { claim: ClaimRow; onBack: () => void }) {
-  const { staff } = useStaff();
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap gap-2 print:hidden">
+      <div className="no-print flex flex-wrap gap-2">
         <Button onClick={() => window.print()}>
           <Printer className="size-4" aria-hidden /> Print
         </Button>
         <Button variant="ghost" onClick={onBack}>Back to the claims</Button>
       </div>
 
-      <article className="mx-auto flex w-full max-w-[420px] flex-col gap-3 rounded-xl border border-line bg-surface p-5">
-        <header className="flex flex-col items-center gap-0.5 border-b border-line pb-3 text-center">
-          <h2 className="text-lg font-bold">{staff.shopName}</h2>
-          <p className="text-[13px] text-muted">Service claim</p>
-          <p className="code font-bold">{claim.claimNo}</p>
-        </header>
-
+      <PrintSheet
+        title="Service Claim"
+        aside={<p className="code font-bold">{claim.claimNo}</p>}
+        className="mx-auto flex w-full max-w-[420px] flex-col gap-3 rounded-xl border border-line bg-surface p-5 print:max-w-none print:border-0 print:p-0"
+        footNote={<>
+          <p className="pb-2">
+            Please bring this slip when collecting. Keep it safe — it is the shop&rsquo;s
+            record of what was handed over.
+          </p>
+          <p>Collected by ______________________ on ____ / ____ / ________</p>
+        </>}
+      >
         <dl className="flex flex-col gap-1 text-[15px]">
           <SlipRow label="Item" value={claim.product ?? "—"} />
           {claim.serial && <SlipRow label="Serial" value={claim.serial} mono />}
@@ -1045,14 +1050,7 @@ function ClaimSlip({ claim, onBack }: { claim: ClaimRow; onBack: () => void }) {
           </p>
         </div>
 
-        <p className="text-[13px] text-muted">
-          Please bring this slip when collecting. Keep it safe — it is the shop&rsquo;s
-          record of what was handed over.
-        </p>
-        <p className="text-[13px] text-muted">
-          Collected by ______________________ on ____ / ____ / ________
-        </p>
-      </article>
+      </PrintSheet>
     </div>
   );
 }

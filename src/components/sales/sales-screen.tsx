@@ -4,6 +4,7 @@ import * as React from "react";
 import {
   Ban, Check, Printer, Receipt as ReceiptIcon, RotateCcw, Search, TriangleAlert,
 } from "lucide-react";
+import { PrintSheet } from "@/components/print/print-sheet";
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
@@ -434,60 +435,90 @@ function Tag({ kind, children }: { kind: "warn" | "bad"; children: React.ReactNo
 // Reprint
 // ---------------------------------------------------------------------------
 
-/** The same receipt again, marked COPY so nobody mistakes it for the original. */
+/**
+ * The invoice again, on A4 and marked COPY so nobody mistakes it for the original.
+ *
+ * The 80 mm roll at the counter is the receipt the customer walks away with; this is
+ * the bill a dealer files or a company wants for its books, so it is a full-width
+ * document on the shared print layout rather than a wider copy of the till roll.
+ */
 function ReprintView({ sale, onBack }: { sale: SaleDetail; onBack: () => void }) {
   return (
     <div className="flex flex-col gap-3 border-t border-subtle px-3 py-3">
-      <div className="flex flex-wrap gap-2 print:hidden">
+      <div className="no-print flex flex-wrap gap-2">
         <Button onClick={() => window.print()}>
           <Printer className="size-4" aria-hidden /> Print
         </Button>
         <Button variant="ghost" onClick={onBack}>Back</Button>
       </div>
 
-      <article className="mx-auto w-full max-w-[380px] rounded-xl border border-line bg-surface p-5">
-        <header className="flex flex-col items-center gap-0.5 border-b border-line pb-3 text-center">
-          <p className="rounded bg-subtle px-2 py-0.5 text-[13px] font-bold tracking-wide text-muted">
-            COPY
-          </p>
-          <h2 className="text-lg font-bold">{sale.shopName}</h2>
-          <p className="text-[13px] text-muted">{sale.branch}</p>
-          {sale.branchAddress && <p className="text-[13px] text-muted">{sale.branchAddress}</p>}
-          {sale.branchPhone && <p className="num text-[13px] text-muted">{sale.branchPhone}</p>}
-          {sale.binVat && <p className="code text-[13px] text-muted">BIN {sale.binVat}</p>}
-        </header>
-
-        <div className="flex justify-between py-2 text-[13px]">
-          <span className="code font-semibold">{sale.invoiceNo}</span>
-          <span className="text-muted">
+      <PrintSheet
+        title="Invoice"
+        subtitle="COPY — not the original"
+        aside={<>
+          <p className="code font-bold">{sale.invoiceNo}</p>
+          <p className="num">
             {new Date(sale.createdAt).toLocaleString("en-GB", {
+              timeZone: "Asia/Dhaka",
               day: "2-digit", month: "2-digit", year: "numeric",
               hour: "2-digit", minute: "2-digit",
             })}
-          </span>
+          </p>
+          <p>{sale.branch}</p>
+        </>}
+        className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-6 print:border-0 print:p-0"
+        footNote={<>
+          <p>
+            {METHOD_WORDS[sale.paymentMethod] ?? sale.paymentMethod}
+            {sale.cashReceived != null && ` · given ${formatTaka(sale.cashReceived)}`}
+            {sale.changeGiven != null && sale.changeGiven > 0 && ` · change ${formatTaka(sale.changeGiven)}`}
+            {sale.paymentRef && ` · ref ${sale.paymentRef}`}
+          </p>
+          <p>Served by {sale.staff}</p>
+          {sale.receiptFooter && <p className="pt-2">{sale.receiptFooter}</p>}
+        </>}
+      >
+        <div className="flex flex-wrap justify-between gap-4">
+          <div>
+            <p className="text-[13px] text-muted">Billed to</p>
+            <p className="font-semibold">{sale.customerName ?? "Walk-in customer"}</p>
+            {sale.customerPhone && <p className="num text-[13px] text-muted">{sale.customerPhone}</p>}
+          </div>
+          {sale.status === "void" && (
+            <p className="self-center font-bold text-bad-ink">THIS SALE WAS VOIDED</p>
+          )}
         </div>
 
-        <ul className="flex flex-col gap-1 border-y border-subtle py-2 text-[15px]">
-          {sale.items.map((i) => (
-            <li key={i.id} className="flex flex-col">
-              <span className="flex justify-between gap-2">
-                <span>{i.name}</span>
-                <span className="num">{formatTaka(i.lineTotal)}</span>
-              </span>
-              <span className="text-[13px] text-muted">
-                <span className="num">{i.qty}</span> × <span className="num">{formatTaka(i.unitPrice)}</span>
-                {i.warrantyUntil && ` · warranty to ${i.warrantyUntil}`}
-              </span>
-              {i.serials.length > 0 && (
-                <span className="code text-[13px] text-muted">
-                  {i.serials.map((s) => s.serial).join(", ")}
-                </span>
-              )}
-            </li>
-          ))}
-        </ul>
+        <table className="w-full text-[14px]">
+          <thead>
+            <tr className="border-b border-line text-left text-[13px] text-muted">
+              <th className="p-2 font-medium">Item</th>
+              <th className="p-2 text-right font-medium">Qty</th>
+              <th className="p-2 text-right font-medium">Price each</th>
+              <th className="p-2 text-right font-medium">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sale.items.map((i) => (
+              <tr key={i.id} className="border-b border-subtle">
+                <td className="p-2">
+                  {i.name}
+                  <span className="block text-[12px] text-muted">
+                    {i.serials.length > 0 && (
+                      <span className="code">{i.serials.map((x) => x.serial).join(", ")}</span>
+                    )}
+                    {i.warrantyUntil && `${i.serials.length > 0 ? " · " : ""}warranty to ${formatDay(i.warrantyUntil)}`}
+                  </span>
+                </td>
+                <td className="num p-2 text-right">{i.qty}</td>
+                <td className="num p-2 text-right">{formatTaka(i.unitPrice)}</td>
+                <td className="num p-2 text-right">{formatTaka(i.lineTotal)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
 
-        <dl className="flex flex-col gap-0.5 py-2 text-[15px]">
+        <dl className="ml-auto flex w-full max-w-[300px] flex-col gap-0.5 text-[15px]">
           <Row label="Subtotal" value={sale.subtotal} />
           {sale.discountAmount > 0 && (
             <Row label={`Discount ${sale.discountPct}%`} value={-sale.discountAmount} />
@@ -498,23 +529,7 @@ function ReprintView({ sale, onBack }: { sale: SaleDetail; onBack: () => void })
             <dt>Total</dt><dd className="num">{formatTaka(sale.total)}</dd>
           </div>
         </dl>
-
-        <p className="text-[13px] text-muted">
-          {METHOD_WORDS[sale.paymentMethod] ?? sale.paymentMethod}
-          {sale.cashReceived != null && ` · given ${formatTaka(sale.cashReceived)}`}
-          {sale.changeGiven != null && sale.changeGiven > 0 && ` · change ${formatTaka(sale.changeGiven)}`}
-          {sale.paymentRef && ` · ref ${sale.paymentRef}`}
-        </p>
-        <p className="text-[13px] text-muted">Served by {sale.staff}</p>
-        {sale.status === "void" && (
-          <p className="pt-1 font-bold text-bad-ink">THIS SALE WAS VOIDED</p>
-        )}
-        {sale.receiptFooter && (
-          <p className="border-t border-subtle pt-2 text-center text-[13px] text-muted">
-            {sale.receiptFooter}
-          </p>
-        )}
-      </article>
+      </PrintSheet>
     </div>
   );
 }

@@ -5,6 +5,7 @@ import {
   ArrowLeftRight, BookOpen, Check, Coins, FileText, Landmark, Printer, Receipt,
   RotateCcw, TriangleAlert, X,
 } from "lucide-react";
+import { PrintSheet } from "@/components/print/print-sheet";
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -266,6 +267,14 @@ function MoneyTab({ branch, branches, onDone, onFail }: {
 }
 
 /** The entries themselves, and the few a person types. */
+/** What a voucher calls itself, the way an accountant files it. */
+const VOUCHER_TITLE: Record<string, string> = {
+  receipt: "Receipt Voucher",
+  payment: "Payment Voucher",
+  contra: "Contra Voucher",
+  journal: "Journal Voucher",
+};
+
 function VouchersTab({ branch, onDone, onFail }: {
   branch: Branch; onDone: (s: string) => void; onFail: (e: unknown) => void;
 }) {
@@ -383,28 +392,54 @@ function VouchersTab({ branch, onDone, onFail }: {
             </button>
             {open === e.id && (
               <div className="border-t border-line p-3">
-                <table className="w-full text-[15px]">
-                  <thead>
-                    <tr className="text-left text-[13px] text-muted">
-                      <th className="font-normal">Account</th>
-                      <th className="font-normal text-right">Debit</th>
-                      <th className="font-normal text-right">Credit</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {e.lines.map((l, i) => (
-                      <tr key={`${e.id}-${i}`} className="border-t border-line/60">
-                        <td className="py-1">
-                          {l.account}
-                          {l.party && <span className="text-[13px] text-muted"> · {l.party}</span>}
-                        </td>
-                        <td className="num py-1 text-right">{l.debit ? formatTaka(l.debit) : ""}</td>
-                        <td className="num py-1 text-right">{l.credit ? formatTaka(l.credit) : ""}</td>
+                <PrintSheet
+                  title={VOUCHER_TITLE[e.sourceKind ?? ""] ?? "Journal Voucher"}
+                  subtitle={e.narration ?? undefined}
+                  aside={<>
+                    <p className="code font-bold">{e.entryNo}</p>
+                    <p className="num">{formatDay(e.date)}</p>
+                    {e.branch && <p>{e.branch}</p>}
+                  </>}
+                  onScreen={false}
+                  footNote={<div className="hidden justify-between gap-8 pt-10 text-[12px] print:flex">
+                    <p className="border-t border-ink pt-1">Prepared by</p>
+                    <p className="border-t border-ink pt-1">Approved by</p>
+                    <p className="border-t border-ink pt-1">Received by</p>
+                  </div>}
+                >
+                  <table className="w-full text-[15px]">
+                    <thead>
+                      <tr className="text-left text-[13px] text-muted">
+                        <th className="font-normal">Account</th>
+                        <th className="font-normal text-right">Debit</th>
+                        <th className="font-normal text-right">Credit</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <div className="flex flex-wrap gap-2 pt-3">
+                    </thead>
+                    <tbody>
+                      {e.lines.map((l, i) => (
+                        <tr key={`${e.id}-${i}`} className="border-t border-line/60">
+                          <td className="py-1">
+                            {l.account}
+                            {l.party && <span className="text-[13px] text-muted"> · {l.party}</span>}
+                          </td>
+                          <td className="num py-1 text-right">{l.debit ? formatTaka(l.debit) : ""}</td>
+                          <td className="num py-1 text-right">{l.credit ? formatTaka(l.credit) : ""}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="border-t-2 border-ink font-semibold">
+                        <td className="py-1">Total</td>
+                        <td className="num py-1 text-right">{formatTaka(e.amount)}</td>
+                        <td className="num py-1 text-right">{formatTaka(e.amount)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </PrintSheet>
+                <div className="no-print flex flex-wrap gap-2 pt-3">
+                  <Button variant="outline" onClick={() => window.print()}>
+                    <Printer className="size-4" aria-hidden /> Print it
+                  </Button>
                   {e.status === "awaiting_approval" && (
                     <>
                       <Button

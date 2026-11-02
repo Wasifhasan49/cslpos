@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { Check, Printer, Truck, X } from "lucide-react";
+import { PrintSheet } from "@/components/print/print-sheet";
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +12,14 @@ import { cn } from "@/lib/utils";
 import { statusWords } from "./orders-screen";
 
 type Tab = "quotations" | "orders" | "challans";
+
+/** What the paper calls itself. A customer has never heard the word "challan" used of
+ *  a quotation, so each kind says its own name. */
+const DOC_TITLE: Record<"quotation" | "order" | "challan", string> = {
+  quotation: "Quotation",
+  order: "Sales Order",
+  challan: "Delivery Note",
+};
 
 /**
  * One quotation, order or delivery note, with whatever can be done to it next.
@@ -56,7 +65,7 @@ export function DocumentView({ kind, id, onClose, onDone, onFail }: {
 
   return (
     <section className="rounded-xl border border-line bg-white">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line p-4">
+      <div className="no-print flex flex-wrap items-start justify-between gap-3 border-b border-line p-4">
         <div>
           <h2 className="text-[17px] font-semibold">
             <span className="code">{doc.no}</span>
@@ -97,7 +106,30 @@ export function DocumentView({ kind, id, onClose, onDone, onFail }: {
         </div>
       </div>
 
-      <div id="print-report">
+      <PrintSheet
+        title={DOC_TITLE[kind]}
+        subtitle={statusWords(doc.status)}
+        aside={<>
+          <p className="code font-bold">{doc.no}</p>
+          <p className="num">{formatDay(doc.date)}</p>
+        </>}
+        onScreen={false}
+      >
+        {/* Who it is for. On screen the panel above says this already; on paper there
+            is nothing above, and a quotation with no customer on it is waste paper. */}
+        <div className="hidden justify-between gap-6 py-2 print:flex">
+          <div>
+            <p className="text-[12px]">To</p>
+            <p className="font-semibold">{doc.customer}</p>
+            {doc.attention && <p className="text-[13px]">For the attention of {doc.attention}</p>}
+          </div>
+          <div className="text-right text-[13px]">
+            {doc.orderNo && <p>Against order <span className="code">{doc.orderNo}</span></p>}
+            {doc.validUntil && <p>Prices good until <span className="num">{formatDay(doc.validUntil)}</span></p>}
+            {doc.deliveryDate && <p>Wanted by <span className="num">{formatDay(doc.deliveryDate)}</span></p>}
+          </div>
+        </div>
+
         <div className="overflow-x-auto">
           <table className="w-full text-[14px]">
             <thead>
@@ -175,7 +207,15 @@ export function DocumentView({ kind, id, onClose, onDone, onFail }: {
             Sent with {doc.carrier}{doc.vehicleNo && ` · ${doc.vehicleNo}`}
           </p>
         )}
-      </div>
+
+        {/* A delivery note is signed for; the others are not. */}
+        {kind === "challan" && (
+          <div className="hidden justify-between gap-8 pt-10 text-[12px] print:flex">
+            <p className="border-t border-ink pt-1">Sent by</p>
+            <p className="border-t border-ink pt-1">Received by, with date</p>
+          </div>
+        )}
+      </PrintSheet>
 
       {doc.challans.length > 0 && (
         <div className="no-print border-t border-line p-4">

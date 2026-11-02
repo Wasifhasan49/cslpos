@@ -4,6 +4,7 @@ import * as React from "react";
 import {
   ArrowRightLeft, Check, Printer, Trash2, Truck, TriangleAlert,
 } from "lucide-react";
+import { PrintSheet } from "@/components/print/print-sheet";
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
@@ -431,10 +432,10 @@ interface SentSlip {
 function TransferSlip({
   sent, toBranch, onAgain,
 }: { sent: SentSlip; toBranch: string; onAgain: () => void }) {
-  const { branch, staff } = useStaff();
+  const { branch } = useStaff();
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-2 print:hidden">
+      <div className="no-print flex flex-wrap items-center gap-2">
         <p className="flex items-center gap-2 font-semibold text-ok-ink">
           <Check className="size-5" aria-hidden /> Sent as {sent.no}
         </p>
@@ -443,23 +444,24 @@ function TransferSlip({
         </Button>
         <Button variant="ghost" onClick={onAgain}>Send something else</Button>
       </div>
-      <p className="text-[15px] print:hidden">
+      <p className="no-print text-[15px]">
         The goods are off {branch.name}&rsquo;s shelf and nobody can sell them until
         {" "}{toBranch} receives them.
       </p>
 
-      <article className="flex flex-col gap-4 rounded-xl border border-line bg-surface p-6">
-        <header className="flex flex-wrap items-start justify-between gap-3 border-b border-line pb-3">
-          <div>
-            <h2 className="text-lg font-bold">{staff.shopName}</h2>
-            <p className="text-[13px] text-muted">Transfer slip — send this with the goods</p>
-          </div>
-          <div className="text-right">
-            <p className="code font-bold">{sent.no}</p>
-            <p className="text-[13px] text-muted">{formatDay(new Date())}</p>
-          </div>
-        </header>
-
+      <PrintSheet
+        title="Transfer Slip"
+        subtitle="Send this with the goods"
+        aside={<>
+          <p className="code font-bold">{sent.no}</p>
+          <p className="num">{formatDay(new Date())}</p>
+        </>}
+        className="flex flex-col gap-4 rounded-xl border border-line bg-surface p-6 print:border-0 print:p-0"
+        footNote={<>
+          {sent.note && <p className="pb-2">{sent.note}</p>}
+          <p>Checked by ______________________ on ____ / ____ / ________</p>
+        </>}
+      >
         <div className="flex flex-wrap justify-between gap-4">
           <div>
             <p className="text-[13px] text-muted">From</p>
@@ -492,11 +494,7 @@ function TransferSlip({
           </tbody>
         </table>
 
-        {sent.note && <p className="text-[13px] text-muted">{sent.note}</p>}
-        <p className="text-[13px] text-muted">
-          Checked by ______________________ on ____ / ____ / ________
-        </p>
-      </article>
+      </PrintSheet>
     </div>
   );
 }

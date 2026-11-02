@@ -2,10 +2,11 @@
 
 import * as React from "react";
 import { Download, Printer, Sheet, TriangleAlert } from "lucide-react";
+import { PrintSheet } from "@/components/print/print-sheet";
 import { Button } from "@/components/ui/button";
-import { formatTaka } from "@/lib/sale";
+import { formatDay, formatTaka } from "@/lib/sale";
 import {
-  download, fileName, periodWords, reportToCsv, reportToXlsx,
+  download, fileName, periodShown, reportToCsv, reportToXlsx,
 } from "@/lib/reports-export";
 import type { ReportColumnOut, ReportResult, ReportRow, ReportSection } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -19,10 +20,10 @@ import { cn } from "@/lib/utils";
  * a subtotal, because a subtotal has no one invoice number and printing the first one
  * is how a report starts telling lies.
  *
- * The printed page is the same markup with a print stylesheet over it (globals.css):
- * the shop's name, the report's name, the period, and the column headings repeated on
- * every sheet of paper. No PDF library — the browser is better at making paper than
- * anything we could add, and it is already installed.
+ * The printed page is the same markup inside the shared print layout: the shop's own
+ * letterhead, the report's name, the period, and the column headings repeated on every
+ * sheet of paper. No PDF library — the browser is better at making paper than anything
+ * we could add, and it is already installed.
  */
 export function ReportView({ report, onDrill }: {
   report: ReportResult;
@@ -53,7 +54,7 @@ export function ReportView({ report, onDrill }: {
           <h2 className="text-[17px] font-semibold">{report.title}</h2>
           <p className="text-[13px] text-muted">
             <span className="code">{report.key}</span>
-            {periodWords(report) && ` · ${periodWords(report)}`}
+            {periodShown(report) && ` · ${periodShown(report)}`}
             {report.branch ? ` · ${report.branch}` : " · every branch"}
           </p>
           {report.note && <p className="mt-1 max-w-[70ch] text-[13px] text-muted">{report.note}</p>}
@@ -90,17 +91,17 @@ export function ReportView({ report, onDrill }: {
         </p>
       )}
 
-      <div id="print-report">
-        {report.landscape && <style>{"@page { size: A4 landscape; margin: 8mm; }"}</style>}
-        <header className="hidden print:block">
-          <p style={{ fontWeight: 700, fontSize: 13 }}>{report.shop}</p>
-          <p style={{ fontWeight: 700 }}>{report.title}</p>
-          <p>
-            {periodWords(report)}
-            {report.branch ? ` · ${report.branch}` : " · every branch"}
-          </p>
-        </header>
-
+      <PrintSheet
+        title={report.title}
+        subtitle={<>
+          {periodShown(report)}
+          {report.branch ? ` · ${report.branch}` : " · every branch"}
+        </>}
+        aside={<span className="code">{report.key}</span>}
+        landscape={report.landscape}
+        onScreen={false}
+        by={report.runBy}
+      >
         {empty && (
           <p className="p-4 text-[15px] text-muted">
             Nothing to show for that. Try a wider range of dates, or every branch.
@@ -129,7 +130,7 @@ export function ReportView({ report, onDrill }: {
                           key={c.f}
                           className={cn("p-2 font-normal", isNumber(c) && "right text-right")}
                         >
-                          {c.l}
+                          {columnLabel(c.l)}
                         </th>
                       ))}
                     </tr>
@@ -166,10 +167,7 @@ export function ReportView({ report, onDrill }: {
           </div>
         ))}
 
-        <footer className="hidden print:block" style={{ marginTop: 8, fontSize: 9 }}>
-          Printed {new Date(report.runAt).toLocaleString("en-GB")} by {report.runBy}
-        </footer>
-      </div>
+      </PrintSheet>
     </section>
   );
 }
@@ -190,7 +188,7 @@ function Line({ row, columns, drill, onDrill }: {
       // "total" into a spare column as well only repeats what the row already says.
       className={cn(
         "border-b border-line/60",
-        subtotal && "bg-subtle font-semibold",
+        subtotal && "is-subtotal bg-subtle font-semibold",
         clickable && "cursor-pointer hover:bg-subtle")}
       onClick={clickable ? () => onDrill!(drill!, String(id)) : undefined}
     >
@@ -220,6 +218,23 @@ function ExtraBits({ extra }: { extra: Record<string, unknown> }) {
   );
 }
 
+/**
+ * A column heading as a person reads it.
+ *
+ * A cross-tab turns the values of a field into columns, so a month column arrives as
+ * the stored "2026-11". That is the right thing to store and to export — it sorts —
+ * and the wrong thing to print at the top of a column.
+ */
+export function columnLabel(label: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(label);
+  if (!m) return label;
+  const name = MONTH_NAMES[Number(m[2]) - 1];
+  return name ? `${name} ${m[1]}` : label;
+}
+
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July",
+                     "August", "September", "October", "November", "December"];
+
 const isNumber = (c: ReportColumnOut): boolean =>
   c.t === "money" || c.t === "qty" || c.t === "num" || c.t === "pct";
 
@@ -231,7 +246,9 @@ function show(row: ReportRow, c: ReportColumnOut): React.ReactNode {
     return <span className="num">{Number(v).toLocaleString("en-GB")}</span>;
   }
   if (c.t === "pct") return <span className="num">{Number(v).toFixed(1)}%</span>;
-  if (c.t === "date") return <span className="num">{String(v).slice(0, 10)}</span>;
+  // dd/mm/yyyy, like every other date on screen. The export keeps the ISO date, which
+  // is what sorts in a spreadsheet column.
+  if (c.t === "date") return <span className="num">{formatDay(`${String(v).slice(0, 10)}T06:00:00Z`)}</span>;
   return String(v);
 }
 

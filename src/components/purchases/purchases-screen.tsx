@@ -4,6 +4,7 @@ import * as React from "react";
 import {
   Check, ClipboardList, FileText, Printer, ShoppingCart, Trash2, TriangleAlert,
 } from "lucide-react";
+import { PrintSheet } from "@/components/print/print-sheet";
 import { useStaff } from "@/components/staff-provider";
 import { SerialEntry } from "@/components/stock/serial-entry";
 import { Button } from "@/components/ui/button";
@@ -953,28 +954,25 @@ function ReceiveAgainstPo({
 // ---------------------------------------------------------------------------
 
 function PoPrint({ po, onBack }: { po: PurchaseOrderRow; onBack: () => void }) {
-  const { branch, staff } = useStaff();
+  const { branch } = useStaff();
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap gap-2 print:hidden">
+      <div className="no-print flex flex-wrap gap-2">
         <Button onClick={() => window.print()}>
           <Printer className="size-4" aria-hidden /> Print this
         </Button>
         <Button variant="ghost" onClick={onBack}>Back to the orders</Button>
       </div>
 
-      <article className="flex flex-col gap-4 rounded-xl border border-line bg-surface p-6">
-        <header className="flex flex-wrap items-start justify-between gap-3 border-b border-line pb-3">
-          <div>
-            <h2 className="text-lg font-bold">{staff.shopName}</h2>
-            <p className="text-[13px] text-muted">Purchase order</p>
-          </div>
-          <div className="text-right">
-            <p className="code font-bold">{po.poNo}</p>
-            <p className="text-[13px] text-muted">{formatDay(po.createdAt)}</p>
-          </div>
-        </header>
-
+      <PrintSheet
+        title="Purchase Order"
+        aside={<>
+          <p className="code font-bold">{po.poNo}</p>
+          <p className="num">{formatDay(po.createdAt)}</p>
+        </>}
+        className="flex flex-col gap-4 rounded-xl border border-line bg-surface p-6 print:border-0 print:p-0"
+        footNote={po.note || undefined}
+      >
         <div className="flex flex-wrap justify-between gap-4">
           <div>
             <p className="text-[13px] text-muted">To</p>
@@ -1024,8 +1022,7 @@ function PoPrint({ po, onBack }: { po: PurchaseOrderRow; onBack: () => void }) {
           </div>
         </dl>
 
-        {po.note && <p className="text-[13px] text-muted">{po.note}</p>}
-      </article>
+      </PrintSheet>
     </div>
   );
 }

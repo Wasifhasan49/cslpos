@@ -621,8 +621,13 @@ export function createDemoBackend(): Backend {
     role: "owner",
     discountLimitPct: 5,
     shopName: DEMO_SHOP_NAME,
+    letterhead: {
+      shopName: DEMO_SHOP_NAME, logoUrl: null, address: null, phone: null,
+      email: null, binVat: null,
+    },
     hasPin: true,
-    branches: branches.map(({ id, name, code, locations }) => ({ id, name, code, locations })),
+    branches: branches.map(({ id, name, code, locations, address, phone }) =>
+      ({ id, name, code, locations, address, phone })),
   };
 
   const team: StaffMember[] = [
@@ -931,7 +936,15 @@ export function createDemoBackend(): Backend {
 
   const api: Backend = {
     mode: "demo",
-    async currentStaff(): Promise<StaffLookup> { return { kind: "ok", staff }; },
+    async currentStaff(): Promise<StaffLookup> {
+      // Built fresh, not once: the owner can change the shop's name or upload a logo
+      // in Settings, and the next printout has to carry it.
+      return { kind: "ok", staff: { ...staff, shopName: shopDetails.name, letterhead: {
+        shopName: shopDetails.name, logoUrl: shopDetails.logoUrl,
+        address: shopDetails.address, phone: shopDetails.phone,
+        email: shopDetails.email, binVat: shopDetails.binVat,
+      } } };
+    },
     async listCategories() { return DEMO_CATEGORIES; },
     async listProducts(branchId: string, priceListId?: string | null) {
       branchOr404(branchId);
@@ -1419,6 +1432,7 @@ export function createDemoBackend(): Backend {
         phone: values.phone !== undefined ? (values.phone as string) : shopDetails.phone,
         email: values.email !== undefined ? (values.email as string) : shopDetails.email,
         binVat: values.bin_vat !== undefined ? (values.bin_vat as string) : shopDetails.binVat,
+        logoUrl: values.logo_url !== undefined ? (values.logo_url as string | null) : shopDetails.logoUrl,
         receiptFooter: values.receipt_footer !== undefined ? (values.receipt_footer as string) : shopDetails.receiptFooter,
         invoicePrefix: (values.invoice_prefix as string)?.toUpperCase() || shopDetails.invoicePrefix,
         aitPct: values.ait_pct !== undefined ? Number(values.ait_pct) || 0 : shopDetails.aitPct,

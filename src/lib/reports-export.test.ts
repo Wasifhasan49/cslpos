@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  cellValue, journalToCsv, journalToTallyXml, periodWords, reportToCsv,
+  cellValue, journalToCsv, journalToTallyXml, periodShown, periodWords, reportToCsv,
 } from "./reports-export";
 import type { JournalExport, ReportResult, ReportRow } from "./types";
 
@@ -57,11 +57,19 @@ describe("getting a report out", () => {
     expect(csv).toContain('"Smith, ""Bob"" & Co"');
   });
 
-  it("says the period the way the printed page does", () => {
+  it("says the period in ISO for the export, which is what sorts in a spreadsheet", () => {
     expect(periodWords(report())).toBe("2026-10-01 to 2026-10-26");
     expect(periodWords(report({ dateMode: "as_on", filters: { asOn: "2026-10-26" } })))
       .toBe("As on 2026-10-26");
     expect(periodWords(report({ dateMode: "none", filters: {} }))).toBe("");
+  });
+
+  it("and in dd/mm/yyyy on the printed page, which is what a shop reads", () => {
+    expect(periodShown(report())).toBe("01/10/2026 to 26/10/2026");
+    expect(periodShown(report({ dateMode: "as_on", filters: { asOn: "2026-10-26" } })))
+      .toBe("As on 26/10/2026");
+    // Nothing to rewrite, and nothing broken by looking.
+    expect(periodShown(report({ dateMode: "none", filters: {} }))).toBe("");
   });
 
   it("a report in blocks exports one sheet per block", () => {

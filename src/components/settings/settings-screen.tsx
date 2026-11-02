@@ -10,6 +10,7 @@ import {
   DOC_TYPE_LABELS, FEATURE_SWITCHES, MANAGER_SHARES, PERMISSION_AREA_LABELS,
   SETTING_LISTS, type FieldSpec, type ListSpec,
 } from "@/lib/settings-schema";
+import { logoDataUrl } from "@/lib/logo";
 import { formatTaka } from "@/lib/sale";
 import type {
   EmiPlan, Role, SettingRow, SettingsBundle, StaffMember,
@@ -325,8 +326,25 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
     claim_approval: s.claimApproval,
     voucher_approval: s.voucherApproval,
   });
+  // The logo is saved on its own rather than with the rest of the form: somebody who
+  // picks a file expects it to be the shop's logo from that moment, not after they
+  // find the Save button at the bottom of a long page.
+  const [logo, setLogo] = React.useState(s.logoUrl);
+  const [logoError, setLogoError] = React.useState("");
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm({ ...form, [k]: e.target.value });
+
+  const pickLogo = async (file: File | null) => {
+    setLogoError("");
+    if (!file) return;
+    try {
+      const url = await logoDataUrl(file);
+      setLogo(url);
+      await run(() => backend.saveShopDetails({ logo_url: url }), true);
+    } catch (e) {
+      setLogoError(e instanceof Error ? e.message : "That image could not be used.");
+    }
+  };
 
   return (
     <form
@@ -351,6 +369,42 @@ function ShopSection({ bundle, busy, readOnly, run }: SectionProps) {
       <Field label="Address" hint="Printed on receipts.">
         <Input value={form.address} onChange={set("address")} disabled={readOnly} />
       </Field>
+      {/* Not a <Field>: there is no one input to label, and pointing a label at a row
+          of buttons is worse than not having one. */}
+      <div className="flex flex-col gap-1.5">
+        <Label>Logo</Label>
+        <div className="flex flex-wrap items-center gap-3">
+          {/* A data URL out of the shop's own settings, with no size known ahead of
+              time, so next/image has nothing to work with. */}
+          {logo ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={logo} alt="The shop&rsquo;s logo" className="h-12 w-auto max-w-[180px] object-contain" />
+          ) : (
+            <span className="text-[13px] text-muted">None yet.</span>
+          )}
+          <label className="inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-line-strong px-4 text-[15px] font-medium hover:bg-subtle">
+            {logo ? "Change it" : "Pick a file"}
+            <input
+              type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml"
+              className="sr-only" disabled={readOnly || busy}
+              onChange={(e) => { void pickLogo(e.target.files?.[0] ?? null); e.target.value = ""; }}
+            />
+          </label>
+          {logo && (
+            <Button
+              type="button" variant="ghost" disabled={readOnly || busy}
+              onClick={() => { setLogo(null); void run(() => backend.saveShopDetails({ logo_url: null }), true); }}
+            >
+              Take it off
+            </Button>
+          )}
+        </div>
+        <span className="text-xs text-muted">
+          Goes at the top of every printed report, invoice and statement. A PNG with a
+          see-through background prints best.
+        </span>
+        {logoError && <p className="text-[13px] text-bad-ink">{logoError}</p>}
+      </div>
       <div className="flex flex-wrap gap-3">
         <div className="flex-[1_1_200px]">
           <Field label="Phone"><Input value={form.phone} onChange={set("phone")} disabled={readOnly} className="num" /></Field>

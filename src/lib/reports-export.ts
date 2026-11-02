@@ -15,6 +15,7 @@
  * names, then import the year. The CSV is there for the accountant who would rather map
  * the columns themselves, which in practice is most of them.
  */
+import { formatDay } from "./sale";
 import type { JournalExport, ReportColumnOut, ReportResult, ReportRow } from "./types";
 
 /** What a cell should say. Money and quantity come out as numbers, so Excel can add them. */
@@ -74,7 +75,13 @@ export function reportToCsv(r: ReportResult): string {
   return out.join("\n");
 }
 
-/** The period, in the words the printed page uses. */
+/**
+ * The period, as the export writes it: ISO dates, which sort properly in a spreadsheet
+ * column and are what anybody opening the CSV in another tool expects.
+ *
+ * The screen and the printed page use `periodShown()` instead, because a shopkeeper
+ * reads 02/11/2026.
+ */
 export function periodWords(r: ReportResult): string {
   const f = r.filters;
   if (r.dateMode === "as_on") return `As on ${f.asOn ?? "today"}`;
@@ -83,6 +90,11 @@ export function periodWords(r: ReportResult): string {
   if (f.from) return `From ${f.from}`;
   if (f.to) return `Up to ${f.to}`;
   return "Everything so far";
+}
+
+/** The same period in the words a shop reads: dd/mm/yyyy, Dhaka. */
+export function periodShown(r: ReportResult): string {
+  return periodWords(r).replace(/\d{4}-\d{2}-\d{2}/g, (d) => formatDay(`${d}T06:00:00Z`));
 }
 
 /** Build the .xlsx. exceljs is loaded only when somebody actually asks for one. */

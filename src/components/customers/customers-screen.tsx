@@ -4,6 +4,7 @@ import * as React from "react";
 import {
   Check as CheckIcon, Copy, HandCoins, Pencil, Plus, Printer, Search, TriangleAlert, Users,
 } from "lucide-react";
+import { PrintSheet } from "@/components/print/print-sheet";
 import { useStaff } from "@/components/staff-provider";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
@@ -709,31 +710,27 @@ function CollectForm({
 }
 
 function StatementPrint({ st, onBack }: { st: CustomerStatement; onBack: () => void }) {
-  const { staff } = useStaff();
   let running = 0;
   return (
     <div className="flex flex-col gap-3 border-t border-subtle px-3 py-3">
-      <div className="flex flex-wrap gap-2 print:hidden">
+      <div className="no-print flex flex-wrap gap-2">
         <Button onClick={() => window.print()}>
           <Printer className="size-4" aria-hidden /> Print
         </Button>
         <Button variant="ghost" onClick={onBack}>Back</Button>
       </div>
 
-      <article className="flex flex-col gap-4 rounded-xl border border-line bg-surface p-6">
-        <header className="flex flex-wrap items-start justify-between gap-3 border-b border-line pb-3">
-          <div>
-            <h2 className="text-lg font-bold">{staff.shopName}</h2>
-            <p className="text-[13px] text-muted">Customer statement</p>
-          </div>
-          <div className="text-right">
-            <p className="font-semibold">{st.name}</p>
-            <p className="num text-[13px] text-muted">{st.phone}</p>
-            {st.company && <p className="text-[13px] text-muted">{st.company}</p>}
-            {st.binVat && <p className="code text-[13px] text-muted">BIN {st.binVat}</p>}
-          </div>
-        </header>
-
+      <PrintSheet
+        title="Customer Statement"
+        subtitle={`As on ${formatDay(new Date())}`}
+        aside={<>
+          <p className="font-semibold">{st.name}</p>
+          <p className="num">{st.phone}</p>
+          {st.company && <p>{st.company}</p>}
+          {st.binVat && <p className="code">BIN {st.binVat}</p>}
+        </>}
+        className="flex flex-col gap-4 rounded-xl border border-line bg-surface p-6 print:border-0 print:p-0"
+      >
         <table className="w-full text-[15px]">
           <thead>
             <tr className="border-b border-line text-left text-[13px] text-muted">
@@ -780,7 +777,7 @@ function StatementPrint({ st, onBack }: { st: CustomerStatement; onBack: () => v
             </div>
           )}
         </div>
-      </article>
+      </PrintSheet>
     </div>
   );
 }

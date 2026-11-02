@@ -17,6 +17,29 @@ export interface Branch {
   /** Short, and it goes in every document number. */
   code: string;
   locations: StockLocation[];
+  /** For the letterhead on anything printed from this branch. Optional because the
+   *  demo and the tests build branches by hand and a header without an address is
+   *  perfectly printable. */
+  address?: string | null;
+  phone?: string | null;
+}
+
+/**
+ * What goes at the top of every printed page: the shop's own name, logo and contact
+ * details, from its settings.
+ *
+ * It travels with the answer to "who is signed in?" because every print button in the
+ * app needs it and none of them should cost a round trip. Nothing here is ever
+ * hard-coded: this is a product for many shops.
+ */
+export interface Letterhead {
+  shopName: string;
+  /** A data URL, so a shop's logo needs no file storage set up. Null until uploaded. */
+  logoUrl: string | null;
+  address: string | null;
+  phone: string | null;
+  email: string | null;
+  binVat: string | null;
 }
 
 /** A branch as the owner administers it, with the fields the switcher doesn't need. */
@@ -33,6 +56,8 @@ export interface Staff {
   role: Role;
   discountLimitPct: number;
   shopName: string;
+  /** The shop's printed header, for anything this person prints. */
+  letterhead: Letterhead;
   /** Whether this person has an approval PIN. The hash itself is never readable, so
    *  the PIN screen asks the database. */
   hasPin: boolean;
