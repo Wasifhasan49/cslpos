@@ -1,2 +1,6 @@
 allowBuilds:
+  esbuild: true
   unrs-resolver: false
+
+# Do not fail the install over a build script nobody has decided on; just warn.
+strictDepBuilds: false
