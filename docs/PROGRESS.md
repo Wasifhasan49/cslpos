@@ -57,7 +57,19 @@ One line per prompt from docs/BUILD_PROMPTS.md, newest at the bottom.
   attributes, gifts, purchase-price fixing, and the printable price view.
 
 
-- Supabase: **the live project is set up and current** (31 Oct 2026). All 25 migrations
+- Supabase: **the live project is current as of 3 Nov 2026.** The five migrations from
+  `20261101000001_duplicate_code.sql` to `20261102000004_invoice_fields.sql` are applied.
+  Checking it found an older problem: `20261017120000_auth_and_pin_hardening.sql` had
+  only ever been applied **in part** — the `pin_attempts` table and the `has_pin`,
+  `list_approvers`, `verify_manager_pin` and `set_staff_access` functions were never
+  created, which is what made the app say "The database tables aren't set up yet" (the
+  counter calls `list_approvers` as it loads). The missing block was applied, as was the
+  `drop function` the same migration should have run — a pre-branches `complete_sale`
+  overload was still there and still executable by any signed-in user. Everything the
+  migrations define now exists on the live project: functions, tables and every RPC the
+  client calls. **New migrations are applied to the live project as they are written.**
+
+- Supabase, earlier: **set up** (31 Oct 2026). All 25 migrations
   from `20261025000001_branches.sql` to `20261026000025_report_defs.sql` are applied, and
   `pnpm shop:init` created **Computer Services** with its **Agargaon (AGR)** branch, a
   Main store, and the usual defaults (units, payment methods, warranty terms, role

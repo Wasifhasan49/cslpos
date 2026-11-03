@@ -57,7 +57,10 @@ studying it: **`docs/notes/bms.md`**. The three that matter most —
 ## Where things live
 
 - `supabase/migrations/` — timestamped, append-only. **Never edit an applied migration**;
-  `create or replace` a function in a later one instead.
+  `create or replace` a function in a later one instead. **Apply every new migration to
+  the live Supabase project in the same session you write it, and say so** — the live
+  project has no migration table, so nothing else will notice a gap. Ask Wasif for the
+  pooler connection string if you do not have it.
 - `supabase/tests/sales_rules_test.sql` — every database rule, run by `pnpm test:db`
   against a local Postgres. 621 checks. Add to it whenever you add a rule.
 - `src/lib/backend/` — the `Backend` interface, with `supabase.ts` and `demo.ts`.
