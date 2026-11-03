@@ -190,9 +190,23 @@ describe("suggesting category and brand clean-ups", () => {
     expect(fixes[0]).toMatchObject({ from: "Accesories", to: "Accessories" });
   });
 
-  it("picks the more common spelling when a file disagrees with itself", () => {
-    const fixes = suggestCleanups(["Converter", "Converter", "Converer"]);
-    expect(fixes.find((f) => f.from === "Converer")?.to).toBe("Converter");
+  it("says nothing about two names that are both used in the file", () => {
+    // Both are in the catalogue on purpose: "HeadPhone" and "EarPhone" are two kinds of
+    // thing, not one thing spelled two ways, and the shop is the only one who knows.
+    const fixes = suggestCleanups(["HeadPhone", "EarPhone"], ["EarPhone"]);
+    expect(fixes).toEqual([]);
+  });
+
+  it("says nothing about short names, which are never misspellings of each other", () => {
+    // Of 22 suggestions on the store's real catalogue, 21 were this: "Hp" into "GPS",
+    // "WD" into "SD", "Mi" into "SD", "UPS" into "GPS".
+    expect(suggestCleanups(["Hp", "WD", "Mi", "UPS"], ["GPS", "SD"])).toEqual([]);
+  });
+
+  it("still catches the one that was right", () => {
+    // "Convarter" against a catalogue that has never spelled it correctly yet.
+    expect(suggestCleanups(["Convarter"], ["Cables"])[0])
+      .toMatchObject({ from: "Convarter", to: "Converter" });
   });
 
   it("leaves names alone when they are already right", () => {

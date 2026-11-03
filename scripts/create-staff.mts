@@ -114,7 +114,10 @@ if (!ROLES.includes(roleRaw as Role)) {
 }
 const role = roleRaw as Role;
 
-const limitRaw = str(args, "discount-limit", "limit") ?? (await ask("Discount limit %, without approval", role === "cashier" ? "5" : "10"));
+// An owner has no discount limit to set: they are the person a limit would be
+// referred to. Asking makes the setup look like the answer matters when it cannot.
+const limitRaw = str(args, "discount-limit", "limit")
+  ?? (role === "owner" ? "100" : await ask("Discount limit %, without approval", role === "cashier" ? "5" : "10"));
 const discountLimit = Number(String(limitRaw).replace("%", "").trim());
 if (!Number.isFinite(discountLimit) || discountLimit < 0 || discountLimit > 100) {
   fail(`"${limitRaw}" isn't a percentage between 0 and 100.`, undefined, "For example: --discount-limit 5");

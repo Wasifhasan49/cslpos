@@ -154,12 +154,19 @@ export function suggestCleanups(values: string[], existing: string[] = []): Clea
 
   const out: Cleanup[] = [];
   const existingByLower = new Map(existing.map((e) => [e.toLowerCase(), e]));
+  const inFile = new Set([...counts.keys()].map((v) => v.toLowerCase()));
 
   for (const [value, count] of counts) {
     const lower = value.toLowerCase();
 
     // Already exactly right.
     if (existingByLower.has(lower)) continue;
+
+    // Short names are not misspellings of each other. Two letters apart means nothing
+    // when the name is two or three letters long: it is how "Hp" became a suggestion to
+    // merge into "GPS", "WD" into "SD" and "Mi" into "SD". Below five letters, the only
+    // honest answer is to say nothing.
+    if (lower.length < MIN_MERGE_LENGTH) continue;
 
     const known = KNOWN_FIXES[lower.replace(/\s+/g, "")];
     if (known && known !== value) {
@@ -168,23 +175,26 @@ export function suggestCleanups(values: string[], existing: string[] = []): Clea
     }
 
     // Close to something the shop already uses.
-    const near = existing.find((e) => e.toLowerCase() !== lower && editDistance(lower, e.toLowerCase(), 2) <= 2);
+    const near = existing.find((e) => {
+      const other = e.toLowerCase();
+      if (other === lower || other.length < MIN_MERGE_LENGTH) return false;
+      // Both names are in this file, so both are being used on purpose. "HeadPhone"
+      // and "EarPhone" are two kinds of thing, not one spelled two ways.
+      if (inFile.has(other)) return false;
+      return editDistance(lower, other, 2) <= 2;
+    });
     if (near) {
       out.push({ from: value, to: near, count, why: `the shop already has "${near}"` });
-      continue;
-    }
-
-    // Close to a more common spelling in this same file.
-    let rival: string | null = null;
-    for (const [other, otherCount] of counts) {
-      if (other === value) continue;
-      if (otherCount <= count) continue;
-      if (editDistance(lower, other.toLowerCase(), 2) <= 2) { rival = other; break; }
-    }
-    if (rival) {
-      out.push({ from: value, to: rival, count, why: `"${rival}" is used more often in this file` });
     }
   }
 
   return out.sort((a, b) => b.count - a.count);
 }
+
+/**
+ * The shortest name worth proposing a merge for.
+ *
+ * Of the 22 suggestions the first run at CSL's real catalogue produced, exactly one was
+ * right. The rest were short brand and category names two edits apart by accident.
+ */
+const MIN_MERGE_LENGTH = 5;

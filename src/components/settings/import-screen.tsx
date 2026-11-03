@@ -8,10 +8,12 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/input";
 import { suggestCleanups, type Cleanup } from "@/lib/import/clean";
 import { guessMapping, readSheet, type Grid, type Mapping, type Sheet } from "@/lib/import/parse";
+import { sheetFor } from "@/lib/import/sheets";
 import { linesFrom, type PdfPage, type PdfWord } from "@/lib/import/pdf-text";
 import { readImportFile, UnreadableFile, type Grids } from "@/lib/import/workbook";
 import { importableRows, reviewRows, type ReviewResult } from "@/lib/import/review";
 import { IMPORT_KINDS, kindSpec, type ImportKind } from "@/lib/import/schema";
+import { formatTaka } from "@/lib/sale";
 import type { PriceList } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -119,13 +121,17 @@ export function ImportScreen() {
         return;
       }
       setSheets(found);
-      const first = Object.keys(found)[0];
-      setSheetName(first);
+      // A BMS report PDF comes out as several sheets, and the one that matches what is
+      // being imported is rarely the first: the stock report's first sheet is its
+      // products, so somebody importing opening stock would open on a sheet with no
+      // Quantity column in it and have nothing to map.
+      const picked = sheetFor(kind, Object.keys(found));
+      setSheetName(picked);
       setFileName(file.name);
 
       // The mapping the shop used last time beats a fresh guess.
       const remembered = kind ? await backend.loadImportMapping(kind) : null;
-      const guessed = guessMapping(found[first].headers, kind!);
+      const guessed = guessMapping(found[picked].headers, kind!);
       setMapping(remembered ? { ...guessed, ...remembered } : guessed);
       setStep("map");
     } catch (e) {
@@ -159,7 +165,10 @@ export function ImportScreen() {
       const existingNames = (await backend.listCategories()).map((c) => c.name);
       const fixes = names.length > 0 ? suggestCleanups(names, existingNames) : [];
       setCleanups(fixes);
-      setAccepted(new Set(fixes.map((f) => f.from)));
+      // Unticked. A suggestion is a guess about the shop's own words, and the shop is
+      // the only one who knows: of the 22 the store's real catalogue produced, one was
+      // right. Ticking them by default would have merged the other 21 silently.
+      setAccepted(new Set());
 
       setReview(reviewRows({
         kind, rows: sheet.rows, mapping, existingKeys, knownProductCodes,
@@ -452,8 +461,8 @@ export function ImportScreen() {
             <section className="flex flex-col gap-2 rounded-xl border border-line bg-surface p-4">
               <h3 className="font-semibold">Spelling to tidy up</h3>
               <p className="text-[13px] text-muted">
-                Untick anything that is actually right. Leaving these ticked keeps the
-                shop from ending up with two spellings of the same category.
+                Tick only the ones that really are the same thing spelled two ways.
+                Anything left unticked is imported exactly as the file has it.
               </p>
               {cleanups.map((c) => (
                 <label key={c.from} className="flex min-h-11 items-center gap-2.5 text-[15px]">
@@ -550,7 +559,11 @@ export function ImportScreen() {
           <ul className="flex flex-col gap-1 text-[15px]">
             {Object.entries(result).map(([k, v]) => (
               <li key={k}>
-                <span className="num font-semibold">{v}</span>{" "}
+                {/* The one figure somebody will check against the old system's own
+                    report, so it is written as money rather than as a bare number. */}
+                <span className="num font-semibold">
+                  {k.endsWith("_value") ? formatTaka(v) : v}
+                </span>{" "}
                 {k.replace(/_/g, " ")}
               </li>
             ))}

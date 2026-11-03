@@ -360,11 +360,16 @@ export function CounterScreen() {
           <PackageOpen className="size-12 text-line-strong" aria-hidden />
           <h2 className="text-lg font-semibold">No products yet</h2>
           <p className="text-ink-soft">
-            There is nothing to sell until this shop has a catalogue. Load the sample
-            products with <span className="code">supabase/seed.sql</span>, or run{" "}
-            <span className="code">pnpm doctor</span> to see what else is missing.
+            There is nothing to sell until this shop has a catalogue. Bring one in from
+            the old system, or a spreadsheet, in Settings &rarr; Import — products
+            first, then opening stock and serial numbers.
           </p>
-          <Button onClick={() => window.location.reload()}>Check again</Button>
+          <div className="flex flex-wrap justify-center gap-2">
+            <Button onClick={() => window.location.assign("/settings/import")}>
+              Go to Import
+            </Button>
+            <Button variant="outline" onClick={() => window.location.reload()}>Check again</Button>
+          </div>
         </main>
       ) : (
       <main className="mx-auto box-border flex w-full max-w-[1480px] flex-1 flex-wrap items-start gap-5 px-6 pb-8 pt-5">

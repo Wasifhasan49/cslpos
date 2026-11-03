@@ -1103,6 +1103,38 @@ begin
   raise notice 'ok: re-running the stock report leaves 25 on the shelf, not 50';
 end $$;
 
+-- DONE-WHEN: opening stock arrives WORTH something.
+-- Quantities alone leave the shelf valued at nothing, which takes the trial balance,
+-- the first month's gross profit and "price it at cost plus a markup" with it.
+do $$
+declare r jsonb;
+begin
+  r := public.import_opening_stock('00000000-0000-4000-8000-0000000000b1',
+        '[{"code":"BMS-NEW-2","qty":4,"unit_cost":250,"purchase_date":"02/08/2023"}]'::jsonb,
+        false, 'bms-stock.csv');
+  if (r->>'costed')::int <> 1 then raise exception 'COST NOT TAKEN: %', r; end if;
+  if (r->>'stock_value')::numeric <> 1000 then raise exception 'WRONG STOCK VALUE: %', r; end if;
+  raise notice 'ok: opening stock carries its cost, and says what the shelf is worth';
+end $$;
+select pg_temp.check(
+  (select cost from public.product_costs pc join public.products p on p.id = pc.product_id
+   where p.code = 'BMS-NEW-2') = 250,
+  'the unit cost from the old system becomes the product''s average cost');
+select pg_temp.check(
+  (select unit_cost from public.stock_layers sl join public.products p on p.id = sl.product_id
+   where p.code = 'BMS-NEW-2' and sl.source_kind = 'opening') = 250,
+  'and the opening layer is worth the same, so FIFO and the ageing report agree');
+-- The layer is dated the day the goods arrived, not the day somebody typed them in:
+-- that date is the whole question the stock ageing report answers.
+select pg_temp.check(
+  (select received_on from public.stock_layers sl join public.products p on p.id = sl.product_id
+   where p.code = 'BMS-NEW-2' and sl.source_kind = 'opening') = date '2023-08-02',
+  'the opening layer is dated from the delivery it really came in on');
+select pg_temp.check(
+  (select received_on from public.stock_layers sl join public.products p on p.id = sl.product_id
+   where p.code = 'BMS-NEW-1' and sl.source_kind = 'opening') = public.dhaka_today(),
+  'and stock with no date on it counts as arriving today');
+
 -- Opening stock goes into the branch it was imported for, not into every branch.
 select pg_temp.check(
   coalesce((select qty from public.branch_stock bs join public.products p on p.id = bs.product_id

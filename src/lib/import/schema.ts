@@ -104,6 +104,16 @@ export const IMPORT_KINDS: KindSpec[] = [
         key: "qty", label: "Quantity", required: true, type: "number",
         aliases: ["balance qty", "stock qty", "qty", "quantity", "closing qty", "balance", "stock"],
       },
+      {
+        key: "unit_cost", label: "Unit cost", type: "money",
+        aliases: ["unit cost", "cost", "average cost", "cost price", "purchase price", "rate"],
+        hint: "What the stock on the shelf cost. Without it the shelf is worth nothing and prices can't be worked out from cost.",
+      },
+      {
+        key: "purchase_date", label: "Bought on", type: "text",
+        aliases: ["purchase date", "bought on", "received on", "date", "invoice date"],
+        hint: "Only for the stock ageing report. Left empty, the stock counts as arriving today.",
+      },
       { key: "location", label: "Store", type: "text", aliases: ["store", "warehouse", "location", "store name"] },
     ],
   },

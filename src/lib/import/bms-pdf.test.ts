@@ -148,6 +148,32 @@ describe("Current Stock with Serial And Cost", () => {
     expect(readSerials(SERIALS).totals.qty).toBe(3);
   });
 
+  it("gives every product a dated opening stock line, which no other report can", () => {
+    // The stock report knows the quantity and the cost but not the day the goods
+    // arrived. Without a date an imported shelf looks as though all of it turned up on
+    // go-live day, and the stock ageing report has nothing to say.
+    const { grids } = readSerials(SERIALS);
+    expect(grids["Opening stock"].slice(1)).toEqual([
+      ["21.45 M2253B", 1, 7650, "02/08/2023"],
+      ["22.5W Mini Power Bank", 2, 1470, "29/08/2026"],
+    ]);
+  });
+
+  it("averages the cost over the deliveries, weighted by how many came on each", () => {
+    const twice = page([
+      w("Current Stock(Combined) with Serial And Cost", 164, 681, 12),
+      w("ABC", 276, 554), w("A thing", 206, 541),
+      w("Invoice No", 38, 519), w("Qty", 301, 519), w("Serial", 451, 519), w("Unit Cost", 542, 519),
+      w("CSLPUR202600001", 38, 505), w("02/03/2026", 130, 505), w("IT SOURCE", 183, 505),
+      w("3.00", 323, 484), w("Purchase", 342, 484), w("100.00", 552, 484),
+      w("CSLPUR202600002", 38, 450), w("01/01/2026", 130, 450), w("IT SOURCE", 183, 450),
+      w("1.00", 323, 430), w("Purchase", 342, 430), w("200.00", 552, 430),
+    ]);
+    const { grids } = readSerials([twice]);
+    // (3 × 100 + 1 × 200) ÷ 4 = 125, and the oldest delivery dates the layer.
+    expect(grids["Opening stock"][1]).toEqual(["ABC", 4, 125, "01/01/2026"]);
+  });
+
   it("calls a product serial-tracked only when its units came with serials", () => {
     const { grids } = readSerials(SERIALS);
     expect(grids.Products.slice(1)).toEqual([

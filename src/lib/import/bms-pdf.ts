@@ -178,13 +178,19 @@ export function readSerials(pages: PdfPage[]): BmsRead {
   const serials: Grid = [["Product Code", "Product Description", "Serial", "Status",
                           "Invoice No", "Date", "Supplier Name", "Unit Cost"]];
   const kinds: Grid = [["Product Code", "Product Description", "Serial tracked", "Serials counted"]];
+  // The only place the shop's stock carries a date: what each delivery was, when it
+  // came and what it cost. It is what lets an imported shelf have a stock ageing report
+  // instead of 3,397 units that all arrived on go-live day.
+  const opening: Grid = [["Product Code", "Qty", "Unit Cost", "Purchase Date"]];
 
   // Held in an object because `openBlock` below writes to it: TypeScript cannot narrow
   // a `let` that a closure assigns, and this one is read on every line after.
   const state: { block: SerialBlock | null } = { block: null };
   let headings: string[] = [];
   let qtyTotal = 0;
-  const counted = new Map<string, { name: string; serials: number }>();
+  const counted = new Map<string, {
+    name: string; serials: number; qty: number; cost: number; firstOn: string;
+  }>();
   let pending: { invoiceNo: string; date: string; supplier: string } | null = null;
 
   const openBlock = () => {
@@ -197,7 +203,9 @@ export function readSerials(pages: PdfPage[]): BmsRead {
     }
     headings = [];
     const b = state.block;
-    if (b && !counted.has(b.code)) counted.set(b.code, { name: b.name, serials: 0 });
+    if (b && !counted.has(b.code)) {
+      counted.set(b.code, { name: b.name, serials: 0, qty: 0, cost: 0, firstOn: "" });
+    }
   };
 
   for (const page of pages) {
@@ -229,6 +237,17 @@ export function readSerials(pages: PdfPage[]): BmsRead {
       if (qtyW && block) {
         const qty = money(qtyW.text) ?? 0;
         qtyTotal += qty;
+        const unit = money(line.words.filter((w) => w.x >= 520 && isNumber(w.text)).pop()?.text ?? "");
+        const seen = counted.get(block.code);
+        if (seen) {
+          seen.qty += qty;
+          // Weighted, because a product bought twice at two prices has one average cost
+          // — which is the figure the books carry and the one BMS prints.
+          if (unit !== null) seen.cost += unit * qty;
+          // The oldest delivery still on the shelf is what the ageing report is about.
+          const on = pending?.date ?? "";
+          if (on !== "" && (seen.firstOn === "" || isoOf(on) < isoOf(seen.firstOn))) seen.firstOn = on;
+        }
         const status = line.words.find((w) => w.x >= 340 && w.x < 420 && !isNumber(w.text));
         const serial = line.words.find((w) => w.x >= 390 && w.x < 530 && w !== status);
         const cost = line.words.filter((w) => w.x >= 520 && isNumber(w.text)).pop();
@@ -236,7 +255,6 @@ export function readSerials(pages: PdfPage[]): BmsRead {
           serials.push([block.code, block.name, serial.text, status?.text ?? "",
                         pending?.invoiceNo ?? "", pending?.date ?? "", pending?.supplier ?? "",
                         cost ? money(cost.text) ?? "" : ""]);
-          const seen = counted.get(block.code);
           if (seen) seen.serials += 1;
         }
         continue;
@@ -249,12 +267,18 @@ export function readSerials(pages: PdfPage[]): BmsRead {
 
   for (const [code, v] of counted) {
     kinds.push([code, v.name, v.serials > 0 ? "Yes" : "No", v.serials]);
+    if (v.qty > 0) {
+      opening.push([code, v.qty, round2(v.cost / v.qty), v.firstOn]);
+    }
   }
 
   return {
     report: "stock_serials",
-    grids: { "Serial numbers": serials, "Products": kinds },
-    totals: { qty: qtyTotal, products: counted.size, serials: serials.length - 1 },
+    grids: { "Serial numbers": serials, "Products": kinds, "Opening stock": opening },
+    totals: {
+      qty: qtyTotal, products: counted.size, serials: serials.length - 1,
+      cost: round2([...counted.values()].reduce((n, v) => n + v.cost, 0)),
+    },
     warnings: [],
   };
 }
@@ -481,6 +505,12 @@ export function phoneWarning(phones: string[]): string[] {
 }
 
 const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+/** "16/09/2026" as something that sorts. */
+const isoOf = (d: string): string => {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(d.trim());
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : d;
+};
 
 /** Read whichever of the five reports this is. */
 export function readBmsPdf(pages: PdfPage[]): BmsRead {

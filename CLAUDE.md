@@ -62,7 +62,7 @@ studying it: **`docs/notes/bms.md`**. The three that matter most —
   project has no migration table, so nothing else will notice a gap. Ask Wasif for the
   pooler connection string if you do not have it.
 - `supabase/tests/sales_rules_test.sql` — every database rule, run by `pnpm test:db`
-  against a local Postgres. 621 checks. Add to it whenever you add a rule.
+  against a local Postgres. 626 checks. Add to it whenever you add a rule.
 - `src/lib/backend/` — the `Backend` interface, with `supabase.ts` and `demo.ts`.
   **Anything added to the interface needs a demo implementation that mirrors the same
   rules**, or demo mode shows figures the real shop cannot produce.
